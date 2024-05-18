@@ -10,7 +10,8 @@ def validate(args: dict) -> tuple[bool, bool, list[str], dict, dict]:
         over_errors.append("dataset is not present")
     if over_errors:
         return False, False, over_errors, {}, {}
-    args_pass, args_errors, args_data = validate_args(args["args"])
+    model_type = validate_model_type(args["args"])
+    args_pass, args_errors, args_data = validate_args(args["args"], model_type)
     dataset_pass, dataset_errors, dataset_data = validate_dataset_args(args["dataset"])
     over_pass = args_pass and dataset_pass
     over_errors = args_errors + dataset_errors
@@ -21,13 +22,13 @@ def validate(args: dict) -> tuple[bool, bool, list[str], dict, dict]:
         validate_rex(args_data, dataset_data)
         tag_data = validate_save_tags(dataset_data)
         validate_existing_files(args_data)
-    sdxl = validate_sdxl(args_data)
+
     if not over_pass:
-        return False, sdxl, over_errors, args_data, dataset_data, tag_data
-    return True, sdxl, over_errors, args_data, dataset_data, tag_data
+        return False, model_type, over_errors, args_data, dataset_data, tag_data
+    return True, model_type, over_errors, args_data, dataset_data, tag_data
 
 
-def validate_args(args: dict) -> tuple[bool, list[str], dict]:
+def validate_args(args: dict, model_type:str) -> tuple[bool, list[str], dict]:
     # sourcery skip: low-code-quality
     passed_validation = True
     errors = []
@@ -85,12 +86,26 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
         if "fa" in value:
             del value["fa"]
 
-    file_inputs = [
-        {"name": "pretrained_model_name_or_path", "required": True},
-        {"name": "output_dir", "required": True},
-        {"name": "sample_prompts", "required": False},
-        {"name": "logging_dir", "required": False},
-    ]
+    file_inputs = []
+    if model_type == "stable_cascade":
+        file_inputs = [
+            {"name": "stage_c_checkpoint_path", "required": True},
+            {"name": "effnet_checkpoint_path", "required": True},
+            {"name": "text_model_checkpoint_path", "required": True},
+            {"name": "previewer_model_checkpoint_path", "required": False},
+            {"name": "vae", "required": False},
+            {"name": "output_dir", "required": True},
+            {"name": "sample_prompts", "required": False},
+            {"name": "logging_dir", "required": False},
+        ]
+    else:
+        file_inputs = [
+            {"name": "pretrained_model_name_or_path", "required": True},
+            {"name": "output_dir", "required": True},
+            {"name": "vae", "required": False},
+            {"name": "sample_prompts", "required": False},
+            {"name": "logging_dir", "required": False},
+        ]
 
     for file in file_inputs:
         if file["required"] and file["name"] not in output_args:
@@ -232,11 +247,21 @@ def validate_existing_files(args: dict) -> None:
         args["output_name"] = file_name.stem
 
 
-def validate_sdxl(args: dict) -> bool:
-    if "sdxl" not in args:
-        return False
-    del args["sdxl"]
-    return True
+def validate_model_type(args: dict) -> bool:
+    model_type = "sd"
+    if args["general_args"]:
+        general_args = args["general_args"]
+        if general_args.pop("sdxl", None):
+            model_type = "sdxl"
+        elif general_args.pop("stable_cascade", None):
+            model_type = "stable_cascade"
+
+        if model_type != "stable_cascade":
+            general_args.pop("stage_c_checkpoint_path", None)
+            general_args.pop("effnet_checkpoint_path", None)
+            general_args.pop("text_model_checkpoint_path", None)
+            general_args.pop("previewer_checkpoint_path", None)
+    return model_type
 
 
 def validate_save_tags(dataset: dict) -> dict:

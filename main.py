@@ -81,6 +81,7 @@ async def check_path(request: Request) -> JSONResponse:
 
 async def validate_inputs(request: Request) -> JSONResponse:
     if app.state.TRAINING_THREAD and app.state.TRAINING_THREAD.poll() is None:
+        print("Training Already Running")
         return JSONResponse(
             {"detail": "Training Already Running"},
             status_code=status.HTTP_409_CONFLICT,
@@ -124,22 +125,24 @@ async def start_training(request: Request) -> JSONResponse:
             {"detail": "Training Already Running"},
             status_code=status.HTTP_409_CONFLICT,
         )
-    is_sdxl = request.query_params.get("sdxl", "False") == "True"
+    model_type = request.query_params.get("model_type", "sdxl")
     train_type = request.query_params.get("train_mode", "lora")
-    match [train_type, is_sdxl]:
-        case ['lora', False]:
+    match [train_type, model_type]:
+        case ['lora', 'sd']:
             app.state.TRAIN_SCRIPT = "train_network.py"
-        case ['lora', True]:
+        case ['lora', 'sdxl']:
             app.state.TRAIN_SCRIPT = "sdxl_train_network.py"
-        case ['textual_inversion', False]:
+        case ['lora', 'stable_cascade']:
+            app.state.TRAIN_SCRIPT = "stable_cascade_train_c_network.py"
+        case ['textual_inversion', 'sd']:
             app.state.TRAIN_SCRIPT = "train_textual_inversion.py"
-        case ['textual_inversion', True]:
+        case ['textual_inversion', 'sdxl']:
             app.state.TRAIN_SCRIPT = "sdxl_train_textual_inversion.py"
         case _:
             print("Unknown training request: {request.query_params}")
             return JSONResponse({
                         "detail": "Invalid Train Parameters",
-                        "sdxl": is_sdxl,
+                        "modelTypeName": model_type,
                         "train_type": train_type
                     },
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -240,9 +243,16 @@ app.state.MONITOR_THREAD = None
 
 if not app.state.CONFIG.exists():
     with app.state.CONFIG.open("w", encoding="utf-8") as f:
-        f.write(json.dumps({"remote": False}, indent=2))
+        f.write(json.dumps({"remote": False,
+                            "port": 8000,
+                            "host": "",
+                            "log_level": "info",
+                            "access_log": False,
+                            }, indent=2))
 
 config_data = json.loads(app.state.CONFIG.read_text())
+
+host = "127.0.0.1"
 if config_data.get("remote", False):
     app.state.TUNNEL = create_tunnel(config_data)
     if isinstance(app.state.TUNNEL, CloudflaredTunnel):
@@ -250,7 +260,14 @@ if config_data.get("remote", False):
         app.state.TUNNEL.run_tunnel(config=Path(config_path) if config_path else None)
     else:
         app.state.TUNNEL.run_tunnel()
-uvi_config = uvicorn.Config(app, host="0.0.0.0", loop="asyncio", log_level="critical")
+    host = "0.0.0.0"
+
+uvi_config = uvicorn.Config(app,
+                            port=config_data.get("port", 8000),
+                            host=config_data.get("host", host),
+                            loop="asyncio",
+                            log_level=config_data.get("log_level", "info") or "info",
+                            access_log=config_data.get("access_log", False))
 server = uvicorn.Server(config=uvi_config)
 
 if __name__ == "__main__":
