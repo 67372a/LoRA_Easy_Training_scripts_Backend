@@ -85,7 +85,7 @@ def setup_accelerate(platform: str) -> None:
 
 def setup_venv(venv_pip):
     subprocess.check_call(
-        f"{venv_pip} install -U torch torchvision --index-url https://download.pytorch.org/whl/cu121",
+        f"{venv_pip} install -U torch==2.3.* torchvision==0.18.* --index-url https://download.pytorch.org/whl/cu121",
         shell=PLATFORM == "linux",
     )
     subprocess.check_call(
