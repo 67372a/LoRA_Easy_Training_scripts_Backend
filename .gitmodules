@@ -1,6 +1,7 @@
 [submodule "sd_scripts"]
 	path = sd_scripts
-	url = https://github.com/kohya-ss/sd-scripts
+	url = https://github.com/67372a/sd-scripts
+	branch = stable-cascade
 [submodule "LyCORIS"]
 	path = LyCORIS
 	url = https://github.com/KohakuBlueleaf/LyCORIS
