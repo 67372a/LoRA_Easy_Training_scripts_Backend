@@ -15,6 +15,7 @@ import os
 from threading import Thread
 
 from transformers import CLIPTokenizer
+
 tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
 
 
@@ -109,6 +110,7 @@ async def is_training(_: Request) -> JSONResponse:
         }
     )
 
+
 async def tokenize_text(request: Request) -> JSONResponse:
     text = request.query_params.get("text")
     tokens = tokenizer.tokenize(text)
@@ -116,7 +118,9 @@ async def tokenize_text(request: Request) -> JSONResponse:
     # print("Original string:", text)
     # print("Tokenized string:", tokens)
     # print("Token IDs:", token_ids)
-    return JSONResponse({"tokens": tokens, "token_ids": token_ids, "length": len(tokens)})
+    return JSONResponse(
+        {"tokens": tokens, "token_ids": token_ids, "length": len(tokens)}
+    )
 
 
 async def start_training(request: Request) -> JSONResponse:
