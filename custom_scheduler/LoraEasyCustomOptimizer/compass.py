@@ -217,9 +217,9 @@ class CompassExperimental(BaseOptimizer):
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float = 1.4e-4, #Original default 1e-3
-        betas: BETAS = (0.99, 0.999), #Original default 0.99, 0.999
-        weight_decay: float = 0.1, #Original default 0
+        lr: float = 1.4e-4,
+        betas: BETAS = (0.99, 0.999),
+        weight_decay: float = 0.1,
         weight_decouple: bool = True,
         lr_decouple: bool = False,
         max_lr: float = 0.0,
@@ -375,7 +375,6 @@ class CompassExperimental(BaseOptimizer):
                 # ema = ema + (1 - beta1) * grad
                 ema.mul_(beta1).add_(grad, alpha=1 - beta1)
                 # grad = grad + ema * amplification_factor
-                # TODO orginally was modifying the grad in place, but may cause problems, need to investigate
                 grad.add_(ema, alpha=amplification_factor)
                 # ema_squared = ema + (1 - beta2) * grad ** 2
                 ema_squared.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
@@ -421,7 +420,7 @@ class CompassExperimental(BaseOptimizer):
                 # soft warmup
                 bias_correction: float = self.debias(beta1, group['step'])
                 bias_correction_sqrt: float = math.sqrt(self.debias(beta2, group['step']))
-                debiased_lr = lr / bias_correction
+                step_size = lr / bias_correction
 
                 # lr scaler + eps to prevent zero division
                 # denom = exp_avg_sq.sqrt() + group['eps']
@@ -429,28 +428,28 @@ class CompassExperimental(BaseOptimizer):
 
                 if weight_decouple:
                     # Perform stepweight decay
-                    p_fp32.data.mul_(1.0 - (1.0 if fixed_decay else debiased_lr if not lr_decouple else debiased_lr / max_lr) * weight_decay * (1.0 / ema_squared_normalized if stable_decay else 1.0))
+                    p_fp32.data.mul_(1.0 - (1.0 if fixed_decay else step_size if not lr_decouple else step_size / max_lr) * weight_decay * (1.0 / ema_squared_normalized if stable_decay else 1.0))
                 elif weight_decay > 0.0 and grad is not None:
                     grad.add_(p_fp32, alpha=weight_decay)
 
                 if norm_loss_factor > 0:
                     # norm loss
                     correction = 2.0 * norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(eps))
-                    p_fp32.mul_(1.0 - debiased_lr * correction)
+                    p_fp32.mul_(1.0 - step_size * correction)
 
                 if use_softplus:
                     denom = softplus(denom, beta=beta_softplus)
 
-                # TODO Why apply again?
-                # Apply gradient centralization & normalization
-                #if centralization:
-                #    centralize_gradient(grad, gc_conv_only=False)
+                update = grad.div(denom)
 
-                #if normalize_gradients:
-                #    normalize_gradient(grad) 
+                if centralization:
+                    centralize_gradient(update, gc_conv_only=False)
+
+                if normalize_gradients:
+                    normalize_gradient(update) 
 
                 # p = p - lr * grad / denom
-                p_fp32.data.addcdiv_(grad, denom, value=-debiased_lr)
+                p_fp32.data.add_(update, alpha=-step_size)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
