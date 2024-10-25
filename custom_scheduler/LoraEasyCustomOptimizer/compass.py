@@ -505,10 +505,12 @@ class CompassExperimental(BaseOptimizer):
                         alpha=1.0 - self.lookahead_blending_alpha,
                     )
 
-                # pack
-                if p.dtype in {torch.float16, torch.bfloat16}:
-                    copy_stochastic_(state['lookahead_params'], p_fp32)
-                    copy_stochastic_(p, p_fp32)
+                    # pack
+                    if p.dtype in {torch.float16, torch.bfloat16}:
+                        copy_stochastic_(p, p_fp32)
+
+                    state['lookahead_params'].copy_(p)
+
 
 class Compass8Bit(Optimizer):
     r"""
