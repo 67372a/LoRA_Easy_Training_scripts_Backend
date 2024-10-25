@@ -214,7 +214,12 @@ class CompassExperimental(BaseOptimizer):
             improve numerical stability. (default: 1e-8).
         centralization (float):
             center model grad (default: 0.0).
+        :param use_softplus: bool. use softplus to smooth.
+        :param beta_softplus: float. beta.
         :param normalize_gradients: bool. use gradient normalization.
+        :param lookahead_merge_time: int. merge time.
+        :param lookahead_blending_alpha: float. blending alpha.
+        :param norm_loss_factor: float. norm loss factor.
     """
 
     def __init__(
