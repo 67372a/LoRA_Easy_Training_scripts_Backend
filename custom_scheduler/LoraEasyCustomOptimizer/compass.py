@@ -78,6 +78,9 @@ class Compass(Optimizer):
             eps=eps,
             centralization=centralization,
         )
+
+
+
         super(Compass, self).__init__(params, defaults)
 
     def __str__(self) -> str:
@@ -234,6 +237,9 @@ class CompassExperimental(BaseOptimizer):
         norm_loss_factor: float = 0.0001,
         use_softplus: bool = True,
         beta_softplus: float = 50.0,
+        lookahead: bool = True,
+        lookahead_merge_time: int = 5,
+        lookahead_blending_alpha: float = 0.5,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -264,7 +270,15 @@ class CompassExperimental(BaseOptimizer):
             'norm_loss_factor': norm_loss_factor,
             'use_softplus': use_softplus,
             'beta_softplus': beta_softplus,
+            'lookahead': lookahead,
+            'lookahead_merge_time': lookahead_merge_time,
+            'lookahead_blending_alpha': lookahead_blending_alpha,
         }
+
+        self.lookahead = lookahead
+        self.lookahead_merge_time = lookahead_merge_time
+        self.lookahead_blending_alpha = lookahead_blending_alpha
+        self.lookahead_step: int = 0
 
         super(CompassExperimental, self).__init__(params, defaults)
 
@@ -282,6 +296,8 @@ class CompassExperimental(BaseOptimizer):
                 state["ema"] = torch.zeros_like(p.data)
                 # Exponential moving average of squared gradient values
                 state["ema_squared"] = torch.zeros_like(p.data)
+                if self.lookahead:
+                    state['lookahead_params'] = p.clone()
     
     @staticmethod
     def get_rms(x: torch.Tensor) -> float:
@@ -332,6 +348,8 @@ class CompassExperimental(BaseOptimizer):
                     state["ema"] = torch.zeros_like(p.data)
                     # Exponential moving average of squared gradient values
                     state["ema_squared"] = torch.zeros_like(p.data)
+                    if self.lookahead:
+                        state['lookahead_params'] = p.clone()
 
                 # Apply Adaptive Gradient Clipping (AGC)
                 if clip > 0:
@@ -412,6 +430,7 @@ class CompassExperimental(BaseOptimizer):
                 ema, ema_squared = state["ema"], state["ema_squared"]
 
                 if p.dtype in {torch.float16, torch.bfloat16}:
+                    p_fp32 = p.clone().to(torch.float32)
                     grad = grad.to(torch.float32)
                     ema = ema.to(torch.float32)
                     ema_squared = ema_squared.to(torch.float32)
@@ -455,7 +474,41 @@ class CompassExperimental(BaseOptimizer):
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     copy_stochastic_(p, p_fp32)
 
+        if self.lookahead:
+            self.lookahead_process_step()
+
         return loss
+    
+    def lookahead_process_step(self):
+        self.lookahead_step += 1
+        if self.lookahead_step >= self.lookahead_merge_time:
+            self.lookahead_step: int = 0
+            for group in self.param_groups:
+                for p in group['params']:
+                    if p.grad is None:
+                        continue
+
+                    state = self.state[p]
+
+                    p_fp32 = p
+
+                    lookahead_params = state['lookahead_params']
+
+                    if p.dtype in {torch.float16, torch.bfloat16}:
+                        p_fp32 = p.clone().to(torch.float32)
+                        lookahead_params = lookahead_params.to(torch.float32)
+
+
+
+                    p_fp32.mul_(self.lookahead_blending_alpha).add_(
+                        lookahead_params,
+                        alpha=1.0 - self.lookahead_blending_alpha,
+                    )
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state['lookahead_params'], p_fp32)
+                    copy_stochastic_(p, p_fp32)
 
 class Compass8Bit(Optimizer):
     r"""
