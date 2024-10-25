@@ -217,22 +217,22 @@ class CompassExperimental(BaseOptimizer):
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float = 1e-4, #Original default 1e-3
-        betas: BETAS = (0.975, 0.999), #Original default 0.99, 0.999
-        weight_decay: float = 0.001, #Original default 0
+        lr: float = 1.4e-4, #Original default 1e-3
+        betas: BETAS = (0.99, 0.999), #Original default 0.99, 0.999
+        weight_decay: float = 0.1, #Original default 0
         weight_decouple: bool = True,
         lr_decouple: bool = False,
         max_lr: float = 0.0,
-        stable_decay: bool = False,
+        stable_decay: bool = True,
         fixed_decay: bool = False,
-        clip: float = 0.0,
+        clip: float = 0.01,
         clip_eps: float = 1e-3,
-        amp_fac: float = 2.0, #Original default 2.0
+        amp_fac: float = 5.0,
         eps: float = 1e-8,
-        centralization: bool = False,
-        normalize_gradients: bool = False,
-        norm_loss_factor: float = 0.0,
-        use_softplus: bool = False,
+        centralization: bool = True,
+        normalize_gradients: bool = True,
+        norm_loss_factor: float = 0.0001,
+        use_softplus: bool = True,
         beta_softplus: float = 50.0,
         **kwargs,
     ):
