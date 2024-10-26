@@ -1,4 +1,4 @@
-# Authored by: https://github.com/kozistr
+# Authored originally by: https://github.com/kozistr
 # Source: https://github.com/kozistr/pytorch_optimizer/blob/main/pytorch_optimizer/optimizer/came.py
 # Fully uses mixed precision and SR for all states
 # Defaults tuned for lora training based on testing

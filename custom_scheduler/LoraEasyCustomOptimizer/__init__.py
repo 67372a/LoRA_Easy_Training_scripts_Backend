@@ -13,7 +13,7 @@ from LoraEasyCustomOptimizer.lpfadamw import LPFAdamW
 from LoraEasyCustomOptimizer.rmsprop import RMSProp
 from LoraEasyCustomOptimizer.shampoo import ScalableShampoo
 from LoraEasyCustomOptimizer.soap import SOAP
-from pytorch_optimizer import Ranger21
+from LoraEasyCustomOptimizer.ranger21 import Ranger21
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdEMAMix,

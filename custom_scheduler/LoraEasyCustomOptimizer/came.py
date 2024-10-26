@@ -1,4 +1,4 @@
-# Authored by: https://github.com/kozistr
+# Authored originally by: https://github.com/kozistr
 # Source: https://github.com/kozistr/pytorch_optimizer/blob/main/pytorch_optimizer/optimizer/came.py
 # With stochastic rounding added per https://github.com/neggles/neurosis/blob/main/src/neurosis/optimizers/came.py
 
