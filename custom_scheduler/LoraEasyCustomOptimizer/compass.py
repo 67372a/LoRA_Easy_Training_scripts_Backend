@@ -420,7 +420,7 @@ class CompassExperimental(BaseOptimizer):
 
                 state = self.state[p]
 
-                ema, ema_squared = state["ema"], state["ema_squared"]
+                ema_squared = state["ema_squared"]
 
                 if self.use_pnm:
                     if group['step'] % 2 == 1:
@@ -828,7 +828,7 @@ class CompassPlus(BaseOptimizer):
 
                 state = self.state[p]
 
-                ema, ema_squared = state["ema"], state["ema_squared"]
+                ema_squared = state["ema_squared"]
 
                 if self.use_pnm:
                     if group['step'] % 2 == 1:
