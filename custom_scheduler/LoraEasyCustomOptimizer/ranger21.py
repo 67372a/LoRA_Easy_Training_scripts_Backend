@@ -286,7 +286,7 @@ class Ranger21(BaseOptimizer):
                 # stable weight decay
                 self.apply_weight_decay(
                     p=p_fp32,
-                    grad=None,
+                    grad=grad,
                     lr=lr,
                     weight_decay=group['weight_decay'],
                     weight_decouple=group['weight_decouple'],
