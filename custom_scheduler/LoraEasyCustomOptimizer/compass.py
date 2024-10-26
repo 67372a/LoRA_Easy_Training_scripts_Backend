@@ -220,6 +220,8 @@ class CompassExperimental(BaseOptimizer):
         :param lookahead_merge_time: int. merge time.
         :param lookahead_blending_alpha: float. blending alpha.
         :param norm_loss_factor: float. norm loss factor.
+        :param adam_debias: bool. Only correct the denominator to avoid inflating step sizes early in training.
+        
     """
 
     def __init__(
@@ -245,10 +247,15 @@ class CompassExperimental(BaseOptimizer):
         lookahead: bool = True,
         lookahead_merge_time: int = 5,
         lookahead_blending_alpha: float = 0.5,
+        adam_debias: bool = False,
+        use_pnm: bool = False,
+        pnm_beta: float = 0.9,
+        amsgrad: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
         self.validate_betas(betas)
+        self.validate_range(pnm_beta, 'pnm_beta', 0.0, 1.0, range_type='[]')
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
         self.validate_non_negative(max_lr, 'max_lr')
@@ -256,6 +263,11 @@ class CompassExperimental(BaseOptimizer):
         self.validate_non_negative(clip, 'clip_eps')
         self.validate_non_negative(amp_fac, 'amp_fac')
         self.validate_non_negative(centralization, 'centralization')
+        self.validate_non_negative(pnm_beta, 'pnm_beta')
+        self.validate_non_negative(lookahead_blending_alpha, 'lookahead_blending_alpha')
+        self.validate_non_negative(lookahead_merge_time, 'lookahead_merge_time')
+        self.validate_non_negative(beta_softplus, 'beta_softplus')
+        self.validate_non_negative(norm_loss_factor, 'norm_loss_factor')
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -278,12 +290,22 @@ class CompassExperimental(BaseOptimizer):
             'lookahead': lookahead,
             'lookahead_merge_time': lookahead_merge_time,
             'lookahead_blending_alpha': lookahead_blending_alpha,
+            'adam_debias': adam_debias,
+            'use_pnm': use_pnm,
+            'pnm_beta': pnm_beta,
+            'amsgrad': amsgrad,
         }
 
         self.lookahead = lookahead
         self.lookahead_merge_time = lookahead_merge_time
         self.lookahead_blending_alpha = lookahead_blending_alpha
         self.lookahead_step: int = 0
+        self.use_pnm = use_pnm
+        self.adam_debias = adam_debias
+        self.pnm_beta = pnm_beta
+        self.amsgrad = amsgrad
+        self.stable_decay = stable_decay
+        self.beta_softplus = beta_softplus
 
         super(CompassExperimental, self).__init__(params, defaults)
 
@@ -298,11 +320,18 @@ class CompassExperimental(BaseOptimizer):
                 state = self.state[p]
 
                 # Exponential moving average of gradient values
-                state["ema"] = torch.zeros_like(p.data)
+                state["ema"] = torch.zeros_like(p)
                 # Exponential moving average of squared gradient values
-                state["ema_squared"] = torch.zeros_like(p.data)
+                state["ema_squared"] = torch.zeros_like(p)
+
+                if self.use_pnm:
+                    state['neg_ema'] = torch.zeros_like(p)
+
                 if self.lookahead:
                     state['lookahead_params'] = p.clone()
+
+                if self.amsgrad:
+                    state["max_ema_squared"] = torch.zeros_like(p)
     
     @staticmethod
     def get_rms(x: torch.Tensor) -> float:
@@ -341,24 +370,33 @@ class CompassExperimental(BaseOptimizer):
                     raise NoSparseGradientError(str(self))
                 
                 state = self.state[p]
-                
-                param_size += p.numel()
+                p_fp32 = p
 
-                if p.dtype in {torch.float16, torch.bfloat16}:
-                    grad = grad.to(torch.float32)
+                param_size += p.numel()
 
                 # State initialization
                 if len(state) == 0:
                     # Exponential moving average of gradient values
-                    state["ema"] = torch.zeros_like(p.data)
+                    state["ema"] = torch.zeros_like(p)
                     # Exponential moving average of squared gradient values
-                    state["ema_squared"] = torch.zeros_like(p.data)
+                    state["ema_squared"] = torch.zeros_like(p)
+
+                    if self.use_pnm:
+                        state['neg_ema'] = torch.zeros_like(p)
+
                     if self.lookahead:
                         state['lookahead_params'] = p.clone()
 
+                    if self.amsgrad:
+                        state["max_ema_squared"] = torch.zeros_like(p)
+
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    p_fp32 = p.clone().to(torch.float32)
+                    grad = grad.to(torch.float32)
+
                 # Apply Adaptive Gradient Clipping (AGC)
                 if clip > 0:
-                    grad.copy_(agc(p, grad, clip_eps, clip))
+                    grad.copy_(agc(p_fp32, grad, clip_eps, clip))
 
                 # Apply gradient centralization & normalization
                 if centralization:
@@ -384,31 +422,54 @@ class CompassExperimental(BaseOptimizer):
 
                 ema, ema_squared = state["ema"], state["ema_squared"]
 
+                if self.use_pnm:
+                    if group['step'] % 2 == 1:
+                        ema = state['ema']
+                    else:
+                        ema = state['neg_ema']
+                else:
+                    ema = state["ema"]
+
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
                     ema = ema.to(torch.float32)
                     ema_squared = ema_squared.to(torch.float32)
-  
+
                 # bias correction step size
                 # soft warmup
                 bias_correction_sqrt: float = math.sqrt(self.debias(beta2, group['step']))
 
                 # Decay the first and second moment running average coefficient
-                # ema = ema + (1 - beta1) * grad
-                ema.mul_(beta1).add_(grad, alpha=1 - beta1)
+                if self.use_pnm:
+                    ema.mul_(beta1 ** 2).add_(grad, alpha=1.0 - beta1 ** 2)  # fmt: skip     
+                else:
+                    # ema = ema + (1 - beta1) * grad
+                    ema.mul_(beta1).add_(grad, alpha=1 - beta1)
+
                 # grad = grad + ema * amplification_factor
                 grad.add_(ema, alpha=amplification_factor)
                 # ema_squared = ema + (1 - beta2) * grad ** 2
                 ema_squared.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-                ema_squared_sum += (ema_squared / bias_correction_sqrt).sum()
+                if self.stable_decay:
+                    ema_squared_sum += (ema_squared / bias_correction_sqrt).sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
-                    copy_stochastic_(state["ema"], ema)
                     copy_stochastic_(state["ema_squared"], ema_squared)
 
-        ema_squared_normalized = math.sqrt(ema_squared_sum / param_size)
+                    if self.use_pnm:
+                        if group['step'] % 2 == 1:
+                            copy_stochastic_(state["ema"], ema)
+                        else:
+                            copy_stochastic_(state["neg_ema"], ema)
+                    else:
+                        copy_stochastic_(state["ema"], ema)
+
+        if self.stable_decay:
+            ema_squared_normalized = math.sqrt(ema_squared_sum / param_size)
+        else:
+            ema_squared_normalized = ema_squared_sum
 
         # Phase 3 - Weight decay and parameter update
         for group in self.param_groups:
@@ -418,11 +479,8 @@ class CompassExperimental(BaseOptimizer):
             fixed_decay = group["fixed_decay"]
             eps = group["eps"]
             lr_decouple = group["lr_decouple"]
-            stable_decay = group["stable_decay"]
             max_lr = group["max_lr"]
             norm_loss_factor = group["norm_loss_factor"]
-            use_softplus = group["use_softplus"]
-            beta_softplus = group["beta_softplus"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -434,25 +492,47 @@ class CompassExperimental(BaseOptimizer):
                 p_fp32 = p
                 ema, ema_squared = state["ema"], state["ema_squared"]
 
+                if self.use_pnm:
+                    if group['step'] % 2 == 1:
+                        ema, neg_ema = state['ema'], state['ema']
+                    else:
+                        ema, neg_ema = state['neg_ema'], state['neg_ema']
+
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     p_fp32 = p.clone().to(torch.float32)
                     grad = grad.to(torch.float32)
                     ema = ema.to(torch.float32)
                     ema_squared = ema_squared.to(torch.float32)
 
+                    if self.use_pnm:
+                        neg_ema = neg_ema.to(torch.float32)
+
                 # bias correction step size
                 # soft warmup
                 bias_correction: float = self.debias(beta1, group['step'])
                 bias_correction_sqrt: float = math.sqrt(self.debias(beta2, group['step']))
-                step_size = lr / bias_correction
-
+ 
                 # lr scaler + eps to prevent zero division
                 # denom = exp_avg_sq.sqrt() + group['eps']
-                denom = (ema_squared.sqrt() / bias_correction_sqrt).add_(eps)
+                if self.amsgrad:
+                    max_ema_squared = state['max_ema_squared']
+
+                    if p.dtype in {torch.float16, torch.bfloat16}:
+                        max_ema_squared = max_ema_squared.to(torch.float32)
+                        
+                    torch.max(max_ema_squared, ema_squared, out=max_ema_squared)
+                    denom = (max_ema_squared.sqrt() / bias_correction_sqrt).add_(eps)
+
+                    if p.dtype in {torch.float16, torch.bfloat16}:
+                        copy_stochastic_(state['max_ema_squared'], max_ema_squared)
+                else:
+                    denom = (ema_squared.sqrt() / bias_correction_sqrt).add_(eps)
+
+                step_size: float = self.apply_adam_debias(group['adam_debias'], lr, bias_correction)
 
                 if weight_decouple:
                     # Perform stepweight decay
-                    p_fp32.data.mul_(1.0 - (1.0 if fixed_decay else step_size if not lr_decouple else step_size / max_lr) * weight_decay * (1.0 / ema_squared_normalized if stable_decay else 1.0))
+                    p_fp32.data.mul_(1.0 - (1.0 if fixed_decay else step_size if not lr_decouple else step_size / max_lr) * weight_decay * (1.0 / ema_squared_normalized if self.stable_decay else 1.0))
                 elif weight_decay > 0.0 and grad is not None:
                     grad.add_(p_fp32, alpha=weight_decay)
 
@@ -461,15 +541,420 @@ class CompassExperimental(BaseOptimizer):
                     correction = 2.0 * norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(eps))
                     p_fp32.mul_(1.0 - step_size * correction)
 
-                if use_softplus:
-                    denom = softplus(denom, beta=beta_softplus)
+                if self.beta_softplus:
+                    denom = softplus(denom, beta=self.beta_softplus)
 
-                update = grad.div(denom)
+                if self.use_pnm:
+                    noise_norm: float = math.sqrt((1.0 + self.pnm_beta) ** 2 + self.pnm_beta ** 2)       
+                    update = ema.mul(1.0 + self.pnm_beta).add_(neg_ema, alpha=-self.pnm_beta).mul_(1.0 / noise_norm).div_(denom)
+                else:
+                    update = grad.div(denom)
 
                 if centralization:
                     centralize_gradient(update, gc_conv_only=False)
 
                 if normalize_gradients:
+                    normalize_gradient(update) 
+
+                # p = p - lr * grad / denom
+                p_fp32.data.add_(update, alpha=-step_size)
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(p, p_fp32)
+
+        if self.lookahead:
+            self.lookahead_process_step()
+
+        return loss
+    
+    def lookahead_process_step(self):
+        self.lookahead_step += 1
+        if self.lookahead_step >= self.lookahead_merge_time:
+            self.lookahead_step: int = 0
+            for group in self.param_groups:
+                for p in group['params']:
+                    if p.grad is None:
+                        continue
+
+                    state = self.state[p]
+
+                    p_fp32 = p
+
+                    lookahead_params = state['lookahead_params']
+
+                    if p.dtype in {torch.float16, torch.bfloat16}:
+                        p_fp32 = p.clone().to(torch.float32)
+                        lookahead_params = lookahead_params.to(torch.float32)
+
+
+
+                    p_fp32.mul_(self.lookahead_blending_alpha).add_(
+                        lookahead_params,
+                        alpha=1.0 - self.lookahead_blending_alpha,
+                    )
+
+                    # pack
+                    if p.dtype in {torch.float16, torch.bfloat16}:
+                        copy_stochastic_(p, p_fp32)
+
+                    state['lookahead_params'].copy_(p)
+
+class CompassPlus(BaseOptimizer):
+    r"""
+    Arguments:
+        :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+        :param lr: float. learning rate.
+        :param beta0: float. Manages the amplitude of the noise introduced by positive negative momentum
+            While 0.9 is a recommended default value, you can use -0.5 to minimize the noise.
+        :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+        :param use_softplus: bool. use softplus to smooth.
+        :param beta_softplus: float. beta.
+        :param agc_clipping_value: float. Clipping threshold for adaptive gradient clipping.
+        :param agc_eps: float. eps for adaptive gradient clipping.
+        :param amp_fac: float. amplification factor for the first moment filter.
+        :param centralize_gradients: bool. use GC both convolution & fc layers.
+        :param normalize_gradients: bool. use gradient normalization.
+        :param lookahead_merge_time: int. merge time.
+        :param lookahead_blending_alpha: float. blending alpha.
+        :param weight_decay: float. weight decay (L2 penalty).
+        :param weight_decouple: bool. the optimizer uses decoupled weight decay as in AdamW.
+        :param lr_decouple: bool. fully decouple weight decay from learning rate.
+        :param max_lr: float. Max LR used for lr_decouple, should match your defined max LR for training.
+        :param fixed_decay: bool. fix weight decay.
+        :param norm_loss_factor: float. norm loss factor.
+        :param adam_debias: bool. Only correct the denominator to avoid inflating step sizes early in training.
+        :param eps: float. term added to the denominator to improve numerical stability.
+    """
+
+    def __init__(
+        self,
+        params: PARAMETERS,
+        lr: float = 1.4e-4,
+        betas: BETAS = (0.99, 0.999),
+        weight_decay: float = 0.1,
+        weight_decouple: bool = True,
+        lr_decouple: bool = False,
+        max_lr: float = 0.0,
+        stable_decay: bool = True,
+        fixed_decay: bool = False,
+        clip: float = 0.01,
+        clip_eps: float = 1e-3,
+        amp_fac: float = 5.0,
+        eps: float = 1e-8,
+        centralize_gradients: bool = True,
+        normalize_gradients: bool = True,
+        norm_loss_factor: float = 0.0001,
+        use_softplus: bool = True,
+        beta_softplus: float = 50.0,
+        use_lookahead: bool = True,
+        lookahead_merge_time: int = 5,
+        lookahead_blending_alpha: float = 0.5,
+        adam_debias: bool = False,
+        use_pnm: bool = False,
+        pnm_beta: float = 0.9,
+        amsgrad: bool = False,
+        **kwargs,
+    ):
+        self.validate_learning_rate(lr)
+        self.validate_betas(betas)
+        self.validate_range(pnm_beta, 'pnm_beta', 0.0, 1.0, range_type='[]')
+        self.validate_non_negative(weight_decay, 'weight_decay')
+        self.validate_non_negative(eps, 'eps')
+        self.validate_non_negative(max_lr, 'max_lr')
+        self.validate_non_negative(clip, 'clip')
+        self.validate_non_negative(clip, 'clip_eps')
+        self.validate_non_negative(amp_fac, 'amp_fac')
+        self.validate_non_negative(centralize_gradients, 'centralize_gradients')
+        self.validate_non_negative(pnm_beta, 'pnm_beta')
+        self.validate_non_negative(lookahead_blending_alpha, 'lookahead_blending_alpha')
+        self.validate_non_negative(lookahead_merge_time, 'lookahead_merge_time')
+        self.validate_non_negative(beta_softplus, 'beta_softplus')
+        self.validate_non_negative(norm_loss_factor, 'norm_loss_factor')
+
+        defaults: DEFAULTS = {
+            'lr': lr,
+            'betas': betas,
+            'weight_decay' : weight_decay,
+            'weight_decouple' : weight_decouple,
+            'lr_decouple': lr_decouple,
+            'max_lr': max_lr,
+            'stable_decay': stable_decay,
+            'fixed_decay': fixed_decay,
+            'clip': clip,
+            'clip_eps': clip_eps,
+            'amp_fac': amp_fac,
+            'eps': eps,
+            'centralization': centralize_gradients,
+            'normalize_gradients': normalize_gradients,
+            'norm_loss_factor': norm_loss_factor,
+            'use_softplus': use_softplus,
+            'beta_softplus': beta_softplus,
+            'use_lookahead': use_lookahead,
+            'lookahead_merge_time': lookahead_merge_time,
+            'lookahead_blending_alpha': lookahead_blending_alpha,
+            'adam_debias': adam_debias,
+            'use_pnm': use_pnm,
+            'pnm_beta': pnm_beta,
+            'amsgrad': amsgrad,
+        }
+
+        self.use_lookahead = use_lookahead
+        self.lookahead_merge_time = lookahead_merge_time
+        self.lookahead_blending_alpha = lookahead_blending_alpha
+        self.lookahead_step: int = 0
+        self.use_pnm = use_pnm
+        self.adam_debias = adam_debias
+        self.pnm_beta = pnm_beta
+        self.amsgrad = amsgrad
+        self.stable_decay = stable_decay
+        self.centralize_gradients = centralize_gradients
+        self.normalize_gradients = normalize_gradients
+        self.use_softplus = use_softplus
+        self.beta_softplus = beta_softplus
+        self.norm_loss_factor = norm_loss_factor
+        self.lr_decouple = lr_decouple
+        self.weight_decay = weight_decay
+        self.weight_decouple = weight_decouple
+        self.max_lr = max_lr
+        self.fixed_decay = fixed_decay
+        self.eps = eps
+        self.clip = clip
+        self.clip_eps = clip_eps
+
+        super(CompassExperimental, self).__init__(params, defaults)
+
+    def __str__(self) -> str:
+        return 'CompassExperimental'
+    
+    @torch.no_grad()
+    def reset(self):
+        for group in self.param_groups:
+            group['step'] = 0
+            for p in group['params']:
+                state = self.state[p]
+
+                # Exponential moving average of gradient values
+                state["ema"] = torch.zeros_like(p)
+                # Exponential moving average of squared gradient values
+                state["ema_squared"] = torch.zeros_like(p)
+
+                if self.use_pnm:
+                    state['neg_ema'] = torch.zeros_like(p)
+
+                if self.lookahead:
+                    state['lookahead_params'] = p.clone()
+
+                if self.amsgrad:
+                    state["max_ema_squared"] = torch.zeros_like(p)
+    
+    @staticmethod
+    def get_rms(x: torch.Tensor) -> float:
+        r"""Get RMS."""
+        return x.norm(2) / math.sqrt(x.numel())
+
+    @torch.no_grad()
+    def step(self, closure: CLOSURE = None) -> LOSS:
+        loss: LOSS = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        param_size: int = 0
+        ema_squared_sum: float = 1.0
+
+        # Phase 1 - Condition the grads and gather aggregates 
+        for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad
+                if grad.is_sparse:
+                    raise NoSparseGradientError(str(self))
+                
+                state = self.state[p]
+                p_fp32 = p
+
+                param_size += p.numel()
+
+                # State initialization
+                if len(state) == 0:
+                    # Exponential moving average of gradient values
+                    state["ema"] = torch.zeros_like(p)
+                    # Exponential moving average of squared gradient values
+                    state["ema_squared"] = torch.zeros_like(p)
+
+                    if self.use_pnm:
+                        state['neg_ema'] = torch.zeros_like(p)
+
+                    if self.lookahead:
+                        state['lookahead_params'] = p.clone()
+
+                    if self.amsgrad:
+                        state["max_ema_squared"] = torch.zeros_like(p)
+
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    p_fp32 = p.clone().to(torch.float32)
+                    grad = grad.to(torch.float32)
+
+                # Apply Adaptive Gradient Clipping (AGC)
+                if self.clip > 0.0:
+                    grad.copy_(agc(p_fp32, grad, self.clip_eps, self.clip))
+
+                # Apply gradient centralization & normalization
+                if self.centralize_gradients:
+                    centralize_gradient(grad, gc_conv_only=False)
+
+                if self.normalize_gradients:
+                    normalize_gradient(grad)
+
+        if param_size == 0:
+            raise ZeroParameterSizeError()
+
+        # Phase 2
+        for group in self.param_groups:
+            beta1, beta2 = group["betas"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                grad = p.grad
+
+                state = self.state[p]
+
+                ema, ema_squared = state["ema"], state["ema_squared"]
+
+                if self.use_pnm:
+                    if group['step'] % 2 == 1:
+                        ema = state['ema']
+                    else:
+                        ema = state['neg_ema']
+                else:
+                    ema = state["ema"]
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
+                    ema = ema.to(torch.float32)
+                    ema_squared = ema_squared.to(torch.float32)
+
+                # bias correction step size
+                # soft warmup
+                bias_correction_sqrt: float = math.sqrt(self.debias(beta2, group['step']))
+
+                # Decay the first and second moment running average coefficient
+                if self.use_pnm:
+                    ema.mul_(beta1 ** 2).add_(grad, alpha=1.0 - beta1 ** 2)  # fmt: skip     
+                else:
+                    # ema = ema + (1 - beta1) * grad
+                    ema.mul_(beta1).add_(grad, alpha=1 - beta1)
+
+                # grad = grad + ema * amp_fac
+                grad.add_(ema, alpha=self.amp_fac)
+                # ema_squared = ema + (1 - beta2) * grad ** 2
+                ema_squared.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                if self.stable_decay:
+                    ema_squared_sum += (ema_squared / bias_correction_sqrt).sum()
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state["ema_squared"], ema_squared)
+
+                    if self.use_pnm:
+                        if group['step'] % 2 == 1:
+                            copy_stochastic_(state["ema"], ema)
+                        else:
+                            copy_stochastic_(state["neg_ema"], ema)
+                    else:
+                        copy_stochastic_(state["ema"], ema)
+
+        if self.stable_decay:
+            ema_squared_normalized = math.sqrt(ema_squared_sum / param_size)
+        else:
+            ema_squared_normalized = ema_squared_sum
+
+        # Phase 3 - Weight decay and parameter update
+        for group in self.param_groups:
+            lr = group["lr"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                grad = p.grad
+
+                state = self.state[p]
+
+                p_fp32 = p
+                ema, ema_squared = state["ema"], state["ema_squared"]
+
+                if self.use_pnm:
+                    if group['step'] % 2 == 1:
+                        ema, neg_ema = state['ema'], state['ema']
+                    else:
+                        ema, neg_ema = state['neg_ema'], state['neg_ema']
+
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    p_fp32 = p.clone().to(torch.float32)
+                    grad = grad.to(torch.float32)
+                    ema = ema.to(torch.float32)
+                    ema_squared = ema_squared.to(torch.float32)
+
+                    if self.use_pnm:
+                        neg_ema = neg_ema.to(torch.float32)
+
+                # bias correction step size
+                # soft warmup
+                bias_correction: float = self.debias(beta1, group['step'])
+                bias_correction_sqrt: float = math.sqrt(self.debias(beta2, group['step']))
+ 
+                # lr scaler + eps to prevent zero division
+                # denom = exp_avg_sq.sqrt() + group['eps']
+                if self.amsgrad:
+                    max_ema_squared = state['max_ema_squared']
+
+                    if p.dtype in {torch.float16, torch.bfloat16}:
+                        max_ema_squared = max_ema_squared.to(torch.float32)
+                        
+                    torch.max(max_ema_squared, ema_squared, out=max_ema_squared)
+                    denom = (max_ema_squared.sqrt() / bias_correction_sqrt).add_(self.eps)
+
+                    if p.dtype in {torch.float16, torch.bfloat16}:
+                        copy_stochastic_(state['max_ema_squared'], max_ema_squared)
+                else:
+                    denom = (ema_squared.sqrt() / bias_correction_sqrt).add_(self.eps)
+
+                step_size: float = self.apply_adam_debias(group['adam_debias'], lr, bias_correction)
+
+                if self.weight_decouple:
+                    # Perform stepweight decay
+                    p_fp32.data.mul_(1.0 - (1.0 if self.fixed_decay else step_size if not self.lr_decouple else step_size / self.max_lr) * self.weight_decay * (1.0 / ema_squared_normalized if self.stable_decay else 1.0))
+                elif self.weight_decay > 0.0 and grad is not None:
+                    grad.add_(p_fp32, alpha=self.weight_decay)
+
+                if self.norm_loss_factor > 0.0:
+                    # norm loss
+                    correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(self.eps))
+                    p_fp32.mul_(1.0 - step_size * correction)
+
+                if self.use_softplus:
+                    denom = softplus(denom, beta=self.beta_softplus)
+
+                if self.use_pnm:
+                    noise_norm: float = math.sqrt((1.0 + self.pnm_beta) ** 2 + self.pnm_beta ** 2)       
+                    update = ema.mul(1.0 + self.pnm_beta).add_(neg_ema, alpha=-self.pnm_beta).mul_(1.0 / noise_norm).div_(denom)
+                else:
+                    update = grad.div(denom)
+
+                if self.centralize_gradients:
+                    centralize_gradient(update, gc_conv_only=False)
+
+                if self.normalize_gradients:
                     normalize_gradient(update) 
 
                 # p = p - lr * grad / denom
@@ -798,7 +1283,6 @@ class Compass8BitBNB(Optimizer):
 
                 # State initialization
                 if len(state) == 0:
-                    state["step"] = 0
                     # Exponential moving average of gradient values
                     state["ema"] = quantize_blockwise(
                         torch.zeros_like(p.data),
