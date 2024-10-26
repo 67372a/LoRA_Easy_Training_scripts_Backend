@@ -51,6 +51,11 @@ class LPFAdamW(Optimizer):
     def step(self, closure=None):
         loss = closure() if closure is not None else None
         for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -62,7 +67,6 @@ class LPFAdamW(Optimizer):
 
                 # State initialization
                 if len(state) == 0:
-                    state["step"] = 0
                     # Exponential moving average of gradient values
                     state["smoothing"] = torch.zeros_like(p.data)
                     state["ema"] = torch.zeros_like(p.data)
@@ -84,7 +88,6 @@ class LPFAdamW(Optimizer):
                 lr = group["lr"]
                 weight_decay = group["weight_decay"]
                 centralization = group["centralization"]
-                state["step"] += 1
 
                 # center the gradient vector
                 if centralization != 0 and grad.dim() > 1:
@@ -94,8 +97,8 @@ class LPFAdamW(Optimizer):
 
                 # bias correction step size
                 # soft warmup
-                bias_correction = 1 - beta2 ** state["step"]
-                bias_correction_sqrt = (1 - beta3 ** state["step"]) ** (1 / 2)
+                bias_correction = 1 - beta2 ** group["step"]
+                bias_correction_sqrt = (1 - beta3 ** group["step"]) ** (1 / 2)
                 step_size = lr / bias_correction
 
                 # Decay the first and second moment running average coefficient

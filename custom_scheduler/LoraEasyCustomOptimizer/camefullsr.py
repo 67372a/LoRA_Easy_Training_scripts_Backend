@@ -100,8 +100,6 @@ class CAMEFullSR(BaseOptimizer):
                 if group['ams_bound']:
                     state['exp_avg_sq_hat'] = torch.zeros_like(grad)
 
-                state['RMS'] = 0.0
-
     @staticmethod
     def get_options(shape: Tuple[int, ...]) -> bool:
         r"""Get `factored`."""
@@ -171,8 +169,6 @@ class CAMEFullSR(BaseOptimizer):
                     if group['ams_bound']:
                         state['exp_avg_sq_hat'] = torch.zeros_like(grad)
 
-                    state['RMS'] = 0.0
-
                 p_data_fp32 = p
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
@@ -180,8 +176,6 @@ class CAMEFullSR(BaseOptimizer):
                     exp_avg = state["exp_avg"].to(torch.float32)
                 else:
                     exp_avg = state["exp_avg"]
-
-                state['RMS'] = self.get_rms(p)
 
                 # center the gradient vector
                 if centralization != 0 and grad.dim() > 1:

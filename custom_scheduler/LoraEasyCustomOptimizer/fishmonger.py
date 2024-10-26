@@ -66,6 +66,11 @@ class FishMonger(Optimizer):
             loss = closure()
 
         for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -78,7 +83,6 @@ class FishMonger(Optimizer):
                 # State initialization
                 diff_amp = group["diff_amp"]
                 if len(state) == 0:
-                    state["step"] = 0
                     # Exponential moving average and squared exponential moving average gradient values
                     state["momentum"] = torch.zeros_like(p.data)
                     state["momentum_slow"] = torch.zeros_like(p.data)
@@ -106,7 +110,6 @@ class FishMonger(Optimizer):
                 weight_decay = group["weight_decay"]
                 clip = 1.0 if (group["clip"] <= 0) else group["clip"]
                 centralization = group["centralization"]
-                state["step"] += 1
                 
                 if diff_amp:
                     if p.dtype in {torch.float16, torch.bfloat16}:
@@ -129,8 +132,8 @@ class FishMonger(Optimizer):
 
                 # bias correction step size
                 # soft warmup
-                fim_beta = (beta2**state["step"] - beta2) / (beta2**state["step"] - 1.0) # Start at 0 beta (I believe this is from Adafactor?)
-                bias_correction = 1 - beta1**state["step"]
+                fim_beta = (beta2**group["step"] - beta2) / (beta2**group["step"] - 1.0) # Start at 0 beta (I believe this is from Adafactor?)
+                bias_correction = 1 - beta1**group["step"]
 
                 # Update fim
                 fim.mul_(fim_beta).addcmul_(momentum, momentum, value=1 - fim_beta)
@@ -151,7 +154,7 @@ class FishMonger(Optimizer):
                 momentum_slow.mul_(beta1).add_(grad_nat, alpha=1 - beta1)
 
                 # Update momentumized natural fim
-                squared_fim_beta = (beta3**state["step"] - beta3) / (beta3**state["step"] - 1.0)
+                squared_fim_beta = (beta3**group["step"] - beta3) / (beta3**group["step"] - 1.0)
                 momentum_slow_squared.mul_(squared_fim_beta).addcmul_(momentum_slow, momentum_slow, value=1 - squared_fim_beta)
 
                 fim_slow_base = momentum_slow_squared.sqrt() + curr_eps
@@ -274,6 +277,11 @@ class FishMonger8Bit(Optimizer):
             loss = closure()
 
         for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -286,7 +294,6 @@ class FishMonger8Bit(Optimizer):
                 # State initialization
                 diff_amp = group["diff_amp"]
                 if len(state) == 0:
-                    state["step"] = 0
                     # Exponential moving average and squared exponential moving average gradient values
                     state["momentum"] = quantize(
                         torch.zeros_like(p.data),
@@ -340,7 +347,6 @@ class FishMonger8Bit(Optimizer):
                 weight_decay = group["weight_decay"]
                 clip = 1.0 if (group["clip"] <= 0) else group["clip"]
                 centralization = group["centralization"]
-                state["step"] += 1
                 
                 if diff_amp:
                     grad_diff = dequantize(*state["previous_grad"])
@@ -361,8 +367,8 @@ class FishMonger8Bit(Optimizer):
 
                 # bias correction step size
                 # soft warmup
-                fim_beta = (beta2**state["step"] - beta2) / (beta2**state["step"] - 1.0) # Start at 0 beta (I believe this is from Adafactor?)
-                bias_correction = 1 - beta1**state["step"]
+                fim_beta = (beta2**group["step"] - beta2) / (beta2**group["step"] - 1.0) # Start at 0 beta (I believe this is from Adafactor?)
+                bias_correction = 1 - beta1**group["step"]
 
                 # Update fim
                 fim.mul_(fim_beta).addcmul_(momentum, momentum, value=1 - fim_beta)
@@ -383,7 +389,7 @@ class FishMonger8Bit(Optimizer):
                 momentum_slow.mul_(beta1).add_(grad_nat, alpha=1 - beta1)
 
                 # Update momentumized natural fim
-                squared_fim_beta = (beta3**state["step"] - beta3) / (beta3**state["step"] - 1.0)
+                squared_fim_beta = (beta3**group["step"] - beta3) / (beta3**group["step"] - 1.0)
                 momentum_slow_squared.mul_(squared_fim_beta).addcmul_(momentum_slow, momentum_slow, value=1 - squared_fim_beta)
 
                 fim_slow_base = momentum_slow_squared.sqrt() + curr_eps
@@ -526,6 +532,11 @@ class FishMonger8BitBNB(Optimizer):
             loss = closure()
 
         for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -538,7 +549,6 @@ class FishMonger8BitBNB(Optimizer):
                 # State initialization
                 diff_amp = group["diff_amp"]
                 if len(state) == 0:
-                    state["step"] = 0
                     # Exponential moving average and squared exponential moving average gradient values
                     state["momentum"] = quantize_blockwise(
                         torch.zeros_like(p.data),
@@ -586,7 +596,6 @@ class FishMonger8BitBNB(Optimizer):
                 weight_decay = group["weight_decay"]
                 clip = 1.0 if (group["clip"] <= 0) else group["clip"]
                 centralization = group["centralization"]
-                state["step"] += 1
                 
                 if diff_amp:
                     grad_diff = dequantize_blockwise(*state["previous_grad"])
@@ -606,8 +615,8 @@ class FishMonger8BitBNB(Optimizer):
 
                 # bias correction step size
                 # soft warmup
-                fim_beta = (beta2**state["step"] - beta2) / (beta2**state["step"] - 1.0) # Start at 0 beta (I believe this is from Adafactor?)
-                bias_correction = 1 - beta1**state["step"]
+                fim_beta = (beta2**group["step"] - beta2) / (beta2**group["step"] - 1.0) # Start at 0 beta (I believe this is from Adafactor?)
+                bias_correction = 1 - beta1**group["step"]
 
                 # Update fim
                 fim.mul_(fim_beta).addcmul_(momentum, momentum, value=1 - fim_beta)
@@ -628,7 +637,7 @@ class FishMonger8BitBNB(Optimizer):
                 momentum_slow.mul_(beta1).add_(grad_nat, alpha=1 - beta1)
 
                 # Update momentumized natural fim
-                squared_fim_beta = (beta3**state["step"] - beta3) / (beta3**state["step"] - 1.0)
+                squared_fim_beta = (beta3**group["step"] - beta3) / (beta3**group["step"] - 1.0)
                 momentum_slow_squared.mul_(squared_fim_beta).addcmul_(momentum_slow, momentum_slow, value=1 - squared_fim_beta)
 
                 fim_slow_base = momentum_slow_squared.sqrt() + curr_eps

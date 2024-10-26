@@ -63,6 +63,11 @@ class FARMSCrop(Optimizer):
             loss = closure()
 
         for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -72,7 +77,6 @@ class FARMSCrop(Optimizer):
 
                 # State initialization
                 if len(state) == 0:
-                    state["step"] = 0
                     # Fisher information matrix
                     state["fim"] = torch.ones_like(p.data)
                     # Fisher information matrix
@@ -102,11 +106,10 @@ class FARMSCrop(Optimizer):
                 diff_mult = group["diff_mult"]
                 momentum_beta = group["momentum_beta"]
                 momentum_amp = group["momentum_amp"]
-                state["step"] += 1
 
                 # bias correction step size
-                #bias_correction_sqrt = (1 - beta2 ** state["step"]) ** (1 / 2)
-                fim_slow_beta = ((beta2**state["step"] - beta2) / (beta2**state["step"] - 1.0)) ** (1/2)
+                #bias_correction_sqrt = (1 - beta2 ** group["step"]) ** (1 / 2)
+                fim_slow_beta = ((beta2**group["step"] - beta2) / (beta2**group["step"] - 1.0)) ** (1/2)
                 step_size = lr
 
                 # Get previous grad, initialized at 0 (first step is just grad)

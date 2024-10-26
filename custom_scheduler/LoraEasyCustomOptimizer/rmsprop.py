@@ -49,6 +49,11 @@ class RMSProp(Optimizer):
     def step(self, closure=None):
         loss = closure() if closure is not None else None
         for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -60,7 +65,6 @@ class RMSProp(Optimizer):
 
                 # State initialization
                 if len(state) == 0:
-                    state["step"] = 0
                     # Exponential moving average of squared gradient values
                     state["ema_squared"] = torch.zeros_like(p.data)
 
@@ -76,7 +80,6 @@ class RMSProp(Optimizer):
                 lr = group["lr"]
                 weight_decay = group["weight_decay"]
                 centralization = group["centralization"]
-                state["step"] += 1
 
                 # center the gradient vector
                 if centralization != 0 and grad.dim() > 1:
@@ -85,7 +88,7 @@ class RMSProp(Optimizer):
                     )
 
                 # bias correction step size
-                bias_correction_sqrt = (1 - beta ** state["step"]) ** (1 / 2)
+                bias_correction_sqrt = (1 - beta ** group["step"]) ** (1 / 2)
                 step_size = lr
 
                 # ema_squared = ema + (1 - beta2) * grad ** 2
