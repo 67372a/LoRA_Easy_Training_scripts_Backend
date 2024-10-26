@@ -248,9 +248,9 @@ class CompassExperimental(BaseOptimizer):
         lookahead_merge_time: int = 5,
         lookahead_blending_alpha: float = 0.5,
         adam_debias: bool = False,
-        use_pnm: bool = False,
-        pnm_beta: float = 0.9,
-        amsgrad: bool = False,
+        use_pnm: bool = True,
+        pnm_beta: float = 1.0,
+        amsgrad: bool = True,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -606,7 +606,6 @@ class CompassPlus(BaseOptimizer):
         :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
         :param lr: float. learning rate.
         :param beta0: float. Manages the amplitude of the noise introduced by positive negative momentum
-            While 0.9 is a recommended default value, you can use -0.5 to minimize the noise.
         :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
         :param use_softplus: bool. use softplus to smooth.
         :param beta_softplus: float. beta.
@@ -651,9 +650,9 @@ class CompassPlus(BaseOptimizer):
         lookahead_merge_time: int = 5,
         lookahead_blending_alpha: float = 0.5,
         adam_debias: bool = False,
-        use_pnm: bool = False,
-        pnm_beta: float = 0.9,
-        amsgrad: bool = False,
+        use_pnm: bool = True,
+        pnm_beta: float = 1.0,
+        amsgrad: bool = True,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
