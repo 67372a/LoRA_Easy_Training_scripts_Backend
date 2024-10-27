@@ -5,7 +5,7 @@ from LoraEasyCustomOptimizer.utils import OPTIMIZER
 from LoraEasyCustomOptimizer.ademamix import AdEMAMix
 from LoraEasyCustomOptimizer.came import CAME
 from LoraEasyCustomOptimizer.camefullsr import CAMEFullSR
-from LoraEasyCustomOptimizer.compass import Compass, Compass8BitBNB, CompassExperimental
+from LoraEasyCustomOptimizer.compass import Compass, Compass8BitBNB, CompassExperimental, CompassPlus
 from LoraEasyCustomOptimizer.farmscrop import FARMSCrop
 from LoraEasyCustomOptimizer.fcompass import FCompass
 from LoraEasyCustomOptimizer.fishmonger import FishMonger, FishMonger8BitBNB
@@ -31,6 +31,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     SOAP,
     Ranger21,
     CompassExperimental,
+    CompassPlus,
 ]
 
 OPTIMIZERS: Dict[str, OPTIMIZER] = {str(f"{optimizer.__name__}".lower()): optimizer for optimizer in OPTIMIZER_LIST}
