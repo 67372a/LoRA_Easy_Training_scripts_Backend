@@ -187,6 +187,22 @@ class Compass(Optimizer):
     
 class CompassExperimental(BaseOptimizer):
     r"""
+    CompassPlus
+        Components
+            * Adaptive gradient clipping - https://arxiv.org/abs/2102.06171
+            * Gradient centralization - https://arxiv.org/abs/2004.01461v2
+            * Positive-Negative momentum - https://arxiv.org/abs/2103.17182
+            * Norm loss - https://arxiv.org/abs/2103.06583v1
+            * Fully decoupled weight decay - https://optimi.benjaminwarner.dev/fully_decoupled_weight_decay/ / https://arxiv.org/abs/1711.05101
+            * Stable weight decay - https://arxiv.org/abs/2011.11152v3
+            * Lookahead - https://arxiv.org/abs/1907.08610
+            * Softplus transformation - https://arxiv.org/abs/1908.00700
+            * Gradient Normalization - https://arxiv.org/pdf/1711.02257 (?)
+            * Adaptive eps - https://arxiv.org/abs/2405.12807
+            * Diff amp - https://github.com/Clybius/Personalized-Optimizers/blob/main/FishMonger.py
+            * Slow EMA - https://arxiv.org/abs/2409.03137
+            * Amsgrad - https://arxiv.org/pdf/1904.09237
+
     Arguments:
         :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
         :param lr: float. learning rate.
@@ -204,14 +220,23 @@ class CompassExperimental(BaseOptimizer):
         :param lookahead_blending_alpha: float. blending alpha.
         :param weight_decay: float. weight decay (L2 penalty).
         :param weight_decouple: bool. the optimizer uses decoupled weight decay as in AdamW.
-        :param lr_decouple: bool. fully decouple weight decay from learning rate.
+        :param lr_decouple: bool. fully decouple weight decay from learning rate. This makes weight decay much stronger given the same values.
         :param max_lr: float. Max LR used for lr_decouple, should match your defined max LR for training.
         :param fixed_decay: bool. fix weight decay.
         :param norm_loss_factor: float. norm loss factor.
         :param adam_debias: bool. Only correct the denominator to avoid inflating step sizes early in training.
+        :param amsgrad: bool. If true, maintains and uses the max ema squared.
         :param use_pnm: bool. use positive negative momentum.
         :param pnm_beta: float. Manages the amplitude of the noise introduced by positive negative momentum. Negative values are valid.
-        :param eps: float. term added to the denominator to improve numerical stability.
+        :param use_slow_ema: bool. use slow ema like that from AdEMAMix.
+        :param slow_ema_alpha: float. usually between 4 and 10 would work well. The multipler for application of the slow ema to the update.
+        :param slow_ema_beta: float. coefficient used for computing running slow average of gradient.
+        :param slow_ema_t_alpha_beta: Optional[float]. total number of iterations is preferred when needed. The warmup of slow_ema_alpha and slow_ema_beta over iterations. Results in more stablity.
+        :param diff_amp: float. Accelerate the difference between the current and past gradient by this multiplicative value. 0 is off.
+        :param diff_amp_beta: float. Coefficient used for computing running average of the current and past gradients
+        :param eps: float. the maximum eps value for adaptive eps. Eps is the term added to the denominator outside of the root operation to improve numerical stability.
+        :param eps2: float. used to multiple the grad rms for determining adaptive eps.
+        :param eps_floor: float. term used to determine the floor for adaptive eps.
     """
 
     def __init__(
@@ -243,7 +268,7 @@ class CompassExperimental(BaseOptimizer):
         amsgrad: bool = False,
         use_slow_ema: bool = False,
         slow_ema_beta: float = 0.9995,
-        slow_ema_alpha: float = 2.0,
+        slow_ema_alpha: float = 3.0,
         slow_ema_t_alpha_beta: Optional[float] = None,
         diff_amp: float = 0.0,
         diff_amp_beta: float = 0.999,
@@ -732,38 +757,64 @@ class CompassExperimental(BaseOptimizer):
 
 class CompassPlus(BaseOptimizer):
     r"""
+    CompassPlus
+        Components
+            * Adaptive gradient clipping - https://arxiv.org/abs/2102.06171
+            * Gradient centralization - https://arxiv.org/abs/2004.01461v2
+            * Positive-Negative momentum - https://arxiv.org/abs/2103.17182
+            * Norm loss - https://arxiv.org/abs/2103.06583v1
+            * Fully decoupled weight decay - https://optimi.benjaminwarner.dev/fully_decoupled_weight_decay/ / https://arxiv.org/abs/1711.05101
+            * Stable weight decay - https://arxiv.org/abs/2011.11152v3
+            * Lookahead - https://arxiv.org/abs/1907.08610
+            * Softplus transformation - https://arxiv.org/abs/1908.00700
+            * Gradient Normalization - https://arxiv.org/pdf/1711.02257 (?)
+            * Adaptive eps - https://arxiv.org/abs/2405.12807
+            * Diff amp - https://github.com/Clybius/Personalized-Optimizers/blob/main/FishMonger.py
+            * Slow EMA - https://arxiv.org/abs/2409.03137
+            * Amsgrad - https://arxiv.org/pdf/1904.09237
+
     Arguments:
         :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
         :param lr: float. learning rate.
         :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
         :param use_softplus: bool. use softplus to smooth the updaate denominator.
-        :param beta_softplus: float. beta.
+        :param beta_softplus: float. beta for softplus.
+        :param threshold_softplus: float. threshold after which scaling returns to linear. Set to 20 by default, instead set to eps to avoid scaling of eps in denom.
         :param agc_clipping_value: float. Clipping threshold for adaptive gradient clipping.
         :param agc_eps: float. eps for adaptive gradient clipping.
         :param amp_fac: float. amplification factor for the first moment filter.
-        :param centralize_gradients: bool. use GC both convolution & fc layers.
-        :param normalize_gradients: bool. use gradient normalization.
+        :param centralize_gradients: bool. use GC both convolution & fc layers. Can be selectively applied: 'gradient', 'update', 'both', 'disabled'
+        :param normalize_gradients: bool. use gradient normalization.  Can be selectively applied: 'gradient', 'update', 'both', 'disabled'
         :param use_lookahead: bool. use lookahead.
         :param lookahead_merge_time: int. merge time.
         :param lookahead_blending_alpha: float. blending alpha.
         :param weight_decay: float. weight decay (L2 penalty).
         :param weight_decouple: bool. the optimizer uses decoupled weight decay as in AdamW.
-        :param lr_decouple: bool. fully decouple weight decay from learning rate.
+        :param lr_decouple: bool. fully decouple weight decay from learning rate. This makes weight decay much stronger given the same values.
         :param max_lr: float. Max LR used for lr_decouple, should match your defined max LR for training.
         :param fixed_decay: bool. fix weight decay.
         :param norm_loss_factor: float. norm loss factor.
         :param adam_debias: bool. Only correct the denominator to avoid inflating step sizes early in training.
+        :param amsgrad: bool. If true, maintains and uses the max ema squared.
         :param use_pnm: bool. use positive negative momentum.
-        :param pnm_beta: float. Manages the amplitude of the noise introduced by positive negative momentum
-        :param eps: float. term added to the denominator to improve numerical stability.
+        :param pnm_beta: float. Manages the amplitude of the noise introduced by positive negative momentum. Negative values are valid.
+        :param use_slow_ema: bool. use slow ema like that from AdEMAMix.
+        :param slow_ema_alpha: float. usually between 4 and 10 would work well. The multipler for application of the slow ema to the update.
+        :param slow_ema_beta: float. coefficient used for computing running slow average of gradient.
+        :param slow_ema_t_alpha_beta: Optional[float]. total number of iterations is preferred when needed. The warmup of slow_ema_alpha and slow_ema_beta over iterations. Results in more stablity.
+        :param diff_amp: float. Accelerate the difference between the current and past gradient by this multiplicative value. 0 is off.
+        :param diff_amp_beta: float. Coefficient used for computing running average of the current and past gradients
+        :param eps: float. the maximum eps value for adaptive eps. Eps is the term added to the denominator outside of the root operation to improve numerical stability.
+        :param eps2: float. used to multiple the grad rms for determining adaptive eps.
+        :param eps_floor: float. term used to determine the floor for adaptive eps.
     """
 
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float = 1.4e-4,
+        lr: float = 1.5e-4,
         betas: BETAS = (0.99, 0.999),
-        weight_decay: float = 0.1,
+        weight_decay: float = 0.0005,
         weight_decouple: bool = True,
         lr_decouple: bool = False,
         max_lr: float = 0.0,
@@ -772,35 +823,50 @@ class CompassPlus(BaseOptimizer):
         clip: float = 0.01,
         clip_eps: float = 1e-3,
         amp_fac: float = 5.0,
-        eps: float = 1e-8,
-        centralize_gradients: bool = True,
-        normalize_gradients: bool = True,
-        norm_loss_factor: float = 0.0001,
+        centralize_gradients: CENT_NORM_APPLICATION = 'disabled',
+        normalize_gradients: CENT_NORM_APPLICATION = 'disabled',
+        norm_loss_factor: float = 0.0005,
         use_softplus: bool = True,
         beta_softplus: float = 50.0,
-        use_lookahead: bool = True,
+        threshold_softplus: float = 0.0,
+        use_lookahead: bool = False,
         lookahead_merge_time: int = 5,
         lookahead_blending_alpha: float = 0.5,
         adam_debias: bool = False,
         use_pnm: bool = False,
-        pnm_beta: float = -0.5,
+        pnm_beta: float = 0.1,
         amsgrad: bool = False,
+        use_slow_ema: bool = False,
+        slow_ema_beta: float = 0.9995,
+        slow_ema_alpha: float = 3.0,
+        slow_ema_t_alpha_beta: Optional[float] = None,
+        diff_amp: float = 0.0,
+        diff_amp_beta: float = 0.999,
+        eps: float = 1e-8,
+        eps2: float = 0.01,
+        eps_floor: float = 1e-30,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
         self.validate_betas(betas)
         self.validate_range(pnm_beta, 'pnm_beta', -1.0, 1.0, range_type='[]')
         self.validate_non_negative(weight_decay, 'weight_decay')
-        self.validate_non_negative(eps, 'eps')
         self.validate_non_negative(max_lr, 'max_lr')
         self.validate_non_negative(clip, 'clip')
         self.validate_non_negative(clip, 'clip_eps')
         self.validate_non_negative(amp_fac, 'amp_fac')
-        self.validate_non_negative(centralize_gradients, 'centralize_gradients')
         self.validate_non_negative(lookahead_blending_alpha, 'lookahead_blending_alpha')
         self.validate_non_negative(lookahead_merge_time, 'lookahead_merge_time')
         self.validate_non_negative(beta_softplus, 'beta_softplus')
+        self.validate_non_negative(threshold_softplus, 'threshold_softplus')
         self.validate_non_negative(norm_loss_factor, 'norm_loss_factor')
+        self.validate_non_negative(slow_ema_alpha, 'slow_ema_alpha')
+        self.validate_non_negative(diff_amp, 'diff_amp')
+        self.validate_non_negative(eps, 'eps')
+        self.validate_non_negative(eps2, 'eps2')
+        self.validate_non_negative(eps_floor, 'eps_floor')
+        self.validate_range(diff_amp_beta, 'diff_amp_beta', 0.0, 1.0, range_type='[]')
+        self.validate_range(slow_ema_beta, 'slow_ema_beta', 0.0, 1.0, range_type='[]')
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -814,12 +880,12 @@ class CompassPlus(BaseOptimizer):
             'clip': clip,
             'clip_eps': clip_eps,
             'amp_fac': amp_fac,
-            'eps': eps,
             'centralize_gradients': centralize_gradients,
             'normalize_gradients': normalize_gradients,
             'norm_loss_factor': norm_loss_factor,
             'use_softplus': use_softplus,
             'beta_softplus': beta_softplus,
+            'threshold_softplus': threshold_softplus,
             'use_lookahead': use_lookahead,
             'lookahead_merge_time': lookahead_merge_time,
             'lookahead_blending_alpha': lookahead_blending_alpha,
@@ -827,6 +893,15 @@ class CompassPlus(BaseOptimizer):
             'use_pnm': use_pnm,
             'pnm_beta': pnm_beta,
             'amsgrad': amsgrad,
+            'use_slow_ema': use_slow_ema,
+            'slow_ema_beta': slow_ema_beta,
+            'slow_ema_alpha': slow_ema_alpha,
+            'slow_ema_t_alpha_beta': slow_ema_t_alpha_beta,
+            'diff_amp': diff_amp,
+            'diff_amp_beta': diff_amp_beta,
+            'eps': eps,
+            'eps2': eps2,
+            'eps_floor': eps_floor,
         }
 
         self.use_lookahead = use_lookahead
@@ -842,16 +917,25 @@ class CompassPlus(BaseOptimizer):
         self.normalize_gradients = normalize_gradients
         self.use_softplus = use_softplus
         self.beta_softplus = beta_softplus
+        self.threshold_softplus = threshold_softplus
         self.norm_loss_factor = norm_loss_factor
         self.lr_decouple = lr_decouple
         self.weight_decay = weight_decay
         self.weight_decouple = weight_decouple
         self.max_lr = max_lr
         self.fixed_decay = fixed_decay
-        self.eps = eps
         self.clip = clip
         self.clip_eps = clip_eps
         self.amp_fac = amp_fac
+        self.use_slow_ema = use_slow_ema
+        self.slow_ema_beta = slow_ema_beta
+        self.slow_ema_alpha = slow_ema_alpha
+        self.slow_ema_t_alpha_beta = slow_ema_t_alpha_beta
+        self.diff_amp = diff_amp
+        self.diff_amp_beta = diff_amp_beta
+        self.eps = eps
+        self.eps2 = eps2
+        self.eps_floor = eps_floor
 
         super(CompassPlus, self).__init__(params, defaults)
 
@@ -865,8 +949,16 @@ class CompassPlus(BaseOptimizer):
             for p in group['params']:
                 state = self.state[p]
 
+                beta1, beta2 = group["betas"]
+
+                grad = p.grad
+
                 # Exponential moving average of gradient values
-                state["ema"] = torch.zeros_like(p)
+                if beta1 > 0.0: # save memory in case beta1 is 0.0
+                    state['ema'] = torch.zeros_like(p)
+                else: 
+                    state['ema'] = None
+
                 # Exponential moving average of squared gradient values
                 state["ema_squared"] = torch.zeros_like(p)
 
@@ -878,11 +970,40 @@ class CompassPlus(BaseOptimizer):
 
                 if self.amsgrad:
                     state["max_ema_squared"] = torch.zeros_like(p)
+
+                if self.use_slow_ema:
+                    state['ema_slow'] = torch.zeros_like(p)
+
+                # Previous grad
+                if self.diff_amp:
+                    state["ema_diff"] = torch.zeros_like(p.data)
+                    state["previous_grad"] = grad.data.clone().mul_(-1.0)
     
     @staticmethod
     def get_rms(x: torch.Tensor) -> float:
         r"""Get RMS."""
         return x.norm(2) / math.sqrt(x.numel())
+    
+    @staticmethod
+    def schedule_alpha(t_alpha_beta3: Optional[float], step: int, alpha: float) -> float:
+        if t_alpha_beta3 is None:
+            return alpha
+        return min(step * alpha / t_alpha_beta3, alpha)
+
+    @staticmethod
+    def schedule_beta3(t_alpha_beta3: Optional[float], step: int, beta1: float, beta3: float, eps: float) -> float:
+        if t_alpha_beta3 is None:
+            return beta3
+
+        # Add eps to prevent log 0
+        log_beta1, log_beta3 = math.log(beta1 + eps), math.log(beta3)
+
+        return min(
+            math.exp(
+                log_beta1 * log_beta3 / ((1.0 - step / t_alpha_beta3) * log_beta3 + (step / t_alpha_beta3) * log_beta1)
+            ),
+            beta3,
+        )
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
@@ -901,6 +1022,8 @@ class CompassPlus(BaseOptimizer):
             else:
                 group['step'] = 1
 
+            beta1, beta2 = group["betas"]
+
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -917,7 +1040,11 @@ class CompassPlus(BaseOptimizer):
                 # State initialization
                 if len(state) == 0:
                     # Exponential moving average of gradient values
-                    state["ema"] = torch.zeros_like(p)
+                    if beta1 > 0.0: # save memory in case beta1 is 0.0
+                        state['ema'] = torch.zeros_like(p)
+                    else: 
+                        state['ema'] = None
+
                     # Exponential moving average of squared gradient values
                     state["ema_squared"] = torch.zeros_like(p)
 
@@ -930,19 +1057,27 @@ class CompassPlus(BaseOptimizer):
                     if self.amsgrad:
                         state["max_ema_squared"] = torch.zeros_like(p)
 
+                    if self.use_slow_ema:
+                        state['ema_slow'] = torch.zeros_like(p)
+
+                    # Previous grad
+                    if self.diff_amp:
+                        state["ema_diff"] = torch.zeros_like(p.data)
+                        state["previous_grad"] = grad.data.clone().mul_(-1.0)
+
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     p_fp32 = p.clone().to(torch.float32)
                     grad = grad.to(torch.float32)
 
                 # Apply Adaptive Gradient Clipping (AGC)
-                if self.clip > 0:
+                if self.clip > 0.0:
                     grad.copy_(agc(p_fp32, grad, self.clip_eps, self.clip))
 
                 # Apply gradient centralization & normalization
-                if self.centralize_gradients:
+                if self.centralize_gradients in {'gradient','both'}:
                     centralize_gradient(grad, gc_conv_only=False)
 
-                if self.normalize_gradients:
+                if self.normalize_gradients in {'gradient','both'}:
                     normalize_gradient(grad)
 
         if param_size == 0:
@@ -954,7 +1089,11 @@ class CompassPlus(BaseOptimizer):
 
             # bias correction step size
             # soft warmup
-            bias_correction_sqrt: float = math.sqrt(self.debias(beta2, group['step']))
+            bias_correction2_sq: float = math.sqrt(self.debias(beta2, group['step']))
+
+            if self.use_slow_ema:
+                slow_ema_alpha_t: float = self.schedule_alpha(group['slow_ema_t_alpha_beta'], group['step'], group['slow_ema_alpha'])
+                slow_ema_beta3_t: float = self.schedule_beta3(group['slow_ema_t_alpha_beta'], group['step'], beta1, group["slow_ema_beta"], self.eps)
 
             for p in group["params"]:
                 if p.grad is None:
@@ -973,33 +1112,79 @@ class CompassPlus(BaseOptimizer):
                 else:
                     ema = state["ema"]
 
+                if self.use_slow_ema:
+                    ema_slow = state['ema_slow']
+
+
+
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
-                    ema = ema.to(torch.float32)
-                    neg_ema = ema.to(torch.float32)
                     ema_squared = ema_squared.to(torch.float32)
 
+                    if beta1 > 0.0: # save memory in case beta1 is 0.0
+                        ema = ema.to(torch.float32)
+
+                    if self.use_pnm:
+                        neg_ema = neg_ema.to(torch.float32)
+
+                    if self.use_slow_ema:
+                        ema_slow = ema_slow.to(torch.float32)
+
                 # Decay the first and second moment running average coefficient
-                # ema = ema + (1 - beta1) * grad
-                if self.use_pnm:
-                    ema.mul_(beta1 ** 2).add_(grad, alpha=1.0 - beta1 ** 2)  # fmt: skip
-                    noise_norm: float = math.sqrt((1.0 + self.pnm_beta) ** 2 + self.pnm_beta ** 2)       
-                    adjusted_ema = ema.mul(1.0 + self.pnm_beta).add_(neg_ema, alpha=-self.pnm_beta).mul_(1.0 / noise_norm)
-                    # Grad without adjusted ema due to pnm, as ema_squared shouldn't be influenced by the adjusted_ema
-                    ema_squared_grad = grad.clone()
-                    ema_squared_grad.add_(ema, alpha=self.amp_fac)
-                else:
+                if beta1 > 0.0: # save memory in case beta1 is 0.0
+                    # ema = ema + (1 - beta1) * grad
                     ema.mul_(beta1).add_(grad, alpha=1.0 - beta1)  # fmt: skip
+                else:
+                    ema = grad
+
+                # Natural grad
+                if self.diff_amp > 0.0 or self.use_pnm or self.use_slow_ema:
+                    nat_grad = grad.clone()
+                    nat_grad_amp = nat_grad.add(ema, alpha=self.amp_fac)
+                else:
+                    nat_grad_amp = grad
+                    nat_grad = grad
+
+                if self.use_pnm:
+                    noise_norm: float = math.sqrt((1.0 + self.pnm_beta) ** 2 + self.pnm_beta ** 2)
+                    adjusted_ema = ema.mul(1.0 + self.pnm_beta).add_(neg_ema, alpha=-self.pnm_beta).mul_(1.0 / noise_norm)
+                else:
                     adjusted_ema = ema
-                    ema_squared_grad = grad
 
                 # grad = grad + ema * amplification_factor
                 grad.add_(adjusted_ema, alpha=self.amp_fac)
+
+                if self.use_slow_ema:
+                    ema_slow.mul_(slow_ema_beta3_t).add_(nat_grad, alpha=1.0 - slow_ema_beta3_t)
+                    grad.add_(ema_slow, alpha=slow_ema_alpha_t)
+
+                if self.diff_amp > 0.0:
+                    grad_diff = state["previous_grad"]
+                    ema_diff = state['ema_diff']
+
+                    if p.dtype in {torch.float16, torch.bfloat16}:
+                        grad_diff = grad_diff.to(torch.float32)
+                        ema_diff = ema_diff.to(torch.float32)
+
+                    # grad_diff will contain the difference between prev grad and current grad
+                    grad_diff.add_(nat_grad)
+
+                    # Smooth the difference between previous grad and current grad
+                    ema_diff.mul_(self.diff_amp_beta).add_(grad_diff, alpha=1 - self.diff_amp_beta)
+
+                    grad.add_(ema_diff, alpha=self.diff_amp)
+
+                    if p.dtype in {torch.float16, torch.bfloat16}:
+                        copy_stochastic_(state["previous_grad"], -nat_grad)
+                        copy_stochastic_(state["ema_diff"], ema_diff)
+                    else:
+                        state["previous_grad"].copy_(-nat_grad)
+
                 # ema_squared = ema + (1 - beta2) * grad ** 2
-                ema_squared.mul_(beta2).addcmul_(ema_squared_grad, ema_squared_grad, value=1.0 - beta2)
+                ema_squared.mul_(beta2).addcmul_(nat_grad_amp, nat_grad_amp, value=1.0 - beta2)
                 if self.stable_decay:
-                    ema_squared_sum += (ema_squared / bias_correction_sqrt).sum()
+                    ema_squared_sum += (ema_squared / bias_correction2_sq).sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -1007,11 +1192,18 @@ class CompassPlus(BaseOptimizer):
 
                     if self.use_pnm:
                         if group['step'] % 2 == 1:
-                            copy_stochastic_(state["ema"], ema)
+                            if beta1 > 0.0:
+                                copy_stochastic_(state["ema"], ema)
                         else:
+                            # neg_ema is previous grad if beta1 is 0.0
                             copy_stochastic_(state["neg_ema"], ema)
+
                     else:
-                        copy_stochastic_(state["ema"], ema)
+                        if beta1 > 0.0:
+                            copy_stochastic_(state["ema"], ema)
+
+                    if self.use_slow_ema:
+                        copy_stochastic_(state["ema_slow"], ema_slow)
 
         if self.stable_decay:
             ema_squared_normalized = math.sqrt(ema_squared_sum / param_size)
@@ -1024,9 +1216,9 @@ class CompassPlus(BaseOptimizer):
 
             # bias correction step size
             # soft warmup
-            bias_correction: float = self.debias(beta1, group['step'])
-            bias_correction_sqrt: float = math.sqrt(self.debias(beta2, group['step']))
-
+            bias_correction1: float = self.debias(beta1, group['step'])
+            bias_correction2_sq: float = math.sqrt(self.debias(beta2, group['step']))
+        
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -1040,9 +1232,15 @@ class CompassPlus(BaseOptimizer):
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     p_fp32 = p.clone().to(torch.float32)
                     grad = grad.to(torch.float32)
+                    ema_squared = ema_squared.to(torch.float32)
+
+                # TODO grad at this point isn't the original grad, so won't have the expected effect, though shouldn't be harmful as is
+                rms_grad = grad.pow(2).mean().sqrt_()
+                current_eps = max(min(rms_grad.item() * self.eps2, self.eps), self.eps_floor) # Set a floor for eps to avoid NaN
+                #current_eps = self.eps
  
                 # lr scaler + eps to prevent zero division
-                # denom = exp_avg_sq.sqrt() + group['eps']
+                # de_nom = exp_avg_sq.sqrt() + group['eps']
                 if self.amsgrad:
                     max_ema_squared = state['max_ema_squared']
 
@@ -1050,39 +1248,43 @@ class CompassPlus(BaseOptimizer):
                         max_ema_squared = max_ema_squared.to(torch.float32)
                         
                     torch.max(max_ema_squared, ema_squared, out=max_ema_squared)
-                    denom = (max_ema_squared.sqrt() / bias_correction_sqrt).add_(self.eps)
-
+                    de_nom = (max_ema_squared.sqrt() / bias_correction2_sq).add_(current_eps)
+ 
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         copy_stochastic_(state['max_ema_squared'], max_ema_squared)
                 else:
-                    denom = (ema_squared.sqrt() / bias_correction_sqrt).add_(self.eps)
+                    de_nom = (ema_squared.sqrt() / bias_correction2_sq).add_(current_eps)
 
-                step_size: float = self.apply_adam_debias(self.adam_debias, lr, bias_correction)
+                if self.use_softplus:
+                    de_nom = softplus(de_nom, beta=self.beta_softplus, threshold=self.threshold_softplus if self.threshold_softplus != 0 else current_eps)
+
+                step_size: float = self.apply_adam_debias(self.adam_debias, lr, bias_correction1)
 
                 if self.weight_decouple:
                     # Perform stepweight decay
-                    p_fp32.data.mul_(1.0 - (1.0 if self.fixed_decay else step_size if not self.lr_decouple else step_size / self.max_lr) * self.weight_decay * (1.0 / ema_squared_normalized if self.stable_decay else 1.0))
-                elif self.weight_decay > 0.0 and grad is not None:
+                    p_fp32.mul_(1.0 - (1.0 if self.fixed_decay else step_size if not self.lr_decouple else step_size / self.max_lr) * self.weight_decay * (1.0 / ema_squared_normalized if self.stable_decay else 1.0))
+                elif self.weight_decay > 0.0 and not self.use_slow_ema:
                     grad.add_(p_fp32, alpha=self.weight_decay)
 
                 if self.norm_loss_factor > 0.0:
                     # norm loss
-                    correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(self.eps))
+                    correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(current_eps))
                     p_fp32.mul_(1.0 - step_size * correction)
 
-                if self.use_softplus:
-                    denom = softplus(denom, beta=self.beta_softplus)
+                update = grad.div(de_nom)
 
-                update = grad.div(denom)
+                # Apply weight decay like AdEMAMix
+                if self.weight_decay > 0.0 and self.use_slow_ema and not self.weight_decouple:
+                    update.add_(p_fp32, alpha=self.weight_decay)
 
-                if self.centralize_gradients:
+                if self.centralize_gradients in {'update','both'}:
                     centralize_gradient(update, gc_conv_only=False)
 
-                if self.normalize_gradients:
+                if self.normalize_gradients in {'update','both'}:
                     normalize_gradient(update) 
 
-                # p = p - lr * grad / denom
-                p_fp32.data.add_(update, alpha=-step_size)
+                # p = p - lr * grad / de_nom
+                p_fp32.add_(update, alpha=-step_size)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -1111,8 +1313,6 @@ class CompassPlus(BaseOptimizer):
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         p_fp32 = p.clone().to(torch.float32)
                         lookahead_params = lookahead_params.to(torch.float32)
-
-
 
                     p_fp32.mul_(self.lookahead_blending_alpha).add_(
                         lookahead_params,
