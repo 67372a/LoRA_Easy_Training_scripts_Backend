@@ -209,13 +209,13 @@ class CompassExperimental(BaseOptimizer):
         :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
         :param use_softplus: bool. use softplus to smooth the updaate denominator.
         :param beta_softplus: float. beta for softplus.
-        :param threshold_softplus: float. threshold after which scaling returns to linear. Set to 20 by default, instead set to eps to avoid scaling of eps in denom.
+        :param threshold_softplus: float. threshold after which scaling returns to linear. Originally set to 20 by default, instead follows adaptive eps when set to 0.
         :param agc_clipping_value: float. Clipping threshold for adaptive gradient clipping.
         :param agc_eps: float. eps for adaptive gradient clipping.
         :param amp_fac: float. amplification factor for the first moment filter.
         :param centralize_gradients: bool. use GC both convolution & fc layers. Can be selectively applied: 'gradient', 'update', 'both', 'disabled'
         :param normalize_gradients: bool. use gradient normalization.  Can be selectively applied: 'gradient', 'update', 'both', 'disabled'
-        :param use_lookahead: bool. use lookahead.
+        :param use_lookahead: bool. use lookahead. ADDS 1 STATE
         :param lookahead_merge_time: int. merge time.
         :param lookahead_blending_alpha: float. blending alpha.
         :param weight_decay: float. weight decay (L2 penalty).
@@ -225,14 +225,14 @@ class CompassExperimental(BaseOptimizer):
         :param fixed_decay: bool. fix weight decay.
         :param norm_loss_factor: float. norm loss factor.
         :param adam_debias: bool. Only correct the denominator to avoid inflating step sizes early in training.
-        :param amsgrad: bool. If true, maintains and uses the max ema squared.
-        :param use_pnm: bool. use positive negative momentum.
+        :param amsgrad: bool. If true, maintains and uses the max ema squared. ADDS 1 STATE
+        :param use_pnm: bool. use positive negative momentum. ADDS 1 STATE
         :param pnm_beta: float. Manages the amplitude of the noise introduced by positive negative momentum. Negative values are valid.
-        :param use_slow_ema: bool. use slow ema like that from AdEMAMix.
+        :param use_slow_ema: bool. use slow ema like that from AdEMAMix. ADDS 1 STATE
         :param slow_ema_alpha: float. usually between 4 and 10 would work well. The multipler for application of the slow ema to the update.
         :param slow_ema_beta: float. coefficient used for computing running slow average of gradient.
         :param slow_ema_t_alpha_beta: Optional[float]. total number of iterations is preferred when needed. The warmup of slow_ema_alpha and slow_ema_beta over iterations. Results in more stablity.
-        :param diff_amp: float. Accelerate the difference between the current and past gradient by this multiplicative value. 0 is off.
+        :param diff_amp: float. Accelerate the difference between the current and past gradient by this multiplicative value. 0 is off. ADDS 2 STATES
         :param diff_amp_beta: float. Coefficient used for computing running average of the current and past gradients
         :param eps: float. the maximum eps value for adaptive eps. Eps is the term added to the denominator outside of the root operation to improve numerical stability.
         :param eps2: float. used to multiple the grad rms for determining adaptive eps.
@@ -268,7 +268,7 @@ class CompassExperimental(BaseOptimizer):
         amsgrad: bool = False,
         use_slow_ema: bool = False,
         slow_ema_beta: float = 0.9995,
-        slow_ema_alpha: float = 3.0,
+        slow_ema_alpha: float = 2.0,
         slow_ema_t_alpha_beta: Optional[float] = None,
         diff_amp: float = 0.0,
         diff_amp_beta: float = 0.999,
@@ -779,13 +779,13 @@ class CompassPlus(BaseOptimizer):
         :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
         :param use_softplus: bool. use softplus to smooth the updaate denominator.
         :param beta_softplus: float. beta for softplus.
-        :param threshold_softplus: float. threshold after which scaling returns to linear. Set to 20 by default, instead set to eps to avoid scaling of eps in denom.
+        :param threshold_softplus: float. threshold after which scaling returns to linear. Originally set to 20 by default, instead follows adaptive eps when set to 0.
         :param agc_clipping_value: float. Clipping threshold for adaptive gradient clipping.
         :param agc_eps: float. eps for adaptive gradient clipping.
         :param amp_fac: float. amplification factor for the first moment filter.
         :param centralize_gradients: bool. use GC both convolution & fc layers. Can be selectively applied: 'gradient', 'update', 'both', 'disabled'
         :param normalize_gradients: bool. use gradient normalization.  Can be selectively applied: 'gradient', 'update', 'both', 'disabled'
-        :param use_lookahead: bool. use lookahead.
+        :param use_lookahead: bool. use lookahead. ADDS 1 STATE
         :param lookahead_merge_time: int. merge time.
         :param lookahead_blending_alpha: float. blending alpha.
         :param weight_decay: float. weight decay (L2 penalty).
@@ -795,14 +795,14 @@ class CompassPlus(BaseOptimizer):
         :param fixed_decay: bool. fix weight decay.
         :param norm_loss_factor: float. norm loss factor.
         :param adam_debias: bool. Only correct the denominator to avoid inflating step sizes early in training.
-        :param amsgrad: bool. If true, maintains and uses the max ema squared.
-        :param use_pnm: bool. use positive negative momentum.
+        :param amsgrad: bool. If true, maintains and uses the max ema squared. ADDS 1 STATE
+        :param use_pnm: bool. use positive negative momentum. ADDS 1 STATE
         :param pnm_beta: float. Manages the amplitude of the noise introduced by positive negative momentum. Negative values are valid.
-        :param use_slow_ema: bool. use slow ema like that from AdEMAMix.
+        :param use_slow_ema: bool. use slow ema like that from AdEMAMix. ADDS 1 STATE
         :param slow_ema_alpha: float. usually between 4 and 10 would work well. The multipler for application of the slow ema to the update.
         :param slow_ema_beta: float. coefficient used for computing running slow average of gradient.
         :param slow_ema_t_alpha_beta: Optional[float]. total number of iterations is preferred when needed. The warmup of slow_ema_alpha and slow_ema_beta over iterations. Results in more stablity.
-        :param diff_amp: float. Accelerate the difference between the current and past gradient by this multiplicative value. 0 is off.
+        :param diff_amp: float. Accelerate the difference between the current and past gradient by this multiplicative value. 0 is off. ADDS 2 STATES
         :param diff_amp_beta: float. Coefficient used for computing running average of the current and past gradients
         :param eps: float. the maximum eps value for adaptive eps. Eps is the term added to the denominator outside of the root operation to improve numerical stability.
         :param eps2: float. used to multiple the grad rms for determining adaptive eps.
