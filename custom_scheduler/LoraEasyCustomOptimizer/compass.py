@@ -243,9 +243,11 @@ class CompassExperimental(BaseOptimizer):
         pnm_beta: float = 0.1,
         amsgrad: bool = False,
         use_slow_ema: bool = False,
-        slow_ema_beta: float = 0.999,
-        slow_ema_alpha: float = 5.0,
+        slow_ema_beta: float = 0.9995,
+        slow_ema_alpha: float = 2.0,
         slow_ema_t_alpha_beta: Optional[float] = None,
+        diff_amp: float = 0.0,
+        diff_amp_beta: float = 0.999,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -263,6 +265,8 @@ class CompassExperimental(BaseOptimizer):
         self.validate_non_negative(threshold_softplus, 'threshold_softplus')
         self.validate_non_negative(norm_loss_factor, 'norm_loss_factor')
         self.validate_non_negative(slow_ema_alpha, 'slow_ema_alpha')
+        self.validate_non_negative(diff_amp, 'diff_amp')
+        self.validate_range(diff_amp_beta, 'diff_amp_beta', 0.0, 1.0, range_type='[]')
         self.validate_range(slow_ema_beta, 'slow_ema_beta', 0.0, 1.0, range_type='[]')
 
         defaults: DEFAULTS = {
@@ -295,6 +299,8 @@ class CompassExperimental(BaseOptimizer):
             'slow_ema_beta': slow_ema_beta,
             'slow_ema_alpha': slow_ema_alpha,
             'slow_ema_t_alpha_beta': slow_ema_t_alpha_beta,
+            'diff_amp': diff_amp,
+            'diff_amp_beta': diff_amp_beta,
         }
 
         self.use_lookahead = use_lookahead
@@ -325,6 +331,8 @@ class CompassExperimental(BaseOptimizer):
         self.slow_ema_beta = slow_ema_beta
         self.slow_ema_alpha = slow_ema_alpha
         self.slow_ema_t_alpha_beta = slow_ema_t_alpha_beta
+        self.diff_amp = diff_amp
+        self.diff_amp_beta = diff_amp_beta
 
         super(CompassExperimental, self).__init__(params, defaults)
 
@@ -339,6 +347,8 @@ class CompassExperimental(BaseOptimizer):
                 state = self.state[p]
 
                 beta1, beta2 = group["betas"]
+
+                grad = p.grad
 
                 # Exponential moving average of gradient values
                 if beta1 > 0.0: # save memory in case beta1 is 0.0
@@ -360,6 +370,11 @@ class CompassExperimental(BaseOptimizer):
 
                 if self.use_slow_ema:
                     state['ema_slow'] = torch.zeros_like(p)
+
+                # Previous grad
+                if self.diff_amp:
+                    state["ema_diff"] = torch.zeros_like(p.data)
+                    state["previous_grad"] = grad.data.clone().mul_(-1.0)
     
     @staticmethod
     def get_rms(x: torch.Tensor) -> float:
@@ -442,6 +457,11 @@ class CompassExperimental(BaseOptimizer):
                     if self.use_slow_ema:
                         state['ema_slow'] = torch.zeros_like(p)
 
+                    # Previous grad
+                    if self.diff_amp:
+                        state["ema_diff"] = torch.zeros_like(p.data)
+                        state["previous_grad"] = grad.data.clone().mul_(-1.0)
+
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     p_fp32 = p.clone().to(torch.float32)
                     grad = grad.to(torch.float32)
@@ -492,6 +512,8 @@ class CompassExperimental(BaseOptimizer):
                 if self.use_slow_ema:
                     ema_slow = state['ema_slow']
 
+
+
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
@@ -513,26 +535,52 @@ class CompassExperimental(BaseOptimizer):
                 else:
                     ema = grad
 
+                # Natural grad
+                if self.diff_amp > 0.0 or self.use_pnm or self.use_slow_ema:
+                    nat_grad = grad.clone()
+                    nat_grad_amp = nat_grad.add(ema, alpha=self.amp_fac)
+                else:
+                    nat_grad_amp = grad
+                    nat_grad = grad
+
                 if self.use_pnm:
                     #TODO slow pnm ema?
                     noise_norm: float = math.sqrt((1.0 + self.pnm_beta) ** 2 + self.pnm_beta ** 2)
                     adjusted_ema = ema.mul(1.0 + self.pnm_beta).add_(neg_ema, alpha=-self.pnm_beta).mul_(1.0 / noise_norm)
-                    # Grad without adjusted ema due to pnm, as ema_squared shouldn't be influenced by the adjusted_ema
-                    ema_squared_grad = grad.clone()
-                    ema_squared_grad.add_(ema, alpha=self.amp_fac)
                 else:
                     adjusted_ema = ema
-                    ema_squared_grad = grad
-
-                if self.use_slow_ema:
-                    ema_slow.mul_(slow_ema_beta3_t).add_(grad, alpha=1.0 - slow_ema_beta3_t)
-                    grad.add_(ema_slow, alpha=slow_ema_alpha_t)
 
                 # grad = grad + ema * amplification_factor
                 grad.add_(adjusted_ema, alpha=self.amp_fac)
 
+                if self.use_slow_ema:
+                    ema_slow.mul_(slow_ema_beta3_t).add_(nat_grad, alpha=1.0 - slow_ema_beta3_t)
+                    grad.add_(ema_slow, alpha=slow_ema_alpha_t)
+
+                if self.diff_amp > 0.0:
+                    grad_diff = state["previous_grad"]
+                    ema_diff = state['ema_diff']
+
+                    if p.dtype in {torch.float16, torch.bfloat16}:
+                        grad_diff = grad_diff.to(torch.float32)
+                        ema_diff = ema_diff.to(torch.float32)
+
+                    # grad_diff will contain the difference between prev grad and current grad
+                    grad_diff.add_(nat_grad)
+
+                    # Smooth the difference between previous grad and current grad
+                    ema_diff.mul_(self.diff_amp_beta).add_(grad_diff, alpha=1 - self.diff_amp_beta)
+
+                    grad.add_(ema_diff, alpha=-self.diff_amp)
+
+                    if p.dtype in {torch.float16, torch.bfloat16}:
+                        copy_stochastic_(state["previous_grad"], -nat_grad)
+                        copy_stochastic_(state["ema_diff"], ema_diff)
+                    else:
+                        state["previous_grad"].copy_(-nat_grad)
+
                 # ema_squared = ema + (1 - beta2) * grad ** 2
-                ema_squared.mul_(beta2).addcmul_(ema_squared_grad, ema_squared_grad, value=1.0 - beta2)
+                ema_squared.mul_(beta2).addcmul_(nat_grad_amp, nat_grad_amp, value=1.0 - beta2)
                 if self.stable_decay:
                     ema_squared_sum += (ema_squared / bias_correction2_sq).sum()
 
