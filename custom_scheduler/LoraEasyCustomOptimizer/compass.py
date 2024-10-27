@@ -8,7 +8,7 @@ from torch.optim import Optimizer
 from .utils import copy_stochastic_, quantize, dequantize
 import math
 from torch.nn.functional import softplus
-from typing import Literal
+from typing import Literal, Optional, List
 
 from bitsandbytes.functional import quantize_blockwise, dequantize_blockwise
 from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
@@ -240,8 +240,12 @@ class CompassExperimental(BaseOptimizer):
         lookahead_blending_alpha: float = 0.5,
         adam_debias: bool = False,
         use_pnm: bool = False,
-        pnm_beta: float = -0.5,
+        pnm_beta: float = 0.1,
         amsgrad: bool = False,
+        use_slow_ema: bool = False,
+        slow_ema_beta: float = 0.999,
+        slow_ema_alpha: float = 5.0,
+        slow_ema_t_alpha_beta: Optional[float] = None,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -258,6 +262,8 @@ class CompassExperimental(BaseOptimizer):
         self.validate_non_negative(beta_softplus, 'beta_softplus')
         self.validate_non_negative(threshold_softplus, 'threshold_softplus')
         self.validate_non_negative(norm_loss_factor, 'norm_loss_factor')
+        self.validate_non_negative(slow_ema_alpha, 'slow_ema_alpha')
+        self.validate_range(slow_ema_beta, 'slow_ema_beta', 0.0, 1.0, range_type='[]')
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -285,6 +291,10 @@ class CompassExperimental(BaseOptimizer):
             'use_pnm': use_pnm,
             'pnm_beta': pnm_beta,
             'amsgrad': amsgrad,
+            'use_slow_ema': use_slow_ema,
+            'slow_ema_beta': slow_ema_beta,
+            'slow_ema_alpha': slow_ema_alpha,
+            'slow_ema_t_alpha_beta': slow_ema_t_alpha_beta,
         }
 
         self.use_lookahead = use_lookahead
@@ -311,6 +321,10 @@ class CompassExperimental(BaseOptimizer):
         self.clip = clip
         self.clip_eps = clip_eps
         self.amp_fac = amp_fac
+        self.use_slow_ema = use_slow_ema
+        self.slow_ema_beta = slow_ema_beta
+        self.slow_ema_alpha = slow_ema_alpha
+        self.slow_ema_t_alpha_beta = slow_ema_t_alpha_beta
 
         super(CompassExperimental, self).__init__(params, defaults)
 
@@ -324,8 +338,14 @@ class CompassExperimental(BaseOptimizer):
             for p in group['params']:
                 state = self.state[p]
 
+                beta1, beta2 = group["betas"]
+
                 # Exponential moving average of gradient values
-                state["ema"] = torch.zeros_like(p)
+                if beta1 > 0.0: # save memory in case beta1 is 0.0
+                    state['ema'] = torch.zeros_like(p)
+                else: 
+                    state['ema'] = None
+
                 # Exponential moving average of squared gradient values
                 state["ema_squared"] = torch.zeros_like(p)
 
@@ -337,11 +357,35 @@ class CompassExperimental(BaseOptimizer):
 
                 if self.amsgrad:
                     state["max_ema_squared"] = torch.zeros_like(p)
+
+                if self.use_slow_ema:
+                    state['ema_slow'] = torch.zeros_like(p)
     
     @staticmethod
     def get_rms(x: torch.Tensor) -> float:
         r"""Get RMS."""
         return x.norm(2) / math.sqrt(x.numel())
+    
+    @staticmethod
+    def schedule_alpha(t_alpha_beta3: Optional[float], step: int, alpha: float) -> float:
+        if t_alpha_beta3 is None:
+            return alpha
+        return min(step * alpha / t_alpha_beta3, alpha)
+
+    @staticmethod
+    def schedule_beta3(t_alpha_beta3: Optional[float], step: int, beta1: float, beta3: float, eps: float) -> float:
+        if t_alpha_beta3 is None:
+            return beta3
+
+        # Add eps to prevent log 0
+        log_beta1, log_beta3 = math.log(beta1 + eps), math.log(beta3)
+
+        return min(
+            math.exp(
+                log_beta1 * log_beta3 / ((1.0 - step / t_alpha_beta3) * log_beta3 + (step / t_alpha_beta3) * log_beta1)
+            ),
+            beta3,
+        )
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
@@ -360,6 +404,8 @@ class CompassExperimental(BaseOptimizer):
             else:
                 group['step'] = 1
 
+            beta1, beta2 = group["betas"]
+
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -376,7 +422,11 @@ class CompassExperimental(BaseOptimizer):
                 # State initialization
                 if len(state) == 0:
                     # Exponential moving average of gradient values
-                    state["ema"] = torch.zeros_like(p)
+                    if beta1 > 0.0: # save memory in case beta1 is 0.0
+                        state['ema'] = torch.zeros_like(p)
+                    else: 
+                        state['ema'] = None
+
                     # Exponential moving average of squared gradient values
                     state["ema_squared"] = torch.zeros_like(p)
 
@@ -388,6 +438,9 @@ class CompassExperimental(BaseOptimizer):
 
                     if self.amsgrad:
                         state["max_ema_squared"] = torch.zeros_like(p)
+
+                    if self.use_slow_ema:
+                        state['ema_slow'] = torch.zeros_like(p)
 
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     p_fp32 = p.clone().to(torch.float32)
@@ -413,7 +466,11 @@ class CompassExperimental(BaseOptimizer):
 
             # bias correction step size
             # soft warmup
-            bias_correction_sqrt: float = math.sqrt(self.debias(beta2, group['step']))
+            bias_correction2_sq: float = math.sqrt(self.debias(beta2, group['step']))
+
+            if self.use_slow_ema:
+                slow_ema_alpha_t: float = self.schedule_alpha(group['slow_ema_t_alpha_beta'], group['step'], group['slow_ema_alpha'])
+                slow_ema_beta3_t: float = self.schedule_beta3(group['slow_ema_t_alpha_beta'], group['step'], beta1, group["slow_ema_beta"], self.eps)
 
             for p in group["params"]:
                 if p.grad is None:
@@ -432,34 +489,52 @@ class CompassExperimental(BaseOptimizer):
                 else:
                     ema = state["ema"]
 
+                if self.use_slow_ema:
+                    ema_slow = state['ema_slow']
+
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
-                    ema = ema.to(torch.float32)
                     ema_squared = ema_squared.to(torch.float32)
+
+                    if beta1 > 0.0: # save memory in case beta1 is 0.0
+                        ema = ema.to(torch.float32)
+
                     if self.use_pnm:
                         neg_ema = neg_ema.to(torch.float32)
 
+                    if self.use_slow_ema:
+                        ema_slow = ema_slow.to(torch.float32)
+
                 # Decay the first and second moment running average coefficient
-                # ema = ema + (1 - beta1) * grad
+                if beta1 > 0.0: # save memory in case beta1 is 0.0
+                    # ema = ema + (1 - beta1) * grad
+                    ema.mul_(beta1).add_(grad, alpha=1.0 - beta1)  # fmt: skip
+                else:
+                    ema = grad
+
                 if self.use_pnm:
-                    ema.mul_(beta1 ** 2).add_(grad, alpha=1.0 - beta1 ** 2)  # fmt: skip
-                    noise_norm: float = math.sqrt((1.0 + self.pnm_beta) ** 2 + self.pnm_beta ** 2)       
+                    #TODO slow pnm ema?
+                    noise_norm: float = math.sqrt((1.0 + self.pnm_beta) ** 2 + self.pnm_beta ** 2)
                     adjusted_ema = ema.mul(1.0 + self.pnm_beta).add_(neg_ema, alpha=-self.pnm_beta).mul_(1.0 / noise_norm)
                     # Grad without adjusted ema due to pnm, as ema_squared shouldn't be influenced by the adjusted_ema
                     ema_squared_grad = grad.clone()
                     ema_squared_grad.add_(ema, alpha=self.amp_fac)
                 else:
-                    ema.mul_(beta1).add_(grad, alpha=1.0 - beta1)  # fmt: skip
                     adjusted_ema = ema
                     ema_squared_grad = grad
 
+                if self.use_slow_ema:
+                    ema_slow.mul_(slow_ema_beta3_t).add_(grad, alpha=1.0 - slow_ema_beta3_t)
+                    grad.add_(ema_slow, alpha=slow_ema_alpha_t)
+
                 # grad = grad + ema * amplification_factor
                 grad.add_(adjusted_ema, alpha=self.amp_fac)
+
                 # ema_squared = ema + (1 - beta2) * grad ** 2
                 ema_squared.mul_(beta2).addcmul_(ema_squared_grad, ema_squared_grad, value=1.0 - beta2)
                 if self.stable_decay:
-                    ema_squared_sum += (ema_squared / bias_correction_sqrt).sum()
+                    ema_squared_sum += (ema_squared / bias_correction2_sq).sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -467,11 +542,18 @@ class CompassExperimental(BaseOptimizer):
 
                     if self.use_pnm:
                         if group['step'] % 2 == 1:
-                            copy_stochastic_(state["ema"], ema)
+                            if beta1 > 0.0:
+                                copy_stochastic_(state["ema"], ema)
                         else:
+                            # neg_ema is previous grad if beta1 is 0.0
                             copy_stochastic_(state["neg_ema"], ema)
+
                     else:
-                        copy_stochastic_(state["ema"], ema)
+                        if beta1 > 0.0:
+                            copy_stochastic_(state["ema"], ema)
+
+                    if self.use_slow_ema:
+                        copy_stochastic_(state["ema_slow"], ema_slow)
 
         if self.stable_decay:
             ema_squared_normalized = math.sqrt(ema_squared_sum / param_size)
@@ -484,9 +566,9 @@ class CompassExperimental(BaseOptimizer):
 
             # bias correction step size
             # soft warmup
-            bias_correction: float = self.debias(beta1, group['step'])
-            bias_correction_sqrt: float = math.sqrt(self.debias(beta2, group['step']))
-
+            bias_correction1: float = self.debias(beta1, group['step'])
+            bias_correction2_sq: float = math.sqrt(self.debias(beta2, group['step']))
+        
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -503,7 +585,7 @@ class CompassExperimental(BaseOptimizer):
                     ema_squared = ema_squared.to(torch.float32)
  
                 # lr scaler + eps to prevent zero division
-                # denom = exp_avg_sq.sqrt() + group['eps']
+                # de_nom = exp_avg_sq.sqrt() + group['eps']
                 if self.amsgrad:
                     max_ema_squared = state['max_ema_squared']
 
@@ -511,19 +593,22 @@ class CompassExperimental(BaseOptimizer):
                         max_ema_squared = max_ema_squared.to(torch.float32)
                         
                     torch.max(max_ema_squared, ema_squared, out=max_ema_squared)
-                    denom = (max_ema_squared.sqrt() / bias_correction_sqrt).add_(self.eps)
-
+                    de_nom = (max_ema_squared.sqrt() / bias_correction2_sq).add_(self.eps)
+ 
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         copy_stochastic_(state['max_ema_squared'], max_ema_squared)
                 else:
-                    denom = (ema_squared.sqrt() / bias_correction_sqrt).add_(self.eps)
+                    de_nom = (ema_squared.sqrt() / bias_correction2_sq).add_(self.eps)
 
-                step_size: float = self.apply_adam_debias(self.adam_debias, lr, bias_correction)
+                if self.use_softplus:
+                    de_nom = softplus(de_nom, beta=self.beta_softplus, threshold=self.threshold_softplus)
+
+                step_size: float = self.apply_adam_debias(self.adam_debias, lr, bias_correction1)
 
                 if self.weight_decouple:
                     # Perform stepweight decay
-                    p_fp32.data.mul_(1.0 - (1.0 if self.fixed_decay else step_size if not self.lr_decouple else step_size / self.max_lr) * self.weight_decay * (1.0 / ema_squared_normalized if self.stable_decay else 1.0))
-                elif self.weight_decay > 0.0 and grad is not None:
+                    p_fp32.mul_(1.0 - (1.0 if self.fixed_decay else step_size if not self.lr_decouple else step_size / self.max_lr) * self.weight_decay * (1.0 / ema_squared_normalized if self.stable_decay else 1.0))
+                elif self.weight_decay > 0.0 and not self.use_slow_ema:
                     grad.add_(p_fp32, alpha=self.weight_decay)
 
                 if self.norm_loss_factor > 0.0:
@@ -531,10 +616,11 @@ class CompassExperimental(BaseOptimizer):
                     correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(self.eps))
                     p_fp32.mul_(1.0 - step_size * correction)
 
-                if self.use_softplus:
-                    denom = softplus(denom, beta=self.beta_softplus, threshold=self.threshold_softplus)
+                update = grad.div(de_nom)
 
-                update = grad.div(denom)
+                # Apply weight decay like AdEMAMix
+                if self.weight_decay > 0.0 and self.use_slow_ema and not self.weight_decouple:
+                    update.add_(p_fp32, alpha=self.weight_decay)
 
                 if self.centralize_gradients in {'update','both'}:
                     centralize_gradient(update, gc_conv_only=False)
@@ -542,8 +628,8 @@ class CompassExperimental(BaseOptimizer):
                 if self.normalize_gradients in {'update','both'}:
                     normalize_gradient(update) 
 
-                # p = p - lr * grad / denom
-                p_fp32.data.add_(update, alpha=-step_size)
+                # p = p - lr * grad / de_nom
+                p_fp32.add_(update, alpha=-step_size)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -572,8 +658,6 @@ class CompassExperimental(BaseOptimizer):
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         p_fp32 = p.clone().to(torch.float32)
                         lookahead_params = lookahead_params.to(torch.float32)
-
-
 
                     p_fp32.mul_(self.lookahead_blending_alpha).add_(
                         lookahead_params,
