@@ -235,7 +235,7 @@ class CompassExperimental(BaseOptimizer):
         use_softplus: bool = True,
         beta_softplus: float = 50.0,
         threshold_softplus: float = 1e-8,
-        use_lookahead: bool = True,
+        use_lookahead: bool = False,
         lookahead_merge_time: int = 5,
         lookahead_blending_alpha: float = 0.5,
         adam_debias: bool = False,
