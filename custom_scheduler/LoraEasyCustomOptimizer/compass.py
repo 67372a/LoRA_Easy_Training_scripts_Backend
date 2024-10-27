@@ -228,13 +228,12 @@ class CompassExperimental(BaseOptimizer):
         clip: float = 0.01,
         clip_eps: float = 1e-3,
         amp_fac: float = 5.0,
-        eps: float = 1e-8,
         centralize_gradients: CENT_NORM_APPLICATION = 'disabled',
         normalize_gradients: CENT_NORM_APPLICATION = 'disabled',
         norm_loss_factor: float = 0.0005,
         use_softplus: bool = True,
         beta_softplus: float = 50.0,
-        threshold_softplus: float = 1e-8,
+        threshold_softplus: float = 0.0,
         use_lookahead: bool = False,
         lookahead_merge_time: int = 5,
         lookahead_blending_alpha: float = 0.5,
@@ -248,13 +247,15 @@ class CompassExperimental(BaseOptimizer):
         slow_ema_t_alpha_beta: Optional[float] = None,
         diff_amp: float = 0.0,
         diff_amp_beta: float = 0.999,
+        eps: float = 1e-8,
+        eps2: float = 0.01,
+        eps_floor: float = 1e-30,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
         self.validate_betas(betas)
         self.validate_range(pnm_beta, 'pnm_beta', -1.0, 1.0, range_type='[]')
         self.validate_non_negative(weight_decay, 'weight_decay')
-        self.validate_non_negative(eps, 'eps')
         self.validate_non_negative(max_lr, 'max_lr')
         self.validate_non_negative(clip, 'clip')
         self.validate_non_negative(clip, 'clip_eps')
@@ -266,6 +267,9 @@ class CompassExperimental(BaseOptimizer):
         self.validate_non_negative(norm_loss_factor, 'norm_loss_factor')
         self.validate_non_negative(slow_ema_alpha, 'slow_ema_alpha')
         self.validate_non_negative(diff_amp, 'diff_amp')
+        self.validate_non_negative(eps, 'eps')
+        self.validate_non_negative(eps2, 'eps2')
+        self.validate_non_negative(eps_floor, 'eps_floor')
         self.validate_range(diff_amp_beta, 'diff_amp_beta', 0.0, 1.0, range_type='[]')
         self.validate_range(slow_ema_beta, 'slow_ema_beta', 0.0, 1.0, range_type='[]')
 
@@ -281,7 +285,6 @@ class CompassExperimental(BaseOptimizer):
             'clip': clip,
             'clip_eps': clip_eps,
             'amp_fac': amp_fac,
-            'eps': eps,
             'centralize_gradients': centralize_gradients,
             'normalize_gradients': normalize_gradients,
             'norm_loss_factor': norm_loss_factor,
@@ -301,6 +304,9 @@ class CompassExperimental(BaseOptimizer):
             'slow_ema_t_alpha_beta': slow_ema_t_alpha_beta,
             'diff_amp': diff_amp,
             'diff_amp_beta': diff_amp_beta,
+            'eps': eps,
+            'eps2': eps2,
+            'eps_floor': eps_floor,
         }
 
         self.use_lookahead = use_lookahead
@@ -323,7 +329,6 @@ class CompassExperimental(BaseOptimizer):
         self.weight_decouple = weight_decouple
         self.max_lr = max_lr
         self.fixed_decay = fixed_decay
-        self.eps = eps
         self.clip = clip
         self.clip_eps = clip_eps
         self.amp_fac = amp_fac
@@ -333,6 +338,9 @@ class CompassExperimental(BaseOptimizer):
         self.slow_ema_t_alpha_beta = slow_ema_t_alpha_beta
         self.diff_amp = diff_amp
         self.diff_amp_beta = diff_amp_beta
+        self.eps = eps
+        self.eps2 = eps2
+        self.eps_floor = eps_floor
 
         super(CompassExperimental, self).__init__(params, defaults)
 
@@ -544,7 +552,6 @@ class CompassExperimental(BaseOptimizer):
                     nat_grad = grad
 
                 if self.use_pnm:
-                    #TODO slow pnm ema?
                     noise_norm: float = math.sqrt((1.0 + self.pnm_beta) ** 2 + self.pnm_beta ** 2)
                     adjusted_ema = ema.mul(1.0 + self.pnm_beta).add_(neg_ema, alpha=-self.pnm_beta).mul_(1.0 / noise_norm)
                 else:
@@ -571,7 +578,7 @@ class CompassExperimental(BaseOptimizer):
                     # Smooth the difference between previous grad and current grad
                     ema_diff.mul_(self.diff_amp_beta).add_(grad_diff, alpha=1 - self.diff_amp_beta)
 
-                    grad.add_(ema_diff, alpha=-self.diff_amp)
+                    grad.add_(ema_diff, alpha=self.diff_amp)
 
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         copy_stochastic_(state["previous_grad"], -nat_grad)
@@ -631,6 +638,11 @@ class CompassExperimental(BaseOptimizer):
                     p_fp32 = p.clone().to(torch.float32)
                     grad = grad.to(torch.float32)
                     ema_squared = ema_squared.to(torch.float32)
+
+                # TODO grad at this point isn't the original grad, so won't have the expected effect, though shouldn't be harmful as is
+                rms_grad = grad.pow(2).mean().sqrt_()
+                current_eps = max(min(rms_grad.item() * self.eps2, self.eps), self.eps_floor) # Set a floor for eps to avoid NaN
+                #current_eps = self.eps
  
                 # lr scaler + eps to prevent zero division
                 # de_nom = exp_avg_sq.sqrt() + group['eps']
@@ -641,15 +653,15 @@ class CompassExperimental(BaseOptimizer):
                         max_ema_squared = max_ema_squared.to(torch.float32)
                         
                     torch.max(max_ema_squared, ema_squared, out=max_ema_squared)
-                    de_nom = (max_ema_squared.sqrt() / bias_correction2_sq).add_(self.eps)
+                    de_nom = (max_ema_squared.sqrt() / bias_correction2_sq).add_(current_eps)
  
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         copy_stochastic_(state['max_ema_squared'], max_ema_squared)
                 else:
-                    de_nom = (ema_squared.sqrt() / bias_correction2_sq).add_(self.eps)
+                    de_nom = (ema_squared.sqrt() / bias_correction2_sq).add_(current_eps)
 
                 if self.use_softplus:
-                    de_nom = softplus(de_nom, beta=self.beta_softplus, threshold=self.threshold_softplus)
+                    de_nom = softplus(de_nom, beta=self.beta_softplus, threshold=self.threshold_softplus if self.threshold_softplus != 0 else current_eps)
 
                 step_size: float = self.apply_adam_debias(self.adam_debias, lr, bias_correction1)
 
@@ -661,7 +673,7 @@ class CompassExperimental(BaseOptimizer):
 
                 if self.norm_loss_factor > 0.0:
                     # norm loss
-                    correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(self.eps))
+                    correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(current_eps))
                     p_fp32.mul_(1.0 - step_size * correction)
 
                 update = grad.div(de_nom)
