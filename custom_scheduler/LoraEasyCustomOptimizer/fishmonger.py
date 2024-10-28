@@ -55,7 +55,6 @@ class FishMonger(Optimizer):
             lr=lr,
             betas=betas,
             eps=eps,
-            eps=eps,
             eps2=eps2,
             eps_floor=eps_floor,
             weight_decay=weight_decay,
