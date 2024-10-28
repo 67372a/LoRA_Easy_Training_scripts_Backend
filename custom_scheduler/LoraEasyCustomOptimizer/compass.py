@@ -211,8 +211,8 @@ class CompassExperimental(BaseOptimizer):
         :param agc_clipping_value: float. Clipping threshold for adaptive gradient clipping.
         :param agc_eps: float. eps for adaptive gradient clipping.
         :param amp_fac: float. amplification factor for the first moment filter.
-        :param centralize_gradients: bool. use GC both convolution & fc layers. Can be selectively applied: 'gradient', 'update', 'both', 'disabled'
-        :param normalize_gradients: bool. use gradient normalization.  Can be selectively applied: 'gradient', 'update', 'both', 'disabled'
+        :param centralize_gradients: bool. use GC both convolution & fc layers. Can be selectively applied an int: disabled(0), gradient(1), update(2), both(3)
+        :param normalize_gradients: bool. use gradient normalization.  Can be selectively applied using an int: disabled(0), gradient(1), update(2), both(3)
         :param use_lookahead: bool. use lookahead. ADDS 1 STATE
         :param lookahead_merge_time: int. merge time.
         :param lookahead_blending_alpha: float. blending alpha.
@@ -781,8 +781,8 @@ class CompassPlus(BaseOptimizer):
         :param agc_clipping_value: float. Clipping threshold for adaptive gradient clipping.
         :param agc_eps: float. eps for adaptive gradient clipping.
         :param amp_fac: float. amplification factor for the first moment filter.
-        :param centralize_gradients: bool. use GC both convolution & fc layers. Can be selectively applied: 'gradient', 'update', 'both', 'disabled'
-        :param normalize_gradients: bool. use gradient normalization.  Can be selectively applied: 'gradient', 'update', 'both', 'disabled'
+        :param centralize_gradients: bool. use GC both convolution & fc layers. Can be selectively applied an int: disabled(0), gradient(1), update(2), both(3)
+        :param normalize_gradients: bool. use gradient normalization.  Can be selectively applied using an int: disabled(0), gradient(1), update(2), both(3)
         :param use_lookahead: bool. use lookahead. ADDS 1 STATE
         :param lookahead_merge_time: int. merge time.
         :param lookahead_blending_alpha: float. blending alpha.

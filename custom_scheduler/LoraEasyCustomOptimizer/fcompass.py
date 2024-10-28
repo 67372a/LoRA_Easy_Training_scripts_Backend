@@ -219,11 +219,11 @@ class FCompassPlus(BaseOptimizer):
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float = 7e-05, #Original default 1e-3
-        betas: BETAS = (0.98, 0.999), #Original default 0.99, 0.999
+        lr: float = 1e-04, #Original default 1e-3
+        betas: BETAS = (0.975, 0.999), #Original default 0.99, 0.999
         amp_fac: float = 2.0,
-        centralize_gradients: CENT_NORM_APPLICATION = 'gradient',
-        normalize_gradients: CENT_NORM_APPLICATION = 'disabled',
+        centralize_gradients: int = 1,
+        normalize_gradients: str = 0,
         eps: float = 1e-8,
         eps2: float = 1e-8,
         eps_floor: float = 1e-30,
@@ -232,13 +232,16 @@ class FCompassPlus(BaseOptimizer):
         use_lookahead: bool = False,
         lookahead_merge_time: int = 5,
         lookahead_blending_alpha: float = 0.5,
+        norm_loss_factor: float = 0.0005,
         use_softplus: bool = True,
         beta_softplus: float = 50.0,
+        threshold_softplus: float = 0.0,
         amsgrad: bool = True,
-        diff_amp=1.0,
-        diff_amp_beta=0.999,
+        diff_amp: float = 0.0,
+        diff_amp_beta: float = 0.999,
         use_pnm: bool = False,
         pnm_beta: float = 0.1,
+
     ):
         defaults = dict(
             lr=lr,
@@ -259,6 +262,10 @@ class FCompassPlus(BaseOptimizer):
             diff_amp_beta = diff_amp_beta,
             centralize_gradients = centralize_gradients,
             normalize_gradients = normalize_gradients,
+            threshold_softplus = threshold_softplus,
+            use_pnm = use_pnm,
+            pnm_beta = pnm_beta,
+            norm_loss_factor = norm_loss_factor,
         )
 
         self.eps = eps
@@ -269,11 +276,15 @@ class FCompassPlus(BaseOptimizer):
         self.lookahead_blending_alpha = lookahead_blending_alpha
         self.use_softplus = use_softplus
         self.beta_softplus = beta_softplus
+        self.threshold_softplus = threshold_softplus
         self.amsgrad = amsgrad
         self.diff_amp = diff_amp
         self.diff_amp_beta = diff_amp_beta
         self.centralize_gradients = centralize_gradients
         self.normalize_gradients = normalize_gradients
+        self.use_pnm = use_pnm
+        self.pnm_beta = pnm_beta
+        self.norm_loss_factor = norm_loss_factor
         super(FCompassPlus, self).__init__(params, defaults)
 
     def __str__(self) -> str:
@@ -324,9 +335,10 @@ class FCompassPlus(BaseOptimizer):
                 grad = p.grad
                 if grad.is_sparse:
                     raise RuntimeError("FCompassPlus does not support sparse gradients")
-
+                
                 state = self.state[p]
-
+                p_fp32 = p
+                
                 # State initialization
                 if len(state) == 0:
                     # Exponential moving average and squared exponential moving average gradient values
@@ -343,9 +355,27 @@ class FCompassPlus(BaseOptimizer):
 
                     # Previous grad
                     if self.diff_amp > 0.0:
-                        state["ema_diff"] = torch.zeros_like(p.data)
-                        state["previous_grad"] = grad.data.clone().mul_(-1.0)
+                        state["ema_diff"] = torch.zeros_like(p)
+                        state["previous_grad"] = grad.clone().mul_(-1.0)
 
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
+                
+                # Apply gradient centralization & normalization
+                if self.centralize_gradients in {1,3}:
+                    centralize_gradient(grad, gc_conv_only=False)
+
+                if self.normalize_gradients in {1,3}:
+                    normalize_gradient(grad)
+
+
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                grad = p.grad
+
+                state = self.state[p]
 
                 fim, ema_squared = state["fim"], state['ema_squared']
                 p_fp32 = p
@@ -392,12 +422,6 @@ class FCompassPlus(BaseOptimizer):
                 lr = group["lr"]
                 weight_decay = group["weight_decay"]
                 clip = group["clip"]
-
-                if self.centralize_gradients in {'gradient','both'}:
-                    centralize_gradient(grad, gc_conv_only=False)
-
-                if self.normalize_gradients in {'gradient','both'}:
-                    normalize_gradient(grad) 
 
                 # bias correction step size
                 # soft warmup
@@ -458,15 +482,20 @@ class FCompassPlus(BaseOptimizer):
                 if self.use_softplus:
                     de_nom = softplus(de_nom, beta=self.beta_softplus, threshold=self.threshold_softplus if self.threshold_softplus != 0 else curr_eps)
 
+                if self.norm_loss_factor > 0.0:
+                    # norm loss
+                    correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(curr_eps))
+                    p_fp32.mul_(1.0 - lr * correction)
+
                 full_step.div_(de_nom)
 
-                if self.centralize_gradients in {'update','both'}:
+                if self.centralize_gradients in {2,3}:
                     centralize_gradient(full_step, gc_conv_only=False)
 
-                if self.normalize_gradients in {'update','both'}:
+                if self.normalize_gradients in {2,3}:
                     normalize_gradient(full_step) 
 
-                p_fp32.add_(full_step, value=-lr)
+                p_fp32.add_(full_step, alpha=-lr)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
