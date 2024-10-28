@@ -53,7 +53,7 @@ class FCompass(Optimizer):
         betas=(0.98, 0.999), #Original default 0.99, 0.999
         amp_fac=2,
         eps=1e-8,
-        eps2=0.1,
+        eps2=0.01,
         eps_floor=1e-30,
         weight_decay=0.001, #Original default 0.1
         clip=1.0,
@@ -225,10 +225,12 @@ class FCompassPlus(BaseOptimizer):
         centralize_gradients: int = 1,
         normalize_gradients: str = 0,
         eps: float = 1e-8,
-        eps2: float = 1e-8,
+        eps2: float = 0.01,
         eps_floor: float = 1e-30,
         weight_decay: float = 0.001, #Original default 0.1
-        clip: float = 1.0,
+        stable_decay: bool = False,
+        clip: float = 0.01,
+        clip_eps: float = 1e-3,
         use_lookahead: bool = False,
         lookahead_merge_time: int = 5,
         lookahead_blending_alpha: float = 0.5,
@@ -252,6 +254,7 @@ class FCompassPlus(BaseOptimizer):
             eps_floor=eps_floor,
             weight_decay=weight_decay,
             clip=clip,
+            clip_eps=clip_eps,
             use_lookahead = use_lookahead,
             lookahead_merge_time = lookahead_merge_time,
             lookahead_blending_alpha = lookahead_blending_alpha,
@@ -266,6 +269,7 @@ class FCompassPlus(BaseOptimizer):
             use_pnm = use_pnm,
             pnm_beta = pnm_beta,
             norm_loss_factor = norm_loss_factor,
+            stable_decay = stable_decay,
         )
 
         self.eps = eps
@@ -285,6 +289,9 @@ class FCompassPlus(BaseOptimizer):
         self.use_pnm = use_pnm
         self.pnm_beta = pnm_beta
         self.norm_loss_factor = norm_loss_factor
+        self.stable_decay = stable_decay
+        self.clip = clip
+        self.clip_eps = clip_eps
         super(FCompassPlus, self).__init__(params, defaults)
 
     def __str__(self) -> str:
@@ -323,6 +330,9 @@ class FCompassPlus(BaseOptimizer):
             with torch.enable_grad():
                 loss = closure()
 
+        param_size: int = 0
+        ema_squared_sum: float = 1.0
+
         for group in self.param_groups:
             if 'step' in group:
                 group['step'] += 1
@@ -338,6 +348,8 @@ class FCompassPlus(BaseOptimizer):
                 
                 state = self.state[p]
                 p_fp32 = p
+
+                param_size += p.numel()
                 
                 # State initialization
                 if len(state) == 0:
@@ -368,6 +380,13 @@ class FCompassPlus(BaseOptimizer):
                 if self.normalize_gradients in {1,3}:
                     normalize_gradient(grad)
 
+        if param_size == 0:
+            raise ZeroParameterSizeError()
+        
+        if self.stable_decay:
+            ema_squared_normalized = math.sqrt(ema_squared_sum / param_size)
+        else:
+            ema_squared_normalized = ema_squared_sum
 
         for group in self.param_groups:
             for p in group["params"]:
@@ -421,7 +440,6 @@ class FCompassPlus(BaseOptimizer):
                 amplification_factor = group["amp_fac"]
                 lr = group["lr"]
                 weight_decay = group["weight_decay"]
-                clip = group["clip"]
 
                 # bias correction step size
                 # soft warmup
@@ -439,10 +457,11 @@ class FCompassPlus(BaseOptimizer):
                 # Compute natural gradient
                 grad_nat = grad / fim_base
 
-                if clip != 0:
-                    rms = grad_nat.pow(2).mean().sqrt_().add_(curr_eps)
-                    divisor = max(1, rms) / clip
-                    grad_nat.div_(divisor)
+                if self.clip > 0.0:
+                    #rms = grad_nat.pow(2).mean().sqrt_().add_(curr_eps)
+                    #divisor = max(1, rms) / clip
+                    #grad_nat.div_(divisor)
+                    grad_nat.copy_(agc(p_fp32, grad_nat, self.clip_eps, self.clip, curr_eps))
 
                 # Momentum + Compass amplification
                 momentum.mul_(beta1).add_(grad_nat, alpha=1 - beta1)
@@ -456,17 +475,19 @@ class FCompassPlus(BaseOptimizer):
 
                 grad_weights = p_fp32 / fim_base
   
-                if clip != 0:
-                    rms = grad_weights.pow(2).mean().sqrt_().add_(curr_eps)
-                    divisor = max(1, rms) / clip
-                    grad_weights.div_(divisor)
+                if self.clip > 0.0:
+                    #rms = grad_weights.pow(2).mean().sqrt_().add_(curr_eps)
+                    #divisor = max(1, rms) / clip
+                    #grad_weights.div_(divisor)
+                    grad_weights.copy_(agc(p_fp32, grad_weights, self.clip_eps, self.clip, curr_eps))
 
                 # Differential amplification
                 diff_weights = ema_diff / fim_base if self.diff_amp else 0
-                if self.diff_amp > 0.0:
-                    rms = diff_weights.pow(2).mean().sqrt_().add_(curr_eps)
-                    divisor = max(1, rms) / clip
-                    diff_weights.div_(divisor)
+                if self.diff_amp > 0.0 and self.clip > 0.0:
+                    #rms = diff_weights.pow(2).mean().sqrt_().add_(curr_eps)
+                    #divisor = max(1, rms) / clip
+                    #diff_weights.div_(divisor)
+                    diff_weights.copy_(agc(p_fp32, diff_weights, self.clip_eps, self.clip, curr_eps))
                 
                 # Weight decay
                 full_step = grad_nat + (weight_decay * grad_weights) - (self.diff_amp * diff_weights)
