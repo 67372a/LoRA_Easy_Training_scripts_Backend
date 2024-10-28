@@ -5,7 +5,7 @@
 
 import torch
 from torch.optim import Optimizer
-from .utils import copy_stochastic_, quantize, dequantize
+from .utils import copy_stochastic_, quantize, dequantize, CENT_NORM_APPLICATION
 import math
 from torch.nn.functional import softplus
 from typing import Literal, Optional, List
@@ -17,8 +17,6 @@ from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMET
 from pytorch_optimizer.optimizer.agc import agc
 from pytorch_optimizer.optimizer.gc import centralize_gradient
 from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
-
-CENT_NORM_APPLICATION = Literal['gradient', 'update', 'both', 'disabled']
 
 class Compass(Optimizer):
     r"""
@@ -545,8 +543,6 @@ class CompassExperimental(BaseOptimizer):
 
                 if self.use_slow_ema:
                     ema_slow = state['ema_slow']
-
-
 
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:

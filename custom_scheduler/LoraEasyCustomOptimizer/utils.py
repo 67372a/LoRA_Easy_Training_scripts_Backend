@@ -1,5 +1,5 @@
 import torch
-from typing import Any, Dict, List, Tuple, Union, Type
+from typing import Any, Dict, List, Tuple, Union, Type, Literal
 import torch.nn.functional as F
 from torch.optim import Optimizer
 from einops import rearrange
@@ -75,3 +75,5 @@ def dequantize(tensor, details, dtype=torch.float32):
     tensor = tensor.view(shape)
 
     return tensor
+
+CENT_NORM_APPLICATION = Literal['gradient', 'update', 'both', 'disabled']
