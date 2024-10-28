@@ -40,7 +40,7 @@ class FARMSCrop(Optimizer):
         lr=1e-4,
         betas=(0.999, 0.9999),
         eps=1e-8,
-        eps2=1e-8,
+        eps2=0.1,
         eps_floor=1e-30,
         weight_decay=1e-6,
         centralization=1.0,

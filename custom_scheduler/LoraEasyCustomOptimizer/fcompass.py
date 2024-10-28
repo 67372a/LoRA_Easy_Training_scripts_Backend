@@ -53,7 +53,7 @@ class FCompass(Optimizer):
         betas=(0.98, 0.999), #Original default 0.99, 0.999
         amp_fac=2,
         eps=1e-8,
-        eps2=1e-8,
+        eps2=0.1,
         eps_floor=1e-30,
         weight_decay=0.001, #Original default 0.1
         clip=1.0,
