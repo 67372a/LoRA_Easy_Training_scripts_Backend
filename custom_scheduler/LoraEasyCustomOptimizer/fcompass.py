@@ -223,7 +223,7 @@ class FCompassPlus(BaseOptimizer):
         betas: BETAS = (0.975, 0.999), #Original default 0.99, 0.999
         amp_fac: float = 2.0,
         centralize_gradients: int = 1,
-        normalize_gradients: str = 0,
+        normalize_gradients: int = 0,
         eps: float = 1e-8,
         eps2: float = 0.01,
         eps_floor: float = 1e-30,

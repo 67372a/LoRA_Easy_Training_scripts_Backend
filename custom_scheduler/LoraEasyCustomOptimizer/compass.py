@@ -251,8 +251,8 @@ class CompassExperimental(BaseOptimizer):
         clip: float = 0.01,
         clip_eps: float = 1e-3,
         amp_fac: float = 2.0,
-        centralize_gradients: CENT_NORM_APPLICATION = 'disabled',
-        normalize_gradients: CENT_NORM_APPLICATION = 'disabled',
+        centralize_gradients: int = 0,
+        normalize_gradients: int = 0,
         norm_loss_factor: float = 0.0005,
         use_softplus: bool = True,
         beta_softplus: float = 50.0,
@@ -502,10 +502,10 @@ class CompassExperimental(BaseOptimizer):
                     grad.copy_(agc(p_fp32, grad, self.clip_eps, self.clip))
 
                 # Apply gradient centralization & normalization
-                if self.centralize_gradients in {'gradient','both'}:
+                if self.centralize_gradients in {1,3}:
                     centralize_gradient(grad, gc_conv_only=False)
 
-                if self.normalize_gradients in {'gradient','both'}:
+                if self.normalize_gradients in {1,3}:
                     normalize_gradient(grad)
 
         if param_size == 0:
@@ -705,10 +705,10 @@ class CompassExperimental(BaseOptimizer):
                 if self.weight_decay > 0.0 and self.use_slow_ema and not self.weight_decouple:
                     update.add_(p_fp32, alpha=self.weight_decay)
 
-                if self.centralize_gradients in {'update','both'}:
+                if self.centralize_gradients in {2,3}:
                     centralize_gradient(update, gc_conv_only=False)
 
-                if self.normalize_gradients in {'update','both'}:
+                if self.normalize_gradients in {2,3}:
                     normalize_gradient(update) 
 
                 # p = p - lr * grad / de_nom
@@ -821,8 +821,8 @@ class CompassPlus(BaseOptimizer):
         clip: float = 0.01,
         clip_eps: float = 1e-3,
         amp_fac: float = 2.0,
-        centralize_gradients: CENT_NORM_APPLICATION = 'disabled',
-        normalize_gradients: CENT_NORM_APPLICATION = 'disabled',
+        centralize_gradients: int = 0,
+        normalize_gradients: int = 0,
         norm_loss_factor: float = 0.0005,
         use_softplus: bool = True,
         beta_softplus: float = 50.0,
@@ -1072,10 +1072,10 @@ class CompassPlus(BaseOptimizer):
                     grad.copy_(agc(p_fp32, grad, self.clip_eps, self.clip))
 
                 # Apply gradient centralization & normalization
-                if self.centralize_gradients in {'gradient','both'}:
+                if self.centralize_gradients in {1,3}:
                     centralize_gradient(grad, gc_conv_only=False)
 
-                if self.normalize_gradients in {'gradient','both'}:
+                if self.normalize_gradients in {1,3}:
                     normalize_gradient(grad)
 
         if param_size == 0:
@@ -1277,10 +1277,10 @@ class CompassPlus(BaseOptimizer):
                 if self.weight_decay > 0.0 and self.use_slow_ema and not self.weight_decouple:
                     update.add_(p_fp32, alpha=self.weight_decay)
 
-                if self.centralize_gradients in {'update','both'}:
+                if self.centralize_gradients in {2,3}:
                     centralize_gradient(update, gc_conv_only=False)
 
-                if self.normalize_gradients in {'update','both'}:
+                if self.normalize_gradients in {2,3}:
                     normalize_gradient(update) 
 
                 # p = p - lr * grad / de_nom
