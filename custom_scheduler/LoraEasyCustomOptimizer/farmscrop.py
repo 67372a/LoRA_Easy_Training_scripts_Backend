@@ -18,6 +18,10 @@ class FARMSCrop(Optimizer):
         eps (float):
             Term added to the denominator outside of the root operation to
             improve numerical stability. (default: 1e-8).
+        eps2 (float):
+            Term to multiple the RMS of the grad to calculate adaptive eps. (default: 0.01).
+        eps_floor (float):
+            Term to set a floor for the eps, to prevent NaNs. (default: 1e-30).
         weight_decay (float):
             Weight decay, i.e. a L2 penalty (default: 1e-6).
         centralization (float):
@@ -36,6 +40,8 @@ class FARMSCrop(Optimizer):
         lr=1e-4,
         betas=(0.999, 0.9999),
         eps=1e-8,
+        eps2=1e-8,
+        eps_floor=1e-30,
         weight_decay=1e-6,
         centralization=1.0,
         diff_mult=1.0,
@@ -46,12 +52,18 @@ class FARMSCrop(Optimizer):
             lr=lr,
             betas=betas,
             eps=eps,
+            eps2=eps2,
+            eps_floor=eps_floor,
             weight_decay=weight_decay,
             centralization=centralization,
             diff_mult=diff_mult,
             momentum_beta=momentum_beta,
             momentum_amp=momentum_amp,
         )
+
+        self.eps = eps
+        self.eps2 = eps2
+        self.eps_floor = eps_floor
         super(FARMSCrop, self).__init__(params, defaults)
 
     def __str__(self) -> str:
@@ -118,8 +130,11 @@ class FARMSCrop(Optimizer):
 
                 grad_diff_fim.mul_(beta1).addcmul_(grad_diff, grad_diff, value=1 - beta1)
 
+                rms_grad = grad.pow(2).mean().sqrt_()
+                curr_eps = max(min(rms_grad.item() * self.eps2, self.eps), self.eps_floor) # Set a floor for eps to avoid NaN
+
                 # Get natural gradient (squared ema, obtained sqrt of ema)
-                diff_fim_base = grad_diff_fim.sqrt().add_(group["eps"])
+                diff_fim_base = grad_diff_fim.sqrt().add_(curr_eps)
 
                 approx_grad_nat = grad.div(diff_fim_base)
 
@@ -128,7 +143,7 @@ class FARMSCrop(Optimizer):
                 approx_grad_nat.div_(divisor)
 
                 fim.mul_(fim_slow_beta).addcmul_(approx_grad_nat, approx_grad_nat, value=1 - fim_slow_beta)
-                fim_base = fim.sqrt().add_(group["eps"])
+                fim_base = fim.sqrt().add_(curr_eps)
 
                 grad_nat = grad.div(fim_base).mul_(diff_fim_base)
                 rms = grad_nat.pow(2).mean().sqrt_()

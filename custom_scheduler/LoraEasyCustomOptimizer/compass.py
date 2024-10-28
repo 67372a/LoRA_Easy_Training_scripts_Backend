@@ -522,8 +522,9 @@ class CompassExperimental(BaseOptimizer):
             bias_correction2_sq: float = math.sqrt(self.debias(beta2, group['step']))
 
             if self.use_slow_ema:
-                slow_ema_alpha_t: float = self.schedule_alpha(group['slow_ema_t_alpha_beta'], group['step'], group['slow_ema_alpha'])
-                slow_ema_beta3_t: float = self.schedule_beta3(group['slow_ema_t_alpha_beta'], group['step'], beta1, group["slow_ema_beta"], self.eps)
+                # Scale with amp fac for consistency
+                slow_ema_alpha_t: float = self.schedule_alpha(self.slow_ema_t_alpha_beta, group['step'], self.slow_ema_alpha * self.amp_fac)
+                slow_ema_beta3_t: float = self.schedule_beta3(self.slow_ema_t_alpha_beta, group['step'], beta1, self.slow_ema_beta, self.eps)
 
             for p in group["params"]:
                 if p.grad is None:
@@ -603,7 +604,8 @@ class CompassExperimental(BaseOptimizer):
                     # Smooth the difference between previous grad and current grad
                     ema_diff.mul_(self.diff_amp_beta).add_(grad_diff, alpha=1 - self.diff_amp_beta)
 
-                    grad.add_(ema_diff, alpha=self.diff_amp)
+                    # Scale with amp fac for consistency
+                    grad.add_(ema_diff, alpha=self.diff_amp * self.amp_fac)
 
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         copy_stochastic_(state["previous_grad"], -nat_grad)
@@ -664,10 +666,10 @@ class CompassExperimental(BaseOptimizer):
                     grad = grad.to(torch.float32)
                     ema_squared = ema_squared.to(torch.float32)
 
-                # TODO grad at this point isn't the original grad, so won't have the expected effect, though shouldn't be harmful as is
+                # TODO Is this right for non-fisher?
+                # Basically should allow smaller eps whenever grad is small, so eps doesn't have outsized influence
                 rms_grad = grad.pow(2).mean().sqrt_()
                 current_eps = max(min(rms_grad.item() * self.eps2, self.eps), self.eps_floor) # Set a floor for eps to avoid NaN
-                #current_eps = self.eps
  
                 # lr scaler + eps to prevent zero division
                 # de_nom = exp_avg_sq.sqrt() + group['eps']
@@ -1092,8 +1094,9 @@ class CompassPlus(BaseOptimizer):
             bias_correction2_sq: float = math.sqrt(self.debias(beta2, group['step']))
 
             if self.use_slow_ema:
-                slow_ema_alpha_t: float = self.schedule_alpha(group['slow_ema_t_alpha_beta'], group['step'], group['slow_ema_alpha'])
-                slow_ema_beta3_t: float = self.schedule_beta3(group['slow_ema_t_alpha_beta'], group['step'], beta1, group["slow_ema_beta"], self.eps)
+                # Scale with amp fac for consistency
+                slow_ema_alpha_t: float = self.schedule_alpha(self.slow_ema_t_alpha_beta, group['step'], self.slow_ema_alpha * self.amp_fac)
+                slow_ema_beta3_t: float = self.schedule_beta3(self.slow_ema_t_alpha_beta, group['step'], beta1, self.slow_ema_beta, self.eps)
 
             for p in group["params"]:
                 if p.grad is None:
@@ -1173,7 +1176,8 @@ class CompassPlus(BaseOptimizer):
                     # Smooth the difference between previous grad and current grad
                     ema_diff.mul_(self.diff_amp_beta).add_(grad_diff, alpha=1 - self.diff_amp_beta)
 
-                    grad.add_(ema_diff, alpha=self.diff_amp)
+                    # Scale with amp fac for consistency
+                    grad.add_(ema_diff, alpha=self.diff_amp * self.amp_fac)
 
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         copy_stochastic_(state["previous_grad"], -nat_grad)
@@ -1234,10 +1238,10 @@ class CompassPlus(BaseOptimizer):
                     grad = grad.to(torch.float32)
                     ema_squared = ema_squared.to(torch.float32)
 
-                # TODO grad at this point isn't the original grad, so won't have the expected effect, though shouldn't be harmful as is
+                # TODO Is this right for non-fisher?
+                # Basically should allow smaller eps whenever grad is small, so eps doesn't have outsized influence
                 rms_grad = grad.pow(2).mean().sqrt_()
                 current_eps = max(min(rms_grad.item() * self.eps2, self.eps), self.eps_floor) # Set a floor for eps to avoid NaN
-                #current_eps = self.eps
  
                 # lr scaler + eps to prevent zero division
                 # de_nom = exp_avg_sq.sqrt() + group['eps']

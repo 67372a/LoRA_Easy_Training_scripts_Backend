@@ -21,6 +21,10 @@ class FishMonger(Optimizer):
         eps (float):
             Term added to the denominator outside of the root operation to
             improve numerical stability. (default: 1e-8).
+        eps2 (float):
+            Term to multiple the RMS of the grad to calculate adaptive eps. (default: 0.01).
+        eps_floor (float):
+            Term to set a floor for the eps, to prevent NaNs. (default: 1e-30).
         weight_decay (float):
             Weight decay, i.e. a L2 penalty (default: 0.0).
         clip (float):
@@ -39,6 +43,8 @@ class FishMonger(Optimizer):
         lr=1e-3,
         betas=(0.9, 0.99, 0.999),
         eps=1e-8,
+        eps2=1e-8,
+        eps_floor=1e-30,
         weight_decay=0.0,
         clip=1.0,
         centralization=1.0,
@@ -49,12 +55,19 @@ class FishMonger(Optimizer):
             lr=lr,
             betas=betas,
             eps=eps,
+            eps=eps,
+            eps2=eps2,
+            eps_floor=eps_floor,
             weight_decay=weight_decay,
             clip=clip,
             centralization=centralization,
             diff_amp=diff_amp,
             diff_amp_beta=diff_amp_beta,
         )
+
+        self.eps = eps
+        self.eps2 = eps2
+        self.eps_floor = eps_floor
         super(FishMonger, self).__init__(params, defaults)
 
     def __str__(self) -> str:
@@ -138,7 +151,8 @@ class FishMonger(Optimizer):
                 # Update fim
                 fim.mul_(fim_beta).addcmul_(momentum, momentum, value=1 - fim_beta)
 
-                curr_eps = group["eps"] # To find a better adaptive epsilon later, if at all...
+                rms_grad = grad.pow(2).mean().sqrt_()
+                curr_eps = max(min(rms_grad.item() * self.eps2, self.eps), self.eps_floor) # Set a floor for eps to avoid NaN
 
                 fim_base = fim.sqrt() + curr_eps
 
