@@ -228,7 +228,6 @@ class FCompassPlus(BaseOptimizer):
         eps2: float = 0.01,
         eps_floor: float = 1e-30,
         weight_decay: float = 0.001, #Original default 0.1
-        stable_decay: bool = False,
         clip: float = 0.01,
         clip_eps: float = 1e-3,
         use_lookahead: bool = False,
@@ -243,7 +242,6 @@ class FCompassPlus(BaseOptimizer):
         diff_amp_beta: float = 0.999,
         use_pnm: bool = False,
         pnm_beta: float = 0.1,
-
     ):
         defaults = dict(
             lr=lr,
@@ -269,7 +267,6 @@ class FCompassPlus(BaseOptimizer):
             use_pnm = use_pnm,
             pnm_beta = pnm_beta,
             norm_loss_factor = norm_loss_factor,
-            stable_decay = stable_decay,
         )
 
         self.eps = eps
@@ -289,9 +286,10 @@ class FCompassPlus(BaseOptimizer):
         self.use_pnm = use_pnm
         self.pnm_beta = pnm_beta
         self.norm_loss_factor = norm_loss_factor
-        self.stable_decay = stable_decay
         self.clip = clip
         self.clip_eps = clip_eps
+        self.lookahead_step: int = 0
+
         super(FCompassPlus, self).__init__(params, defaults)
 
     def __str__(self) -> str:
@@ -330,9 +328,6 @@ class FCompassPlus(BaseOptimizer):
             with torch.enable_grad():
                 loss = closure()
 
-        param_size: int = 0
-        ema_squared_sum: float = 1.0
-
         for group in self.param_groups:
             if 'step' in group:
                 group['step'] += 1
@@ -348,8 +343,6 @@ class FCompassPlus(BaseOptimizer):
                 
                 state = self.state[p]
                 p_fp32 = p
-
-                param_size += p.numel()
                 
                 # State initialization
                 if len(state) == 0:
@@ -380,15 +373,10 @@ class FCompassPlus(BaseOptimizer):
                 if self.normalize_gradients in {1,3}:
                     normalize_gradient(grad)
 
-        if param_size == 0:
-            raise ZeroParameterSizeError()
-        
-        if self.stable_decay:
-            ema_squared_normalized = math.sqrt(ema_squared_sum / param_size)
-        else:
-            ema_squared_normalized = ema_squared_sum
-
         for group in self.param_groups:
+
+            beta1, beta2 = group["betas"]
+
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -436,7 +424,6 @@ class FCompassPlus(BaseOptimizer):
                     if self.use_pnm:
                         neg_momentum = neg_momentum.to(torch.float32)
 
-                beta1, beta2 = group["betas"]
                 amplification_factor = group["amp_fac"]
                 lr = group["lr"]
                 weight_decay = group["weight_decay"]
@@ -458,10 +445,9 @@ class FCompassPlus(BaseOptimizer):
                 grad_nat = grad / fim_base
 
                 if self.clip > 0.0:
-                    #rms = grad_nat.pow(2).mean().sqrt_().add_(curr_eps)
-                    #divisor = max(1, rms) / clip
-                    #grad_nat.div_(divisor)
-                    grad_nat.copy_(agc(p_fp32, grad_nat, self.clip_eps, self.clip, curr_eps))
+                    rms = grad_nat.pow(2).mean().sqrt_().add_(curr_eps)
+                    divisor = max(1, rms) / self.clip
+                    grad_nat.div_(divisor)
 
                 # Momentum + Compass amplification
                 momentum.mul_(beta1).add_(grad_nat, alpha=1 - beta1)
@@ -476,18 +462,16 @@ class FCompassPlus(BaseOptimizer):
                 grad_weights = p_fp32 / fim_base
   
                 if self.clip > 0.0:
-                    #rms = grad_weights.pow(2).mean().sqrt_().add_(curr_eps)
-                    #divisor = max(1, rms) / clip
-                    #grad_weights.div_(divisor)
-                    grad_weights.copy_(agc(p_fp32, grad_weights, self.clip_eps, self.clip, curr_eps))
+                    rms = grad_weights.pow(2).mean().sqrt_().add_(curr_eps)
+                    divisor = max(1, rms) / self.clip
+                    grad_weights.div_(divisor)
 
                 # Differential amplification
                 diff_weights = ema_diff / fim_base if self.diff_amp else 0
                 if self.diff_amp > 0.0 and self.clip > 0.0:
-                    #rms = diff_weights.pow(2).mean().sqrt_().add_(curr_eps)
-                    #divisor = max(1, rms) / clip
-                    #diff_weights.div_(divisor)
-                    diff_weights.copy_(agc(p_fp32, diff_weights, self.clip_eps, self.clip, curr_eps))
+                    rms = diff_weights.pow(2).mean().sqrt_().add_(curr_eps)
+                    divisor = max(1, rms) / self.clip
+                    diff_weights.div_(divisor)
                 
                 # Weight decay
                 full_step = grad_nat + (weight_decay * grad_weights) - (self.diff_amp * diff_weights)
