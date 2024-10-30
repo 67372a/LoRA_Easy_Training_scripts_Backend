@@ -272,7 +272,7 @@ class CompassPlus(BaseOptimizer):
         diff_amp_beta: float = 0.999,
         eps: float = 1e-8,
         eps2: float = 0.01,
-        eps_floor: float = 1e-30,
+        eps_floor: float = 1e-16,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
