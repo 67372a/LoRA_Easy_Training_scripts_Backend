@@ -374,10 +374,11 @@ class CompassPlus(BaseOptimizer):
     def reset(self):
         for group in self.param_groups:
             group['step'] = 0
+
+            beta1, beta2 = group["betas"]
+
             for p in group['params']:
                 state = self.state[p]
-
-                beta1, beta2 = group["betas"]
 
                 grad = p.grad
 
