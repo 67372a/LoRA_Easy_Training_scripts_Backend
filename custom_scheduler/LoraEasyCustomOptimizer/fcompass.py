@@ -1,15 +1,12 @@
 import torch
 from torch.optim import Optimizer
-from .utils import copy_stochastic_, quantize, dequantize, CENT_NORM_APPLICATION
+from .utils import copy_stochastic_
 import math
 from torch.nn.functional import softplus
-from typing import Literal, Optional, List
 
-from bitsandbytes.functional import quantize_blockwise, dequantize_blockwise
-from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
+from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from pytorch_optimizer.optimizer.agc import agc
 from pytorch_optimizer.optimizer.gc import centralize_gradient
 from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
 
@@ -219,15 +216,15 @@ class FCompassPlus(BaseOptimizer):
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float = 1e-04, #Original default 1e-3
-        betas: BETAS = (0.975, 0.999), #Original default 0.99, 0.999
+        lr: float = 1e-04,
+        betas: BETAS = (0.97, 0.999),
         amp_fac: float = 2.0,
         centralize_gradients: int = 1,
         normalize_gradients: int = 0,
         eps: float = 1e-8,
         eps2: float = 0.01,
         eps_floor: float = 1e-30,
-        weight_decay: float = 0.001, #Original default 0.1
+        weight_decay: float = 0.001,
         clip: float = 0.01,
         clip_eps: float = 1e-3,
         use_lookahead: bool = False,
@@ -268,6 +265,32 @@ class FCompassPlus(BaseOptimizer):
             pnm_beta = pnm_beta,
             norm_loss_factor = norm_loss_factor,
         )
+
+        defaults: DEFAULTS = {
+            'lr':lr,
+            'betas':betas,
+            'amp_fac':amp_fac,
+            'eps':eps,
+            'eps2':eps2,
+            'eps_floor':eps_floor,
+            'weight_decay':weight_decay,
+            'clip':clip,
+            'clip_eps':clip_eps,
+            'use_lookahead' : use_lookahead,
+            'lookahead_merge_time' : lookahead_merge_time,
+            'lookahead_blending_alpha' : lookahead_blending_alpha,
+            'use_softplus' : use_softplus,
+            'beta_softplus' : beta_softplus,
+            'amsgrad' : amsgrad,
+            'diff_amp' : diff_amp,
+            'diff_amp_beta' : diff_amp_beta,
+            'centralize_gradients' : centralize_gradients,
+            'normalize_gradients' : normalize_gradients,
+            'threshold_softplus' : threshold_softplus,
+            'use_pnm' : use_pnm,
+            'pnm_beta' : pnm_beta,
+            'norm_loss_factor' : norm_loss_factor,
+        }
 
         self.eps = eps
         self.eps2 = eps2
@@ -339,7 +362,7 @@ class FCompassPlus(BaseOptimizer):
                     continue
                 grad = p.grad
                 if grad.is_sparse:
-                    raise RuntimeError("FCompassPlus does not support sparse gradients")
+                    raise NoSparseGradientError(str(self))
                 
                 state = self.state[p]
                 p_fp32 = p

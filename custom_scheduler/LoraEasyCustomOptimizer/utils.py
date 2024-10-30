@@ -75,5 +75,3 @@ def dequantize(tensor, details, dtype=torch.float32):
     tensor = tensor.view(shape)
 
     return tensor
-
-CENT_NORM_APPLICATION = Literal['gradient', 'update', 'both', 'disabled']
