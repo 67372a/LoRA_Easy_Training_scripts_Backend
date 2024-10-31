@@ -51,7 +51,7 @@ class FCompass(Optimizer):
         amp_fac=2,
         eps=1e-8,
         eps2=0.01,
-        eps_floor=1e-30,
+        eps_floor=1e-16,
         weight_decay=0.001, #Original default 0.1
         clip=1.0,
         centralization=1.0,
