@@ -222,6 +222,7 @@ class CompassPlus(BaseOptimizer):
         :param max_lr: float. Max LR used for lr_decouple, should match your defined max LR for training.
         :param fixed_decay: bool. fix weight decay.
         :param norm_loss_factor: float. norm loss factor.
+        :param norm_loss_eps: float. Eps is the term added to the denominator to improve numerical stability.
         :param adam_debias: bool. Only correct the denominator to avoid inflating step sizes early in training.
         :param amsgrad: bool. If true, maintains and uses the max ema squared. ADDS 1 STATE
         :param use_pnm: bool. use positive negative momentum. ADDS 1 STATE

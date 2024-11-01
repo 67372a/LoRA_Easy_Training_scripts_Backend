@@ -184,33 +184,43 @@ class FCompass(Optimizer):
 class FCompassPlus(BaseOptimizer):
     r"""
     Fisher Compass: Utilizing approximate fisher information to accelerate training. (Applied onto Compass).
+        Components
+            * Gradient centralization - https://arxiv.org/abs/2004.01461v2
+            * Positive-Negative momentum - https://arxiv.org/abs/2103.17182
+            * Norm loss - https://arxiv.org/abs/2103.06583v1
+            * Lookahead - https://arxiv.org/abs/1907.08610
+            * Softplus transformation - https://arxiv.org/abs/1908.00700
+            * Gradient Normalization - https://arxiv.org/pdf/1711.02257 (?)
+            * Diff amp - https://github.com/Clybius/Personalized-Optimizers/blob/main/FishMonger.py
+            * Amsgrad - https://arxiv.org/pdf/1904.09237
+
     Arguments:
-        params (iterable):
-            Iterable of parameters to optimize or dicts defining
-            parameter groups.
-        lr (float):
-            Learning rate parameter (default 7e-05)
-        betas (Tuple[float, float], optional):
-            coefficients used for computing running averages of
-            gradient and its square (default: (0.98, 0.999)).
-        amp_fac (float):
-            amplification factor for the first moment filter (default: 2).
-        eps (float):
-            Term added to the denominator outside of the root operation to
-            improve numerical stability. (default: 1e-8).
-        eps2 (float):
-            Term to multiple the RMS of the grad to calculate adaptive eps. (default: 0.01).
-        eps_floor (float):
-            Term to set a floor for the eps, to prevent NaNs. (default: 1e-30).
-        weight_decay (float):
-            Weight decay, i.e. a L2 penalty (default: 0.001).
-        clip (float):
-            Clip gradient to this value (default: 1.0).
-        centralization (float):
-            Center grad (default: 1.0).
+        :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+        :param lr: float. learning rate.
+        :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+        :param use_softplus: bool. use softplus to smooth the updaate denominator.
+        :param beta_softplus: float. beta for softplus.
+        :param threshold_softplus: float. threshold after which scaling returns to linear. Originally set to 20 by default, instead follows adaptive eps when set to 0.
+        :param clip: float. Clipping threshold for gradients.
+        :param amp_fac: float. amplification factor for the first moment filter.
+        :param centralize_gradients: bool. use GC both convolution & fc layers. Can be selectively applied an int: disabled(0), gradient(1), update(2), both(3)
+        :param normalize_gradients: bool. use gradient normalization.  Can be selectively applied using an int: disabled(0), gradient(1), update(2), both(3)
         :param use_lookahead: bool. use lookahead. ADDS 1 STATE
         :param lookahead_merge_time: int. merge time.
         :param lookahead_blending_alpha: float. blending alpha.
+        :param weight_decay: float. weight decay (L2 penalty).
+        :param weight_decouple: bool. the optimizer uses decoupled weight decay as in AdamW.
+        :param fixed_decay: bool. fix weight decay.
+        :param norm_loss_factor: float. norm loss factor.
+        :param norm_loss_eps: float. Eps is the term added to the denominator to improve numerical stability.
+        :param amsgrad: bool. If true, maintains and uses the max ema squared. ADDS 1 STATE
+        :param use_pnm: bool. use positive negative momentum. ADDS 1 STATE
+        :param pnm_beta: float. Manages the amplitude of the noise introduced by positive negative momentum. Negative values are valid.
+        :param diff_amp: float. Accelerate the difference between the current and past gradient by this multiplicative value. 0 is off. ADDS 2 STATES
+        :param diff_amp_beta: float. Coefficient used for computing running average of the current and past gradients
+        :param eps: float. the maximum eps value for adaptive eps. Eps is the term added to the denominator outside of the root operation to improve numerical stability.
+        :param eps2: float. used to multiple the grad rms for determining adaptive eps.
+        :param eps_floor: float. term used to determine the floor for adaptive eps.
     """
 
     def __init__(
@@ -226,11 +236,11 @@ class FCompassPlus(BaseOptimizer):
         eps_floor: float = 1e-16,
         weight_decay: float = 0.001,
         clip: float = 0.01,
-        clip_eps: float = 1e-3,
         use_lookahead: bool = False,
         lookahead_merge_time: int = 5,
         lookahead_blending_alpha: float = 0.5,
         norm_loss_factor: float = 0.0005,
+        norm_loss_eps: float = 1e-8,
         use_softplus: bool = True,
         beta_softplus: float = 50.0,
         threshold_softplus: float = 0.0,
@@ -249,7 +259,6 @@ class FCompassPlus(BaseOptimizer):
             eps_floor=eps_floor,
             weight_decay=weight_decay,
             clip=clip,
-            clip_eps=clip_eps,
             use_lookahead = use_lookahead,
             lookahead_merge_time = lookahead_merge_time,
             lookahead_blending_alpha = lookahead_blending_alpha,
@@ -264,6 +273,7 @@ class FCompassPlus(BaseOptimizer):
             use_pnm = use_pnm,
             pnm_beta = pnm_beta,
             norm_loss_factor = norm_loss_factor,
+            norm_loss_eps = norm_loss_eps,
         )
 
         defaults: DEFAULTS = {
@@ -275,7 +285,6 @@ class FCompassPlus(BaseOptimizer):
             'eps_floor':eps_floor,
             'weight_decay':weight_decay,
             'clip':clip,
-            'clip_eps':clip_eps,
             'use_lookahead' : use_lookahead,
             'lookahead_merge_time' : lookahead_merge_time,
             'lookahead_blending_alpha' : lookahead_blending_alpha,
@@ -290,6 +299,7 @@ class FCompassPlus(BaseOptimizer):
             'use_pnm' : use_pnm,
             'pnm_beta' : pnm_beta,
             'norm_loss_factor' : norm_loss_factor,
+            'norm_loss_eps' : norm_loss_eps
         }
 
         self.eps = eps
@@ -310,7 +320,7 @@ class FCompassPlus(BaseOptimizer):
         self.pnm_beta = pnm_beta
         self.norm_loss_factor = norm_loss_factor
         self.clip = clip
-        self.clip_eps = clip_eps
+        self.norm_loss_eps = norm_loss_eps
         self.lookahead_step: int = 0
 
         super(FCompassPlus, self).__init__(params, defaults)
@@ -512,7 +522,7 @@ class FCompassPlus(BaseOptimizer):
 
                 if self.norm_loss_factor > 0.0:
                     # norm loss
-                    correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(curr_eps))
+                    correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(self.norm_loss_eps))
                     p_fp32.mul_(1.0 - lr * correction)
 
                 full_step.div_(de_nom)
