@@ -111,6 +111,12 @@ class Compass(Optimizer):
             lr_decouple = group["lr_decouple"]
             max_lr = group["max_lr"]
 
+            # bias correction step size
+            # soft warmup
+            bias_correction = 1 - beta1 ** group['step']
+            bias_correction_sqrt = (1 - beta2 ** group['step']) ** (1 / 2)
+            debiased_lr = lr / bias_correction
+
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -143,12 +149,6 @@ class Compass(Optimizer):
                     grad.sub_(
                         grad.mean(dim=tuple(range(1, grad.dim())), keepdim=True).mul_(centralization)
                     )
-
-                # bias correction step size
-                # soft warmup
-                bias_correction = 1 - beta1 ** group['step']
-                bias_correction_sqrt = (1 - beta2 ** group['step']) ** (1 / 2)
-                debiased_lr = lr / bias_correction
 
                 # Clip the gradient 
                 if clip > 0.0:
@@ -254,6 +254,7 @@ class CompassPlus(BaseOptimizer):
         centralize_gradients: int = 0,
         normalize_gradients: int = 0,
         norm_loss_factor: float = 0.0005,
+        norm_loss_eps: float = 1e-8,
         use_softplus: bool = True,
         beta_softplus: float = 50.0,
         threshold_softplus: float = 0.0,
@@ -311,6 +312,7 @@ class CompassPlus(BaseOptimizer):
             'centralize_gradients': centralize_gradients,
             'normalize_gradients': normalize_gradients,
             'norm_loss_factor': norm_loss_factor,
+            'norm_loss_eps': norm_loss_eps,
             'use_softplus': use_softplus,
             'beta_softplus': beta_softplus,
             'threshold_softplus': threshold_softplus,
@@ -347,6 +349,7 @@ class CompassPlus(BaseOptimizer):
         self.beta_softplus = beta_softplus
         self.threshold_softplus = threshold_softplus
         self.norm_loss_factor = norm_loss_factor
+        self.norm_loss_eps = norm_loss_eps
         self.lr_decouple = lr_decouple
         self.weight_decay = weight_decay
         self.weight_decouple = weight_decouple
@@ -420,12 +423,12 @@ class CompassPlus(BaseOptimizer):
         return min(step * alpha / t_alpha_beta3, alpha)
 
     @staticmethod
-    def schedule_beta3(t_alpha_beta3: Optional[float], step: int, beta1: float, beta3: float, eps: float) -> float:
+    def schedule_beta3(t_alpha_beta3: Optional[float], step: int, beta1: float, beta3: float) -> float:
         if t_alpha_beta3 is None:
             return beta3
 
         # Add eps to prevent log 0
-        log_beta1, log_beta3 = math.log(beta1 + eps), math.log(beta3)
+        log_beta1, log_beta3 = math.log(beta1 + 1e-8), math.log(beta3)
 
         return min(
             math.exp(
@@ -523,7 +526,7 @@ class CompassPlus(BaseOptimizer):
             if self.use_slow_ema:
                 # Scale with amp fac for consistency
                 slow_ema_alpha_t: float = self.schedule_alpha(self.slow_ema_t_alpha_beta, group['step'], self.slow_ema_alpha * self.amp_fac)
-                slow_ema_beta3_t: float = self.schedule_beta3(self.slow_ema_t_alpha_beta, group['step'], beta1, self.slow_ema_beta, self.eps)
+                slow_ema_beta3_t: float = self.schedule_beta3(self.slow_ema_t_alpha_beta, group['step'], beta1, self.slow_ema_beta)
 
             for p in group["params"]:
                 if p.grad is None:
@@ -699,7 +702,7 @@ class CompassPlus(BaseOptimizer):
 
                 if self.norm_loss_factor > 0.0:
                     # norm loss
-                    correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(current_eps))
+                    correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(self.norm_loss_eps))
                     p_fp32.mul_(1.0 - step_size * correction)
 
                 update = grad.div(de_nom)

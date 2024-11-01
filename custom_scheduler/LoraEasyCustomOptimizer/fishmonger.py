@@ -44,7 +44,7 @@ class FishMonger(Optimizer):
         betas=(0.9, 0.99, 0.999),
         eps=1e-8,
         eps2=0.01,
-        eps_floor=1e-30,
+        eps_floor=1e-16,
         weight_decay=0.0,
         clip=1.0,
         centralization=1.0,
