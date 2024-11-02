@@ -200,6 +200,7 @@ class CompassPlus(BaseOptimizer):
             * Diff amp - https://github.com/Clybius/Personalized-Optimizers/blob/main/FishMonger.py
             * Slow EMA - https://arxiv.org/abs/2409.03137
             * Amsgrad - https://arxiv.org/pdf/1904.09237
+            * Update Clipping - https://arxiv.org/pdf/2304.13013 (AdamWStable) / https://arxiv.org/pdf/1804.04235 (Adafactor)
 
     Arguments:
         :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
@@ -236,6 +237,7 @@ class CompassPlus(BaseOptimizer):
         :param eps: float. the maximum eps value for adaptive eps. Eps is the term added to the denominator outside of the root operation to improve numerical stability.
         :param eps2: float. used to multiple the grad rms for determining adaptive eps.
         :param eps_floor: float. term used to determine the floor for adaptive eps.
+        :param update_clipping: bool. Apply update clipping using root mean square of the gradient, similar to Adafactor. Advise beta2 and disabling gradient clipping (clip=0.0).
     """
 
     def __init__(
@@ -275,6 +277,7 @@ class CompassPlus(BaseOptimizer):
         eps: float = 1e-8,
         eps2: float = 0.01,
         eps_floor: float = 1e-16,
+        update_clipping: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -333,6 +336,7 @@ class CompassPlus(BaseOptimizer):
             'eps': eps,
             'eps2': eps2,
             'eps_floor': eps_floor,
+            'update_clipping': update_clipping,
         }
 
         self.use_lookahead = use_lookahead
@@ -368,6 +372,7 @@ class CompassPlus(BaseOptimizer):
         self.eps = eps
         self.eps2 = eps2
         self.eps_floor = eps_floor
+        self.update_clipping = update_clipping
 
         super(CompassPlus, self).__init__(params, defaults)
 
@@ -653,6 +658,8 @@ class CompassPlus(BaseOptimizer):
             # soft warmup
             bias_correction1: float = self.debias(beta1, group['step'])
             bias_correction2_sq: float = math.sqrt(self.debias(beta2, group['step']))
+
+            eps_p2: float = math.pow(group['eps'], 2)
         
             for p in group["params"]:
                 if p.grad is None:
@@ -694,6 +701,10 @@ class CompassPlus(BaseOptimizer):
                     de_nom = softplus(de_nom, beta=self.beta_softplus, threshold=self.threshold_softplus if self.threshold_softplus != 0 else current_eps)
 
                 step_size: float = self.apply_adam_debias(self.adam_debias, lr, bias_correction1)
+
+                if self.update_clipping:
+                    rms = grad.pow(2).div_(ema_squared.maximum(eps_p2)).mean().sqrt_()
+                    step_size = step_size / max(1, rms.item())
 
                 if self.weight_decouple:
                     # Perform stepweight decay
