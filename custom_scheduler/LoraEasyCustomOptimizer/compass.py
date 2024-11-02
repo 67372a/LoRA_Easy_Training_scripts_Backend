@@ -237,7 +237,7 @@ class CompassPlus(BaseOptimizer):
         :param eps: float. the maximum eps value for adaptive eps. Eps is the term added to the denominator outside of the root operation to improve numerical stability.
         :param eps2: float. used to multiple the grad rms for determining adaptive eps.
         :param eps_floor: float. term used to determine the floor for adaptive eps.
-        :param update_clipping: bool. Apply update clipping using root mean square of the gradient, similar to Adafactor. Advise beta2 and disabling gradient clipping (clip=0.0).
+        :param update_clipping: bool. Apply update clipping using root mean square of the gradient, similar to Adafactor. Advise disabling gradient clipping (clip=0.0).
     """
 
     def __init__(
