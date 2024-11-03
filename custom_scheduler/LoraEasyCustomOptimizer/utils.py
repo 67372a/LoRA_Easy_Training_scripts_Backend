@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Tuple, Union, Type, Literal
 import torch.nn.functional as F
 from torch.optim import Optimizer
 from einops import rearrange
+from pytorch_optimizer.optimizer.utils import unit_norm
 
 OPTIMIZER = Type[Optimizer]
 
@@ -75,3 +76,26 @@ def dequantize(tensor, details, dtype=torch.float32):
     tensor = tensor.view(shape)
 
     return tensor
+    
+def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float, eps: float = 1e-6) -> torch.Tensor:
+    r"""Clip gradient values in excess of the unit wise norm.
+        Clip updates to be at most clipping * parameter_norm.
+
+    References:
+        [Brock, Smith, De, Simonyan 2021] High-Performance Large-Scale Image
+        Recognition Without Normalization.
+        
+    :param p: torch.Tensor. parameter.
+    :param grad: torch.Tensor, gradient.
+    :param agc_eps: float. agc epsilon to clip the norm of parameter.
+    :param agc_clip_val: float. norm clip.
+    :param eps: float. simple stop from div by zero and no relation to standard optimizer eps.
+    """
+    p_norm = unit_norm(p).clamp_(agc_eps)
+    g_norm = unit_norm(grad)
+
+    max_norm = p_norm * agc_clip_val
+
+    clipped_grad = grad * (max_norm / g_norm.clamp_min_(eps))
+
+    return torch.where(g_norm > max_norm, clipped_grad, grad)

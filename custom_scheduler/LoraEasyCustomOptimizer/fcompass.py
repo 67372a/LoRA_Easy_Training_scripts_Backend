@@ -323,7 +323,7 @@ class FCompassPlus(BaseOptimizer):
         self.norm_loss_eps = norm_loss_eps
         self.lookahead_step: int = 0
 
-        super(FCompassPlus, self).__init__(params, defaults)
+        super().__init__(params, defaults)
 
     def __str__(self) -> str:
         return 'FCompassPlus'

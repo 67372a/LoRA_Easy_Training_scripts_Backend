@@ -5,7 +5,7 @@
 
 import torch
 from torch.optim import Optimizer
-from .utils import copy_stochastic_, quantize, dequantize
+from .utils import copy_stochastic_, quantize, dequantize, agc
 import math
 from torch.nn.functional import softplus
 from typing import Optional
@@ -14,11 +14,10 @@ from bitsandbytes.functional import quantize_blockwise, dequantize_blockwise
 from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from pytorch_optimizer.optimizer.agc import agc
 from pytorch_optimizer.optimizer.gc import centralize_gradient
 from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
 
-class Compass(Optimizer):
+class Compass(BaseOptimizer):
     r"""
     Arguments:
         params (iterable):
@@ -48,40 +47,51 @@ class Compass(Optimizer):
             improve numerical stability. (default: 1e-8).
         centralization (float):
             center model grad (default: 0.0).
+        adaptive_clipping (bool):
+            enable adaptive clipping - https://arxiv.org/abs/2102.06171 (default: false).
+        adaptive_clipping_eps (float):
+            eps for adaptive gradient clipping(default: 1e-3).
     """
 
     def __init__(
         self,
-        params,
-        lr=1e-4, #Original default 1e-3
-        betas=(0.975, 0.999), #Original default 0.99, 0.999
-        weight_decay=0.001, #Original default 0
-        weight_decouple=True,
-        lr_decouple=False,
-        max_lr=0.0,
-        fixed_decay=False,
-        clip=0.0,
-        amp_fac=2,
-        eps=1e-8,
-        centralization=0.0,
+        params: PARAMETERS,
+        lr: float = 1.4e-4, #Original default 1e-3
+        betas: BETAS = (0.975, 0.999), #Original default 0.99, 0.999
+        weight_decay: float = 0.001, #Original default 0
+        weight_decouple: bool = True,
+        lr_decouple: bool = False,
+        max_lr: float = 0.0,
+        fixed_decay: bool = False,
+        clip: float = 0.01,
+        amp_fac: float = 2.0,
+        eps: float = 1e-8,
+        centralization: float = 0.0,
+        adaptive_clipping: bool = False,
+        adaptive_clip_eps: float = 1e-3,
+        **kwargs,
     ):
-        defaults = dict(
-            lr=lr,
-            betas=betas,
-            weight_decay = weight_decay,
-            weight_decouple = weight_decouple,
-            lr_decouple=lr_decouple,
-            max_lr=max_lr,
-            fixed_decay = fixed_decay,
-            clip=clip,
-            amp_fac=amp_fac,
-            eps=eps,
-            centralization=centralization,
-        )
+        defaults: DEFAULTS = {
+            'lr':lr,
+            'betas':betas,
+            'weight_decay' : weight_decay,
+            'weight_decouple' : weight_decouple,
+            'lr_decouple':lr_decouple,
+            'max_lr':max_lr,
+            'fixed_decay' : fixed_decay,
+            'clip':clip,
+            'adaptive_clip_eps':adaptive_clip_eps,
+            'amp_fac':amp_fac,
+            'eps':eps,
+            'centralization':centralization,
+            'adaptive_clipping':adaptive_clipping
+        }
 
+        self.clip = clip
+        self.adaptive_clip_eps = adaptive_clip_eps
+        self.adaptive_clipping = adaptive_clipping
 
-
-        super(Compass, self).__init__(params, defaults)
+        super().__init__(params, defaults)
 
     def __str__(self) -> str:
         return 'Compass'
@@ -90,9 +100,27 @@ class Compass(Optimizer):
     def get_rms(x: torch.Tensor) -> float:
         r"""Get RMS."""
         return x.norm(2) / math.sqrt(x.numel())
+    
+    @torch.no_grad()
+    def reset(self):
+        for group in self.param_groups:
+            group['step'] = 0
 
-    def step(self, closure=None):
-        loss = closure() if closure is not None else None
+            for p in group['params']:
+                state = self.state[p]
+
+                # Exponential moving average of gradient values
+                state['ema'] = torch.zeros_like(p)
+                # Exponential moving average of squared gradient values
+                state["ema_squared"] = torch.zeros_like(p)
+
+    @torch.no_grad()
+    def step(self, closure: CLOSURE = None) -> LOSS:
+        loss: LOSS = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
         for group in self.param_groups:
             if 'step' in group:
                 group['step'] += 1
@@ -100,14 +128,13 @@ class Compass(Optimizer):
                 group['step'] = 1
 
             beta1, beta2 = group["betas"]
-            amplification_factor = group["amp_fac"]
+            amp_fac = group["amp_fac"]
             lr = group["lr"]
             weight_decay = group["weight_decay"]
             weight_decouple = group["weight_decouple"],
             fixed_decay = group["fixed_decay"]
             centralization = group["centralization"]
             eps = group["eps"]
-            clip = group["clip"]
             lr_decouple = group["lr_decouple"]
             max_lr = group["max_lr"]
 
@@ -121,17 +148,18 @@ class Compass(Optimizer):
                 if p.grad is None:
                     continue
                 grad = p.grad
+
                 if grad.is_sparse:
-                    raise RuntimeError("Compass does not support sparse gradients")
+                    raise NoSparseGradientError(str(self))
 
                 state = self.state[p]
 
                 # State initialization
                 if len(state) == 0:
                     # Exponential moving average of gradient values
-                    state["ema"] = torch.zeros_like(p.data)
+                    state["ema"] = torch.zeros_like(p)
                     # Exponential moving average of squared gradient values
-                    state["ema_squared"] = torch.zeros_like(p.data)
+                    state["ema_squared"] = torch.zeros_like(p)
 
                 p_fp32 = p
 
@@ -150,15 +178,19 @@ class Compass(Optimizer):
                         grad.mean(dim=tuple(range(1, grad.dim())), keepdim=True).mul_(centralization)
                     )
 
-                # Clip the gradient 
-                if clip > 0.0:
-                    grad.div_((self.get_rms(grad).add_(eps) / clip).clamp_(min=1.0))
+                if self.clip > 0.0:
+                    if self.adaptive_clipping:
+                        # Apply Adaptive Gradient Clipping (AGC)
+                        grad.copy_(agc(p_fp32, grad, self.adaptive_clip_eps, self.clip))
+                    else:
+                        # Clip the gradient 
+                        grad.div_((self.get_rms(grad).add_(eps) / self.clip).clamp_(min=1.0))
 
                 # Decay the first and second moment running average coefficient
                 # ema = ema + (1 - beta1) * grad
                 ema.mul_(beta1).add_(grad, alpha=1 - beta1)
-                # grad = grad + ema * amplification_factor
-                grad.add_(ema, alpha=amplification_factor)
+                # grad = grad + ema * amp_fac
+                grad.add_(ema, alpha=amp_fac)
                 # ema_squared = ema + (1 - beta2) * grad ** 2
                 ema_squared.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
@@ -168,12 +200,12 @@ class Compass(Optimizer):
 
                 if weight_decouple:
                     # Perform stepweight decay
-                    p_fp32.data.mul_(1.0 - (1.0 if fixed_decay else debiased_lr if not lr_decouple else debiased_lr / max_lr) * weight_decay)
+                    p_fp32.mul_(1.0 - (1.0 if fixed_decay else debiased_lr if not lr_decouple else debiased_lr / max_lr) * weight_decay)
                 elif weight_decay > 0.0 and grad is not None:
                     grad.add_(p_fp32, alpha=weight_decay)
 
                 # p = p - lr * grad / denom
-                p_fp32.data.addcdiv_(grad, denom, value=-debiased_lr)
+                p_fp32.addcdiv_(grad, denom, value=-debiased_lr)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -374,7 +406,7 @@ class CompassPlus(BaseOptimizer):
         self.eps_floor = eps_floor
         self.update_clipping = update_clipping
 
-        super(CompassPlus, self).__init__(params, defaults)
+        super().__init__(params, defaults)
 
     def __str__(self) -> str:
         return 'CompassPlus'
