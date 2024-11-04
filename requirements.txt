@@ -9,7 +9,7 @@ scipy
 came-pytorch
 pytorch_optimizer==3.2.0
 #https://github.com/67372a/LyCORIS/tree/dev
-../installables/lycoris_lora-3.1.0.67372a0-py3-none-any.whl
+../installables/lycoris_lora-3.1.0.67372a0.dev1-py3-none-any.whl
 wheel
 typing
 triton==3.1.0; platform_system == "Linux"
