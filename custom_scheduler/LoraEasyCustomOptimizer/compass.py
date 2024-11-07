@@ -53,7 +53,7 @@ class Compass(BaseOptimizer):
             eps for adaptive gradient clipping (default: 1e-3).
         adam_debias: (bool)
             Only correct the denominator to avoid inflating step sizes early in training. (Default: false)
-        reactify_variance: (bool)
+        rectify_variance: (bool)
             Rectify variance as per RAdam - https://arxiv.org/abs/1908.03265 (Default: false)
         n_sma_threshold: (int)
             Simple moving average threshold for variance rectification (recommended is 5) (Default: 5).
@@ -273,6 +273,7 @@ class CompassPlus(BaseOptimizer):
             * Slow EMA - https://arxiv.org/abs/2409.03137
             * Amsgrad - https://arxiv.org/pdf/1904.09237
             * Update Clipping - https://arxiv.org/pdf/2304.13013 (AdamWStable) / https://arxiv.org/pdf/1804.04235 (Adafactor)
+            * Variance Rectification - https://arxiv.org/abs/1908.03265 (RAdam)
 
     Arguments:
         :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
@@ -310,13 +311,16 @@ class CompassPlus(BaseOptimizer):
         :param eps2: float. used to multiple the grad rms for determining adaptive eps.
         :param eps_floor: float. term used to determine the floor for adaptive eps.
         :param update_clipping: bool. Apply update clipping using root mean square of the gradient, similar to Adafactor. Advise disabling gradient clipping (clip=0.0).
+        :param rectify_variance: bool. Rectify variance as per RAdam - https://arxiv.org/abs/1908.03265 (Default: false)
+        :param n_sma_threshold: int. Simple moving average threshold for variance rectification (recommended is 5) (Default: 5).
+        :param degenerated_to_sgd: bool. degenerated to SGD. (Default: false)
     """
 
     def __init__(
         self,
         params: PARAMETERS,
         lr: float = 1.4e-4,
-        betas: BETAS = (0.97, 0.999),
+        betas: BETAS = (0.975, 0.999),
         weight_decay: float = 0.0005,
         weight_decouple: bool = True,
         lr_decouple: bool = False,
@@ -350,6 +354,9 @@ class CompassPlus(BaseOptimizer):
         eps2: float = 0.01,
         eps_floor: float = 1e-16,
         update_clipping: bool = False,
+        rectify_variance: bool = False,
+        n_sma_threshold: int = 5,
+        degenerated_to_sgd: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -409,6 +416,9 @@ class CompassPlus(BaseOptimizer):
             'eps2': eps2,
             'eps_floor': eps_floor,
             'update_clipping': update_clipping,
+            'rectify_variance': rectify_variance,
+            'n_sma_threshold': n_sma_threshold,
+            'degenerated_to_sgd': degenerated_to_sgd,
         }
 
         self.use_lookahead = use_lookahead
@@ -445,6 +455,9 @@ class CompassPlus(BaseOptimizer):
         self.eps2 = eps2
         self.eps_floor = eps_floor
         self.update_clipping = update_clipping
+        self.rectify_variance = rectify_variance
+        self.n_sma_threshold = n_sma_threshold
+        self.degenerated_to_sgd = degenerated_to_sgd
 
         super().__init__(params, defaults)
 
@@ -724,14 +737,27 @@ class CompassPlus(BaseOptimizer):
 
         # Phase 3 - Weight decay and parameter update
         for group in self.param_groups:
-            lr = group["lr"]
-
             # bias correction step size
             # soft warmup
             bias_correction1: float = self.debias(beta1, group['step'])
             bias_correction2_sq: float = math.sqrt(self.debias(beta2, group['step']))
 
             eps_p2: float = math.pow(group['eps'], 2)
+
+            step_size, n_sma = self.get_rectify_step_size(
+                is_rectify=self.rectify_variance,
+                step=group['step'],
+                lr=group['lr'],
+                beta2=beta2,
+                n_sma_threshold=self.n_sma_threshold,
+                degenerated_to_sgd=self.degenerated_to_sgd,
+            )
+
+            step_size = self.apply_adam_debias(
+                adam_debias=self.adam_debias,
+                step_size=step_size,
+                bias_correction1=bias_correction1,
+            )
         
             for p in group["params"]:
                 if p.grad is None:
@@ -748,7 +774,6 @@ class CompassPlus(BaseOptimizer):
                     grad = grad.to(torch.float32)
                     ema_squared = ema_squared.to(torch.float32)
 
-                # TODO Is this right for non-fisher?
                 # Basically should allow smaller eps whenever grad is small, so eps doesn't have outsized influence
                 rms_grad = grad.pow(2).mean().sqrt_()
                 current_eps = max(min(rms_grad.item() * self.eps2, self.eps), self.eps_floor) # Set a floor for eps to avoid NaN
@@ -762,38 +787,47 @@ class CompassPlus(BaseOptimizer):
                         max_ema_squared = max_ema_squared.to(torch.float32)
                         
                     torch.max(max_ema_squared, ema_squared, out=max_ema_squared)
-                    de_nom = (max_ema_squared.sqrt() / bias_correction2_sq).add_(current_eps)
- 
+                    if self.rectify_variance:
+                        de_nom = max_ema_squared.sqrt().add_(current_eps)
+                    else:
+                        de_nom = (max_ema_squared.sqrt() / bias_correction2_sq).add_(current_eps)
+
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         copy_stochastic_(state['max_ema_squared'], max_ema_squared)
                 else:
-                    de_nom = (ema_squared.sqrt() / bias_correction2_sq).add_(current_eps)
+                    if self.rectify_variance:
+                        de_nom = ema_squared.sqrt().add_(current_eps)
+                    else:
+                        de_nom = (ema_squared.sqrt() / bias_correction2_sq).add_(current_eps)
 
                 if self.use_softplus:
                     de_nom = softplus(de_nom, beta=self.beta_softplus, threshold=self.threshold_softplus if self.threshold_softplus != 0 else current_eps)
-
-                step_size: float = self.apply_adam_debias(self.adam_debias, lr, bias_correction1)
 
                 if self.update_clipping:
                     rms = grad.pow(2).div_(ema_squared.maximum(eps_p2)).mean().sqrt_()
                     step_size = step_size / max(1, rms.item())
 
-                if self.weight_decouple:
-                    # Perform stepweight decay
-                    p_fp32.mul_(1.0 - (1.0 if self.fixed_decay else step_size if not self.lr_decouple else step_size / self.max_lr) * self.weight_decay * (1.0 / ema_squared_normalized if self.stable_decay else 1.0))
-                elif self.weight_decay > 0.0 and not self.use_slow_ema:
-                    grad.add_(p_fp32, alpha=self.weight_decay)
+                if not self.rectify_variance or step_size > 0 or n_sma >= self.n_sma_threshold:
+                    if self.weight_decouple:
+                        # Perform stepweight decay
+                        p_fp32.mul_(1.0 - (1.0 if self.fixed_decay else step_size if not self.lr_decouple else step_size / self.max_lr) * self.weight_decay * (1.0 / ema_squared_normalized if self.stable_decay else 1.0))
+                    elif self.weight_decay > 0.0 and not self.use_slow_ema:
+                        grad.add_(p_fp32, alpha=self.weight_decay)
 
-                if self.norm_loss_factor > 0.0:
-                    # norm loss
-                    correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(self.norm_loss_eps))
-                    p_fp32.mul_(1.0 - step_size * correction)
+                    if self.norm_loss_factor > 0.0:
+                        # norm loss
+                        correction = 2.0 * self.norm_loss_factor * (1.0 - 1.0 / unit_norm(p_fp32).add_(self.norm_loss_eps))
+                        p_fp32.mul_(1.0 - step_size * correction)
 
-                update = grad.div(de_nom)
+                if not self.rectify_variance or n_sma >= self.n_sma_threshold:
+                    update = grad.div(de_nom)
+                else:
+                    update = grad
 
                 # Apply weight decay like AdEMAMix
-                if self.weight_decay > 0.0 and self.use_slow_ema and not self.weight_decouple:
-                    update.add_(p_fp32, alpha=self.weight_decay)
+                if not self.rectify_variance or step_size > 0 or n_sma >= self.n_sma_threshold:
+                    if self.weight_decay > 0.0 and self.use_slow_ema and not self.weight_decouple:
+                        update.add_(p_fp32, alpha=self.weight_decay)
 
                 if self.centralize_gradients in {2,3}:
                     centralize_gradient(update, gc_conv_only=False)
@@ -802,7 +836,8 @@ class CompassPlus(BaseOptimizer):
                     normalize_gradient(update) 
 
                 # p = p - lr * grad / de_nom
-                p_fp32.add_(update, alpha=-step_size)
+                if not self.rectify_variance or step_size > 0 or n_sma >= self.n_sma_threshold:
+                    p_fp32.add_(update, alpha=-step_size)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
