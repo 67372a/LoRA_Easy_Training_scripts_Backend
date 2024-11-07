@@ -172,7 +172,7 @@ class Compass(BaseOptimizer):
             )
 
             step_size = self.apply_adam_debias(
-                adam_debias=group['adam_debias'],
+                adam_debias=self.adam_debias,
                 step_size=step_size,
                 bias_correction1=bias_correction1,
             )
