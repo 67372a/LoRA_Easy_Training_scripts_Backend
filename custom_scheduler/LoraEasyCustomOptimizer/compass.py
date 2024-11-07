@@ -46,11 +46,19 @@ class Compass(BaseOptimizer):
             Term added to the denominator outside of the root operation to
             improve numerical stability. (default: 1e-8).
         centralization (float):
-            center model grad (default: 0.0).
+            Gradient centralization  - https://arxiv.org/abs/2004.01461v2 (default: 0.0).
         adaptive_clipping (bool):
             enable adaptive clipping - https://arxiv.org/abs/2102.06171 (default: false).
         adaptive_clipping_eps (float):
-            eps for adaptive gradient clipping(default: 1e-3).
+            eps for adaptive gradient clipping (default: 1e-3).
+        adam_debias: (bool)
+            Only correct the denominator to avoid inflating step sizes early in training. (Default: false)
+        reactify_variance: (bool)
+            Rectify variance as per RAdam - https://arxiv.org/abs/1908.03265 (Default: false)
+        n_sma_threshold: (int)
+            Simple moving average threshold for variance rectification (recommended is 5) (Default: 5).
+        degenerated_to_sgd: (bool)
+            degenerated to SGD. (Default: false)
     """
 
     def __init__(
@@ -69,6 +77,10 @@ class Compass(BaseOptimizer):
         centralization: float = 0.0,
         adaptive_clipping: bool = False,
         adaptive_clip_eps: float = 1e-3,
+        adam_debias: bool = False,
+        rectify_variance: bool = False,
+        n_sma_threshold: int = 5,
+        degenerated_to_sgd: bool = False,
         **kwargs,
     ):
         defaults: DEFAULTS = {
@@ -84,12 +96,20 @@ class Compass(BaseOptimizer):
             'amp_fac':amp_fac,
             'eps':eps,
             'centralization':centralization,
-            'adaptive_clipping':adaptive_clipping
+            'adaptive_clipping':adaptive_clipping,
+            'adam_debias': adam_debias,
+            'rectify_variance': rectify_variance,
+            'n_sma_threshold': n_sma_threshold,
+            'degenerated_to_sgd': degenerated_to_sgd,
         }
 
         self.clip = clip
         self.adaptive_clip_eps = adaptive_clip_eps
         self.adaptive_clipping = adaptive_clipping
+        self.adam_debias = adam_debias
+        self.rectify_variance = rectify_variance
+        self.n_sma_threshold = n_sma_threshold
+        self.degenerated_to_sgd = degenerated_to_sgd
 
         super().__init__(params, defaults)
 
@@ -129,7 +149,6 @@ class Compass(BaseOptimizer):
 
             beta1, beta2 = group["betas"]
             amp_fac = group["amp_fac"]
-            lr = group["lr"]
             weight_decay = group["weight_decay"]
             weight_decouple = group["weight_decouple"],
             fixed_decay = group["fixed_decay"]
@@ -140,9 +159,23 @@ class Compass(BaseOptimizer):
 
             # bias correction step size
             # soft warmup
-            bias_correction = 1 - beta1 ** group['step']
-            bias_correction_sqrt = (1 - beta2 ** group['step']) ** (1 / 2)
-            debiased_lr = lr / bias_correction
+            bias_correction1: float = self.debias(beta1, group['step'])
+            bias_correction2_sqrt: float = math.sqrt(self.debias(beta2, group['step']))
+
+            step_size, n_sma = self.get_rectify_step_size(
+                is_rectify=self.rectify_variance,
+                step=group['step'],
+                lr=group['lr'],
+                beta2=beta2,
+                n_sma_threshold=self.n_sma_threshold,
+                degenerated_to_sgd=self.degenerated_to_sgd,
+            )
+
+            step_size = self.apply_adam_debias(
+                adam_debias=group['adam_debias'],
+                step_size=step_size,
+                bias_correction1=bias_correction1,
+            )
 
             for p in group["params"]:
                 if p.grad is None:
@@ -194,18 +227,25 @@ class Compass(BaseOptimizer):
                 # ema_squared = ema + (1 - beta2) * grad ** 2
                 ema_squared.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-                # lr scaler + eps to prevent zero division
-                # denom = exp_avg_sq.sqrt() + group['eps']
-                denom = (ema_squared.sqrt() / bias_correction_sqrt).add_(eps)
+                if not self.rectify_variance or step_size > 0 or n_sma >= self.n_sma_threshold:
+                    if weight_decouple:
+                        # Perform stepweight decay
+                        p_fp32.mul_(1.0 - (1.0 if fixed_decay else step_size if not lr_decouple else step_size / max_lr) * weight_decay)
+                    elif weight_decay > 0.0 and grad is not None:
+                        grad.add_(p_fp32, alpha=weight_decay)
 
-                if weight_decouple:
-                    # Perform stepweight decay
-                    p_fp32.mul_(1.0 - (1.0 if fixed_decay else debiased_lr if not lr_decouple else debiased_lr / max_lr) * weight_decay)
-                elif weight_decay > 0.0 and grad is not None:
-                    grad.add_(p_fp32, alpha=weight_decay)
+                if not self.rectify_variance or n_sma >= self.n_sma_threshold:
+                    # lr scaler + eps to prevent zero division
+                    # de_nom = exp_avg_sq.sqrt() + group['eps']
+                    if self.rectify_variance:
+                        de_nom = ema_squared.sqrt().add_(eps)
+                    else:
+                        de_nom = (ema_squared.sqrt() / bias_correction2_sqrt).add_(eps)
 
-                # p = p - lr * grad / denom
-                p_fp32.addcdiv_(grad, denom, value=-debiased_lr)
+                    # p = p - lr * grad / de_nom
+                    p_fp32.addcdiv_(grad, de_nom, value=-step_size)
+                elif step_size > 0:
+                    p_fp32.add_(grad, alpha=-step_size)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:

@@ -16,6 +16,7 @@ from LoraEasyCustomOptimizer.soap import SOAP
 from LoraEasyCustomOptimizer.ranger21 import Ranger21
 from LoraEasyCustomOptimizer.lamb import Lamb
 from LoraEasyCustomOptimizer.adan import Adan
+from LoraEasyCustomOptimizer.compassschedulefree import CompassScheduleFree
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdEMAMix,
@@ -36,6 +37,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     FCompassPlus,
     Lamb,
     Adan,
+    CompassScheduleFree,
 ]
 
 OPTIMIZERS: Dict[str, OPTIMIZER] = {str(f"{optimizer.__name__}".lower()): optimizer for optimizer in OPTIMIZER_LIST}
