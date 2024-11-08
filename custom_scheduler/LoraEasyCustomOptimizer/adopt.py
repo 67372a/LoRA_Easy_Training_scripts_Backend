@@ -1,6 +1,7 @@
 # mypy: allow-untyped-decorators
 # mypy: allow-untyped-defs
 from typing import cast, List, Optional, Tuple, Union
+from .utils import copy_stochastic_
 
 import torch
 from torch import Tensor
@@ -282,19 +283,28 @@ def _single_tensor_adopt(
         # update step
         step_t += 1
 
+        p_fp32 = param
+
+        # unpack
+        if param.dtype in {torch.float16, torch.bfloat16}:
+            grad = grad.to(torch.float32)
+            p_fp32 = param.clone().to(torch.float32)
+            exp_avg = exp_avg.to(torch.float32)
+            exp_avg_sq = exp_avg_sq.to(torch.float32)
+
         if weight_decay != 0:
             if decoupled:
-                param.add_(param, alpha=-lr*weight_decay)
+                p_fp32.add_(p_fp32, alpha=-lr*weight_decay)
             else:
-                grad = grad.add(param, alpha=weight_decay)
+                grad = grad.add(p_fp32, alpha=weight_decay)
 
-        if torch.is_complex(param):
+        if torch.is_complex(p_fp32):
             grad = torch.view_as_real(grad)
             if exp_avg is not None:
                 exp_avg = torch.view_as_real(exp_avg)
             if exp_avg_sq is not None:
                 exp_avg_sq = torch.view_as_real(exp_avg_sq)
-            param = torch.view_as_real(param)
+            p_fp32 = torch.view_as_real(p_fp32)
 
         step = step_t if capturable or differentiable else _get_value(step_t)
         if step == 1:
@@ -307,8 +317,14 @@ def _single_tensor_adopt(
         else:
             exp_avg.mul_(beta1).addcdiv_(grad, denom, value=1 - beta1)
 
-        param.add_(exp_avg, alpha=-lr)
+        p_fp32.add_(exp_avg, alpha=-lr)
         exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
+
+        # pack
+        if param.dtype in {torch.float16, torch.bfloat16}:
+            copy_stochastic_(exp_avgs[i], exp_avg)
+            copy_stochastic_(exp_avg_sqs[i], exp_avg_sq)
+            copy_stochastic_(param, p_fp32)
 
 
 def _multi_tensor_adopt(
