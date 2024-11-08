@@ -11,6 +11,7 @@ from pytorch_optimizer.base.exception import NoClosureError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, OPTIMIZER, PARAMETERS
 from pytorch_optimizer.optimizer.utils import disable_running_stats, enable_running_stats
+from .utils import copy_stochastic_
 
 
 class SAM(BaseOptimizer):
@@ -100,9 +101,20 @@ class SAM(BaseOptimizer):
                     continue
 
                 self.state[p]['old_p'] = p.clone()
-                e_w = (torch.pow(p, 2) if group['adaptive'] else 1.0) * p.grad * scale.to(p)
 
-                p.add_(e_w)
+                p_fp32 = p
+                grad = p.grad
+
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    p_fp32 = p.clone().to(torch.float32)
+                    grad = grad.to(torch.float32)
+
+                e_w = (torch.pow(p_fp32, 2) if group['adaptive'] else 1.0) * grad * scale.to(p_fp32)
+
+                p_fp32.add_(e_w)
+
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(p, p_fp32)
 
         if zero_grad:
             self.zero_grad()
@@ -587,7 +599,7 @@ class BSAM(BaseOptimizer):
         super().__init__(params, defaults)
 
     def __str__(self) -> str:
-        return 'bSAM'
+        return 'BSAM'
 
     @torch.no_grad()
     def reset(self):
@@ -596,7 +608,7 @@ class BSAM(BaseOptimizer):
                 state = self.state[p]
 
                 state['s'] = torch.ones_like(p)
-                state['noisy_gradient'] = torch.zeros_like(p.grad)
+                state['noisy_gradient'] = torch.zeros_like(p)
                 state['momentum'] = torch.zeros_like(p)
 
     @torch.no_grad()
@@ -610,12 +622,24 @@ class BSAM(BaseOptimizer):
 
                 if 's' not in state:
                     state['s'] = torch.ones_like(p)
-                    state['noisy_gradient'] = torch.zeros_like(p.grad)
+                    state['noisy_gradient'] = torch.zeros_like(p)
                     state['momentum'] = torch.zeros_like(p)
 
-                noise = torch.normal(0.0, 1 / (self.num_data * state['s']))
+                p_fp32 = p
+                s = state['s']
 
-                p.add_(noise)
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    p_fp32 = p.clone().to(torch.float32)
+                    s = s.to(torch.float32)
+
+                noise = torch.normal(0.0, 1 / (self.num_data * s))
+
+                p_fp32.add_(noise)
+
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(p, p_fp32)
+
+
 
     @torch.no_grad()
     def second_step(self):
@@ -628,9 +652,22 @@ class BSAM(BaseOptimizer):
 
                 state['noisy_gradient'] = p.grad.clone()
 
-                e_w = (torch.pow(p, 2) if group['adaptive'] else 1.0) * group['rho'] * p.grad / state['s']
+                p_fp32 = p
+                grad = p.grad
 
-                p.add_(e_w)
+                s = state['s']
+
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    p_fp32 = p.clone().to(torch.float32)
+                    grad = grad.to(torch.float32)
+                    s = s.to(torch.float32)
+
+                e_w = (torch.pow(p_fp32, 2) if group['adaptive'] else 1.0) * group['rho'] * grad / state['s']
+
+                p_fp32.add_(e_w)
+
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(p, p_fp32)                
 
     @torch.no_grad()
     def third_step(self):
@@ -643,13 +680,28 @@ class BSAM(BaseOptimizer):
 
                 state = self.state[p]
 
-                momentum, s = state['momentum'], state['s']
-                momentum.mul_(beta1).add_(p.grad * weight_decay, alpha=1.0 - beta1)
+                p_fp32 = p
+                grad = p.grad
 
-                var = (torch.sqrt(s).mul_(p.grad.abs()).add_(weight_decay + self.damping)).pow_(2)
+                momentum, s = state['momentum'], state['s']
+
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    p_fp32 = p.clone().to(torch.float32)
+                    grad = grad.to(torch.float32)
+                    s = s.to(torch.float32)
+                    momentum = momentum.to(torch.float32)
+
+                momentum.mul_(beta1).add_(grad * weight_decay, alpha=1.0 - beta1)
+
+                var = (torch.sqrt(s).mul_(grad.abs()).add_(weight_decay + self.damping)).pow_(2)
                 s.mul_(beta2).add_(var, alpha=1.0 - beta2)
 
-                p.add_(momentum / s, alpha=-group['lr'])
+                p_fp32.add_(momentum / s, alpha=-group['lr'])
+
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(p, p_fp32)
+                    copy_stochastic_(state['s'], s)
+                    copy_stochastic_(state['momentum'], momentum)
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None):

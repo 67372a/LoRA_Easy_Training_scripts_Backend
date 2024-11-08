@@ -17,6 +17,7 @@ from LoraEasyCustomOptimizer.ranger21 import Ranger21
 from LoraEasyCustomOptimizer.lamb import Lamb
 from LoraEasyCustomOptimizer.adan import Adan
 from LoraEasyCustomOptimizer.sam import SAM, GSAM, WSAM, BSAM
+from LoraEasyCustomOptimizer.adopt import ADOPT
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdEMAMix,
@@ -41,6 +42,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     GSAM,
     WSAM,
     BSAM,
+    ADOPT,
 ]
 
 OPTIMIZERS: Dict[str, OPTIMIZER] = {str(f"{optimizer.__name__}".lower()): optimizer for optimizer in OPTIMIZER_LIST}
