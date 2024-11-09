@@ -117,7 +117,7 @@ class SAM(BaseOptimizer):
                     copy_stochastic_(p, p_fp32)
 
         if zero_grad:
-            self.zero_grad()
+            self.zero_grad(set_to_none=True)
 
     @torch.no_grad()
     def second_step(self, zero_grad: bool = False):
@@ -131,7 +131,7 @@ class SAM(BaseOptimizer):
         self.base_optimizer.step()
 
         if zero_grad:
-            self.zero_grad()
+            self.zero_grad(set_to_none=True)
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None):
