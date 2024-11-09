@@ -1,3 +1,4 @@
+# Source: https://github.com/kozistr/pytorch_optimizer/blob/main/pytorch_optimizer/optimizer/galore.py
 import math
 from typing import Literal, Optional, Tuple, Union
 

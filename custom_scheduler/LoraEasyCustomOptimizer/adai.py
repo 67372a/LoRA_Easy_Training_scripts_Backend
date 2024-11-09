@@ -1,3 +1,4 @@
+# Source: https://github.com/kozistr/pytorch_optimizer/blob/main/pytorch_optimizer/optimizer/adai.py
 import math
 
 import torch

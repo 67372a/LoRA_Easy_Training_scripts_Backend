@@ -1,3 +1,4 @@
+# Source: https://github.com/kozistr/pytorch_optimizer/blob/main/pytorch_optimizer/optimizer/grokfast.py
 import math
 from collections import deque
 from typing import Dict, Literal, Optional
