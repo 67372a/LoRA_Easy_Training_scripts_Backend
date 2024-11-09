@@ -6,6 +6,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from .utils import copy_stochastic_
 
 
 class AdaBelief(BaseOptimizer):
@@ -129,16 +130,24 @@ class AdaBelief(BaseOptimizer):
                     raise NoSparseGradientError(str(self))
 
                 state = self.state[p]
+
+                p_fp32 = p
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
+                    p_fp32 = p.clone().to(torch.float32)
+
                 if len(state) == 0:
                     state['exp_avg'] = torch.zeros_like(p)
                     state['exp_avg_var'] = torch.zeros_like(p)
                     if group['adanorm']:
-                        state['exp_grad_norm'] = torch.zeros((1,), dtype=grad.dtype, device=grad.device)
+                        state['exp_grad_norm'] = torch.zeros((1,), dtype=p.dtype, device=p.device)
                     if group['ams_bound']:
                         state['max_exp_avg_var'] = torch.zeros_like(p)
 
                 self.apply_weight_decay(
-                    p=p,
+                    p=p_fp32,
                     grad=grad,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
@@ -146,14 +155,26 @@ class AdaBelief(BaseOptimizer):
                     fixed_decay=group['fixed_decay'],
                 )
 
+                exp_avg, exp_avg_var = state['exp_avg'], state['exp_avg_var']
+                exp_grad_norm = state.get('exp_grad_norm', None)
+                max_exp_avg_var = state.get('max_exp_avg_var', None)
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
+                    p_fp32 = p.clone().to(torch.float32)
+                    if group['adanorm']:
+                        exp_grad_norm = exp_grad_norm.to(torch.float32)
+                    if group['ams_bound']:
+                        max_exp_avg_var = max_exp_avg_var.to(torch.float32)
+
                 s_grad = self.get_adanorm_gradient(
                     grad=grad,
                     adanorm=group['adanorm'],
-                    exp_grad_norm=state.get('exp_grad_norm', None),
+                    exp_grad_norm=exp_grad_norm,
                     r=group.get('r', None),
                 )
 
-                exp_avg, exp_avg_var = state['exp_avg'], state['exp_avg_var']
                 exp_avg.mul_(beta1).add_(s_grad, alpha=1.0 - beta1)
 
                 grad_residual = grad - exp_avg
@@ -162,18 +183,28 @@ class AdaBelief(BaseOptimizer):
                 de_nom = self.apply_ams_bound(
                     ams_bound=group['ams_bound'],
                     exp_avg_sq=exp_avg_var,
-                    max_exp_avg_sq=state.get('max_exp_avg_var', None),
+                    max_exp_avg_sq=max_exp_avg_var,
                     eps=group['eps'],
                 )
 
                 if not group['rectify']:
                     de_nom.div_(bias_correction2_sq)
-                    p.addcdiv_(exp_avg, de_nom, value=-step_size)
+                    p_fp32.addcdiv_(exp_avg, de_nom, value=-step_size)
                     continue
 
                 if n_sma >= self.n_sma_threshold:
-                    p.addcdiv_(exp_avg, de_nom, value=-step_size)
+                    p_fp32.addcdiv_(exp_avg, de_nom, value=-step_size)
                 elif step_size > 0:
-                    p.add_(exp_avg, alpha=-step_size)
+                    p_fp32.add_(exp_avg, alpha=-step_size)
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state['exp_avg'], exp_avg)
+                    copy_stochastic_(state['exp_avg_var'], exp_avg_var)
+                    if group['adanorm']:
+                        copy_stochastic_(state['exp_grad_norm'], exp_grad_norm)
+                    if group['ams_bound']:
+                        copy_stochastic_(state['max_exp_avg_var'], max_exp_avg_var)
+                    copy_stochastic_(p, p_fp32)
 
         return loss

@@ -7,6 +7,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParamete
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 from pytorch_optimizer.optimizer.gc import centralize_gradient
+from .utils import copy_stochastic_
 
 
 class Adai(BaseOptimizer):
@@ -63,10 +64,10 @@ class Adai(BaseOptimizer):
     @torch.no_grad()
     def reset(self):
         for group in self.param_groups:
+            group['step'] = 0
             for p in group['params']:
                 state = self.state[p]
 
-                state['step'] = 0
                 state['exp_avg'] = torch.zeros_like(p)
                 state['exp_avg_sq'] = torch.zeros_like(p)
                 state['beta1_prod'] = torch.ones_like(p)
@@ -82,6 +83,11 @@ class Adai(BaseOptimizer):
         exp_avg_sq_hat_sum: float = 0.0
 
         for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+
             _, beta2 = group['betas']
             for p in group['params']:
                 if p.grad is None:
@@ -95,22 +101,26 @@ class Adai(BaseOptimizer):
 
                 state = self.state[p]
 
+                p_fp32 = p
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
+                    p_fp32 = p.clone().to(torch.float32)
+
                 if len(state) == 0:
-                    state['step'] = 0
                     state['exp_avg'] = torch.zeros_like(p)
                     state['exp_avg_sq'] = torch.zeros_like(p)
                     state['beta1_prod'] = torch.ones_like(p)
 
-                state['step'] += 1
-
                 if self.use_gc:
                     centralize_gradient(grad, gc_conv_only=False)
 
-                bias_correction2: float = self.debias(beta2, state['step'])
+                bias_correction2: float = self.debias(beta2, group['step'])
 
                 if not group['stable_weight_decay'] and group['weight_decay'] > 0.0:
                     self.apply_weight_decay(
-                        p=p,
+                        p=p_fp32,
                         grad=grad,
                         lr=group['lr'],
                         weight_decay=group['weight_decay'],
@@ -119,9 +129,18 @@ class Adai(BaseOptimizer):
                     )
 
                 exp_avg_sq = state['exp_avg_sq']
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    exp_avg_sq = exp_avg_sq.to(torch.float32)
+
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
                 exp_avg_sq_hat_sum += exp_avg_sq.sum() / bias_correction2
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state['exp_avg_sq'], exp_avg_sq)
 
         if param_size == 0:
             raise ZeroParameterSizeError()
@@ -139,9 +158,16 @@ class Adai(BaseOptimizer):
 
                 state = self.state[p]
 
+                p_fp32 = p
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
+                    p_fp32 = p.clone().to(torch.float32)
+
                 if group['stable_weight_decay'] and group['weight_decay'] > 0.0:
                     self.apply_weight_decay(
-                        p=p,
+                        p=p_fp32,
                         grad=grad,
                         lr=group['lr'],
                         weight_decay=group['weight_decay'],
@@ -149,9 +175,15 @@ class Adai(BaseOptimizer):
                         fixed_decay=group['fixed_decay'],
                     )
 
-                bias_correction2: float = self.debias(beta2, state['step'])
+                bias_correction2: float = self.debias(beta2, group['step'])
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                beta1_prod = state['beta1_prod']
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    exp_avg, exp_avg_sq = exp_avg.to(torch.float32), exp_avg_sq.to(torch.float32)
+                    beta1_prod = beta1_prod.to(torch.float32)
 
                 exp_avg_sq_hat = exp_avg_sq / bias_correction2
                 beta1 = (
@@ -160,12 +192,17 @@ class Adai(BaseOptimizer):
                 ).clamp_(0.0, 1.0 - group['eps'])
                 beta3 = (1.0 - beta1).pow_(group['dampening'])
 
-                beta1_prod = state['beta1_prod']
                 beta1_prod.mul_(beta1)
 
                 exp_avg.mul_(beta1).addcmul_(beta3, grad)
                 exp_avg_hat = exp_avg.div(1.0 - beta1_prod).mul_(beta0_dp)
 
-                p.add_(exp_avg_hat, alpha=-group['lr'])
+                p_fp32.add_(exp_avg_hat, alpha=-group['lr'])
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state['exp_avg'], exp_avg)
+                    copy_stochastic_(state['beta1_prod'], beta1_prod)
+                    copy_stochastic_(p, p_fp32)
 
         return loss
