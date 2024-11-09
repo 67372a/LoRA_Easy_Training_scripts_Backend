@@ -141,7 +141,7 @@ class SAM(BaseOptimizer):
         self.first_step(zero_grad=True)
 
         with torch.enable_grad():
-            closure()
+            loss = closure()
 
         self.second_step()
 
