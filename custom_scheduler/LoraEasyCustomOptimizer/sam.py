@@ -127,8 +127,6 @@ class SAM(BaseOptimizer):
                     continue
 
                 p.data = self.state[p]['old_p']
-                print("second_step_grad")
-                print(p.grad)
 
         self.base_optimizer.step()
 
