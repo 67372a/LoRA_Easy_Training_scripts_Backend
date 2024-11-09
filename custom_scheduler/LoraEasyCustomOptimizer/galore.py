@@ -7,6 +7,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from .utils import copy_stochastic_
 
 PROJECTION_TYPE = Literal['std', 'reverse_std', 'right', 'left', 'full']
 
@@ -213,10 +214,16 @@ class GaLore(BaseOptimizer):
                     raise NoSparseGradientError(str(self))
 
                 state = self.state[p]
+                p_fp32 = p
 
                 if len(state) == 0:
                     state['exp_avg'] = torch.zeros_like(p)
                     state['exp_avg_sq'] = torch.zeros_like(p)
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
+                    p_fp32 = p.clone().to(torch.float32)
 
                 if 'rank' in group and p.dim() > 1:
                     if 'projector' not in state:
@@ -230,7 +237,7 @@ class GaLore(BaseOptimizer):
                     grad = state['projector'].project(grad, group['step'])
 
                 self.apply_weight_decay(
-                    p=p,
+                    p=p_fp32,
                     grad=None,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
@@ -239,6 +246,11 @@ class GaLore(BaseOptimizer):
                 )
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    exp_avg, exp_avg_sq = exp_avg.to(torch.float32), exp_avg_sq.to(torch.float32)
+
                 exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
@@ -249,6 +261,12 @@ class GaLore(BaseOptimizer):
                 if 'rank' in group and p.dim() > 1:
                     norm_grad = state['projector'].project_back(norm_grad)
 
-                p.add_(norm_grad, alpha=-step_size)
+                p_fp32.add_(norm_grad, alpha=-step_size)
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state['exp_avg'], exp_avg)
+                    copy_stochastic_(state['exp_avg_sq'], exp_avg_sq)
+                    copy_stochastic_(p, p_fp32)
 
         return loss
