@@ -9,7 +9,7 @@ from torch.nn.utils import clip_grad_norm_
 
 from pytorch_optimizer.base.exception import NoClosureError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, OPTIMIZER, PARAMETERS
+from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, OPTIMIZER, PARAMETERS, LOSS
 from pytorch_optimizer.optimizer.utils import disable_running_stats, enable_running_stats
 from .utils import copy_stochastic_
 
@@ -100,7 +100,7 @@ class SAM(BaseOptimizer):
                 if p.grad is None:
                     continue
 
-                self.state[p]['old_p'] = p.clone()
+                self.state[p]['old_p'] = p.data.clone()
 
                 p_fp32 = p
                 grad = p.grad
@@ -127,6 +127,8 @@ class SAM(BaseOptimizer):
                     continue
 
                 p.data = self.state[p]['old_p']
+                print("second_step_grad")
+                print(p.grad)
 
         self.base_optimizer.step()
 
@@ -134,7 +136,7 @@ class SAM(BaseOptimizer):
             self.zero_grad(set_to_none=True)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None):
+    def step(self, closure: CLOSURE = None) -> LOSS:
         if closure is None:
             raise NoClosureError(str(self))
 
@@ -144,6 +146,8 @@ class SAM(BaseOptimizer):
             closure()
 
         self.second_step()
+
+        return loss
 
     def grad_norm(self) -> torch.Tensor:
         shared_device = self.param_groups[0]['params'][0].device
