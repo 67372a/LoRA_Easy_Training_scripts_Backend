@@ -1,3 +1,4 @@
+# Source: https://github.com/iShohei220/adopt/blob/main/adopt.py
 # mypy: allow-untyped-decorators
 # mypy: allow-untyped-defs
 from typing import cast, List, Optional, Tuple, Union

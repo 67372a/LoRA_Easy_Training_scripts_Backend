@@ -18,6 +18,11 @@ from LoraEasyCustomOptimizer.lamb import Lamb
 from LoraEasyCustomOptimizer.adan import Adan
 from LoraEasyCustomOptimizer.sam import SAM, GSAM, WSAM, BSAM
 from LoraEasyCustomOptimizer.adopt import ADOPT
+from LoraEasyCustomOptimizer.grokfast import GrokFastAdamW
+from LoraEasyCustomOptimizer.adammini import AdamMini
+from LoraEasyCustomOptimizer.adai import Adai
+from LoraEasyCustomOptimizer.adabelief import AdaBelief
+from LoraEasyCustomOptimizer.galore import GaLore
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdEMAMix,
@@ -43,6 +48,11 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     WSAM,
     BSAM,
     ADOPT,
+    GrokFastAdamW,
+    AdamMini,
+    Adai,
+    AdaBelief,
+    GaLore,
 ]
 
 OPTIMIZERS: Dict[str, OPTIMIZER] = {str(f"{optimizer.__name__}".lower()): optimizer for optimizer in OPTIMIZER_LIST}

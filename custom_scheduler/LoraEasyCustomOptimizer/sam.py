@@ -1,3 +1,4 @@
+# Source: https://github.com/kozistr/pytorch_optimizer/blob/main/pytorch_optimizer/optimizer/sam.py
 from contextlib import ExitStack
 from typing import Callable, Dict, Optional, Tuple, Union
 
