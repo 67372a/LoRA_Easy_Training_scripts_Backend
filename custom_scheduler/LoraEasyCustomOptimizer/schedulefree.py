@@ -32,7 +32,8 @@ class ScheduleFreeWrapper(BaseOptimizer):
         base_optimizer (OPTIMIZER): 
             PyTorch optimizer object, use arg base_optimizer_type and 
             the fully qualified optimizer name e.x. LoraEasyCustomOptimizer.compass.Compass
-        sf_momentum (float): Apply momentum on the outer optimizer (default 0.9)
+        sf_momentum (float): 
+            Apply momentum on the outer optimizer (default 0.9)
         sf_weight_decay_at_y (float): 
             Weight decay calculated at the y point. Set weight decay on the 
             inner optimizer to instead calculate at z (default: 0.0).
