@@ -23,6 +23,7 @@ from LoraEasyCustomOptimizer.adammini import AdamMini
 from LoraEasyCustomOptimizer.adai import Adai
 from LoraEasyCustomOptimizer.adabelief import AdaBelief
 from LoraEasyCustomOptimizer.galore import GaLore
+from LoraEasyCustomOptimizer.schedulefree import ScheduleFreeWrapper
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdEMAMix,
@@ -53,6 +54,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     Adai,
     AdaBelief,
     GaLore,
+    ScheduleFreeWrapper,
 ]
 
 OPTIMIZERS: Dict[str, OPTIMIZER] = {str(f"{optimizer.__name__}".lower()): optimizer for optimizer in OPTIMIZER_LIST}
