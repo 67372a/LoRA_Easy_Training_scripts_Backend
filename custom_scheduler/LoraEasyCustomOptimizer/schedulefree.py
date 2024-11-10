@@ -21,30 +21,24 @@ class ScheduleFreeWrapper(BaseOptimizer):
         momentum, as it's no longer necessary when using our wrapper's 
         momentum (although you can use both types of momentum if you want).
 
-
-        Example usage:
-        ```
-        base_optimizer = torch.optim.RMSprop(model.parameters(), lr=0.0025)
-        optimizer = ScheduleFreeWrapper(
-            base_optimizer, momentum=0.9, weight_decay_at_y=0.1)
-        ```
-
         If you set weight decay on the base optimizer, it computes weight decay
         at $z$. We offer the option to compute weight decay at $y$, via the 
         `weight_decay_at_y` parameter, which seems to give better results in 
         our experiments. This approach to decay only works correctly if the base
         optimizer uses group["lr"] as the current learning rate. 
 
-        :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
-        base_optimizer (torch.optim.Optimizer): 
-            PyTorch optimizer object
+        :params: (PARAMETERS): 
+            iterable of parameters to optimize or dicts defining parameter groups.
+        base_optimizer (OPTIMIZER): 
+            PyTorch optimizer object, use arg base_optimizer_type and 
+            the fully qualified optimizer name e.x. LoraEasyCustomOptimizer.compass.Compass
         sf_momentum (float): Apply momentum on the outer optimizer (default 0.9)
         sf_weight_decay_at_y (float): 
             Weight decay calculated at the y point. Set weight decay on the 
             inner optimizer to instead calculate at z (default: 0.0).
         sf_r (float): Use polynomial weighting in the average 
             with power r (default 0.0).
-        sf_weight_lr_power (float): During warmup, the weights in the average will
+        sf_weight_lr_power (float): The weights in the average will
             be equal to lr raised to this power. Set to 0 for no weighting
             (default 2.0).
     """
