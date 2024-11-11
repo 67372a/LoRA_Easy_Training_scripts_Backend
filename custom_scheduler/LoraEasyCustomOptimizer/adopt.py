@@ -46,6 +46,7 @@ class ADOPT(Optimizer):
         capturable: bool = False,
         differentiable: bool = False,
         fused: Optional[bool] = None,
+        **kwargs,
     ):
         if isinstance(lr, Tensor):
             if foreach and not capturable:
