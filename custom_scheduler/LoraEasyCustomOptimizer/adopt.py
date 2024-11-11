@@ -41,11 +41,11 @@ class ADOPT(Optimizer):
         weight_decay: float = 0.0,
         decoupled: bool = False,
         *,
-        foreach: Optional[bool] = None,
+        foreach: bool = False,
         maximize: bool = False,
         capturable: bool = False,
         differentiable: bool = False,
-        fused: Optional[bool] = None,
+        fused: bool = False,
         **kwargs,
     ):
         if isinstance(lr, Tensor):
@@ -98,10 +98,10 @@ class ADOPT(Optimizer):
         super().__setstate__(state)
         for group in self.param_groups:
             group.setdefault("maximize", False)
-            group.setdefault("foreach", None)
+            group.setdefault("foreach", False)
             group.setdefault("capturable", False)
             group.setdefault("differentiable", False)
-            fused = group.setdefault("fused", None)
+            fused = group.setdefault("fused", False)
             for p in group["params"]:
                 p_state = self.state.get(p, [])
                 if len(p_state) != 0 and not torch.is_tensor(p_state["step"]):
@@ -451,10 +451,10 @@ def adopt(
     state_steps: List[Tensor],
     # kwonly args with defaults are not supported by functions compiled with torchscript issue #70627
     # setting this as kwarg for now as functional API is compiled by torch/distributed/optim
-    foreach: Optional[bool] = None,
+    foreach: bool = False,
     capturable: bool = False,
     differentiable: bool = False,
-    fused: Optional[bool] = None,
+    fused: bool = False,
     grad_scale: Optional[Tensor] = None,
     found_inf: Optional[Tensor] = None,
     has_complex: bool = False,
@@ -485,6 +485,8 @@ def adopt(
         fused = False
     if foreach is None:
         foreach = False
+
+    print("foreach"+str(foreach))
 
     # this check is slow during compilation, so we skip it
     # if it's strictly needed we can add this check back in dynamo
