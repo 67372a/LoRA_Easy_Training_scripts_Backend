@@ -486,8 +486,6 @@ def adopt(
     if foreach is None:
         foreach = False
 
-    print("foreach"+str(foreach))
-
     # this check is slow during compilation, so we skip it
     # if it's strictly needed we can add this check back in dynamo
     if not torch._utils.is_compiling() and not all(
