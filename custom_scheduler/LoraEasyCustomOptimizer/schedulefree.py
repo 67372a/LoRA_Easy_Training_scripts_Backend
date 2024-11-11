@@ -134,13 +134,27 @@ class ScheduleFreeWrapper(BaseOptimizer):
 
                 z = state['z']
 
+                p_fp32 = p
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    p_fp32 = p.clone().to(torch.float32)
+                    z = z.to(torch.float32)
+
                 # Apply weight_decay_at_y
                 if self.sf_weight_decay_at_y != 0.0:
-                    z.sub_(p, alpha=lr*self.sf_weight_decay_at_y)    
-                    p.sub_(p, alpha=lr*self.sf_weight_decay_at_y*(1-self.sf_momentum))
+                    z.sub_(p_fp32, alpha=lr*self.sf_weight_decay_at_y)    
+                    p_fp32.sub_(p_fp32, alpha=lr*self.sf_weight_decay_at_y*(1-self.sf_momentum))
 
                 # Unextrapolate p converting from y -> x
-                p.lerp_(end=z, weight=1-1/self.sf_momentum)
+                p_fp32.lerp_(end=z, weight=1-1/self.sf_momentum)
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state["z"], z)
+                    copy_stochastic_(p, p_fp32)
+
+                z = state["z"]
 
                 # Swap x into z buffer temporarily
                 self.swap(z, p)
@@ -156,7 +170,7 @@ class ScheduleFreeWrapper(BaseOptimizer):
             weight_lr_power = self.sf_weight_lr_power
             r = self.sf_r
             # tiny bit of starting LR to avoid divide by zero
-            lr = max(group['lr'] * 1.0, 1e-16)
+            lr = max(group['lr'] * 1.0, 1e-8)
             lr_max = group['lr_max'] = max(lr, group.get('lr_max', 0))
             
             weight = (group['k']**r) * (lr_max**weight_lr_power)
@@ -174,11 +188,23 @@ class ScheduleFreeWrapper(BaseOptimizer):
                 # Swap x back out of z buffer, leaving p as x
                 self.swap(z, p)
 
+                # Now state['z'] is z and p is x.
+
+                p_fp32 = p
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    p_fp32 = p.clone().to(torch.float32)
+
                 # Update x
-                p.lerp_(end=z, weight=ckp1)
+                p_fp32.lerp_(end=z.to(torch.float32), weight=ckp1)
 
                 # Now set p to y
-                p.lerp_(end=state['z'], weight=1-self.sf_momentum)
+                p_fp32.lerp_(end=state['z'].to(torch.float32), weight=1-self.sf_momentum)
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(p, p_fp32)
 
         return loss
     
