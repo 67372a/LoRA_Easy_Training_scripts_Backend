@@ -1,11 +1,11 @@
-# Source: https://github.com/kozistr/pytorch_optimizer/blob/main/pytorch_optimizer/optimizer/sam.py
+# Source: https://github.com/facebookresearch/schedule_free/blob/main/schedulefree/wrap_schedulefree.py
+# Modified to be an actual optimizer, allowing it to wrap any optimizer and work in Kohya's
 from typing import Callable, Dict, Optional, Tuple, Union
 
 import torch
 
-from pytorch_optimizer.base.exception import NoClosureError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, OPTIMIZER, PARAMETERS, LOSS
+from pytorch_optimizer.base.types import CLOSURE, DEFAULTS, OPTIMIZER, PARAMETERS, LOSS
 from .utils import copy_stochastic_
 
 class ScheduleFreeWrapper(BaseOptimizer):
@@ -27,11 +27,15 @@ class ScheduleFreeWrapper(BaseOptimizer):
         our experiments. This approach to decay only works correctly if the base
         optimizer uses group["lr"] as the current learning rate. 
 
-        :params: (PARAMETERS): 
+        params (PARAMETERS): 
             iterable of parameters to optimize or dicts defining parameter groups.
         base_optimizer (OPTIMIZER): 
-            PyTorch optimizer object, use arg base_optimizer_type and 
-            the fully qualified optimizer name e.x. LoraEasyCustomOptimizer.compass.Compass
+            PyTorch optimizer object, in Kohya's pass in an additional optimizer arg called 
+            base_optimizer_type and the fully qualified optimizer name. 
+            e.x. 
+                base_optimizer_type=LoraEasyCustomOptimizer.compass.Compass
+                base_optimizer_type=LoraEasyCustomOptimizer.came.CAME
+                base_optimizer_type=LoraEasyCustomOptimizer.adopt.ADOPT
         sf_momentum (float): 
             Apply momentum on the outer optimizer (default 0.9)
         sf_weight_decay_at_y (float): 
