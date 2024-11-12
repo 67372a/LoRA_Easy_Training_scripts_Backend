@@ -91,7 +91,7 @@ class RMSProp(BaseOptimizer):
                 group['step'] = 1
 
             step_size = group["lr"]
-            beta = group["beta"]
+            beta = group["betas"]
             weight_decay = group["weight_decay"]
             fixed_decay = group["fixed_decay"]
             weight_decouple = group["weight_decouple"]
