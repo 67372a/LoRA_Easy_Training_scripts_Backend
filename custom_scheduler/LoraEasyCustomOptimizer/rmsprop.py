@@ -108,7 +108,7 @@ class RMSProp(BaseOptimizer):
 
                 state = self.state[p]
 
-                p = p_fp32
+                p_fp32 = p
 
                 # State initialization
                 if len(state) == 0:
