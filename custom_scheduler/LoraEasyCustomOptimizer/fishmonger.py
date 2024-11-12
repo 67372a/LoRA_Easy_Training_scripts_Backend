@@ -50,6 +50,7 @@ class FishMonger(Optimizer):
         centralization=1.0,
         diff_amp=1.0,
         diff_amp_beta=0.999,
+        **kwargs,
     ):
         defaults = dict(
             lr=lr,

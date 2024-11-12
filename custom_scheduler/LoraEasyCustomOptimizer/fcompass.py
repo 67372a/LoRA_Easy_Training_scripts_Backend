@@ -55,6 +55,7 @@ class FCompass(Optimizer):
         weight_decay=0.001, #Original default 0.1
         clip=1.0,
         centralization=1.0,
+        **kwargs,
     ):
         defaults = dict(
             lr=lr,
@@ -249,6 +250,7 @@ class FCompassPlus(BaseOptimizer):
         diff_amp_beta: float = 0.999,
         use_pnm: bool = False,
         pnm_beta: float = 0.1,
+        **kwargs,
     ):
         defaults = dict(
             lr=lr,

@@ -47,6 +47,7 @@ class FARMSCrop(Optimizer):
         diff_mult=1.0,
         momentum_beta=0.9999,
         momentum_amp=5.0,
+        **kwargs,
     ):
         defaults = dict(
             lr=lr,

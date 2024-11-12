@@ -33,6 +33,7 @@ class RMSProp(Optimizer):
         eps=1e-8,
         weight_decay=0,
         centralization=0,
+        **kwargs,
     ):
         defaults = dict(
             lr=lr,
