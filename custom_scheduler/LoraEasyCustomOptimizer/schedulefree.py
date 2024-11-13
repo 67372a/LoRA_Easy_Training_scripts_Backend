@@ -79,7 +79,14 @@ class ScheduleFreeWrapper(BaseOptimizer):
 
     @torch.no_grad()
     def reset(self):
-        pass
+        for group in self.param_groups:
+            group['sf_step'] = 0
+
+            for p in group['params']:
+                state = self.state[p]
+                state['z'] = torch.clone(p, memory_format=torch.preserve_format)
+
+        self.base_optimizer.reset()
 
     @torch.no_grad()
     def eval(self):
@@ -123,10 +130,10 @@ class ScheduleFreeWrapper(BaseOptimizer):
 
         for group in self.param_groups:
             lr = group['lr']
-            if 'k' in group:
-                group['k'] += 1
+            if 'sf_step' in group:
+                group['sf_step'] += 1
             else:
-                group['k'] = 1
+                group['sf_step'] = 1
 
             for p in group['params']:
                 if p.grad is None:
@@ -177,7 +184,7 @@ class ScheduleFreeWrapper(BaseOptimizer):
             lr = max(group['lr'] * 1.0, 1e-8)
             lr_max = group['lr_max'] = max(lr, group.get('lr_max', 0))
             
-            weight = (group['k']**r) * (lr_max**weight_lr_power)
+            weight = (group['sf_step']**r) * (lr_max**weight_lr_power)
             weight_sum = group['sf_weight_sum'] = group.get('sf_weight_sum', 0.0) + weight
 
             ckp1 = weight/weight_sum
