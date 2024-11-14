@@ -228,6 +228,8 @@ def validate_sdxl(args: dict) -> bool:
 def validate_save_tags(dataset: dict) -> dict:
     tags = {}
     for subset in dataset["subsets"]:
+        if 'is_val' in subset and subset['is_val']:
+            continue
         subset_dir = Path(subset["image_dir"])
         if not subset_dir.is_dir():
             continue
@@ -289,6 +291,8 @@ def calculate_steps(
         bucketManager = BucketManager(False, resolution, None, None, None)
         bucketManager.set_predefined_resos([resolution])
     for subset in subsets:
+        if 'is_val' in subset and subset['is_val']:
+            continue
         for image in Path(subset["image_dir"]).iterdir():
             if image.suffix not in supported_types:
                 continue
