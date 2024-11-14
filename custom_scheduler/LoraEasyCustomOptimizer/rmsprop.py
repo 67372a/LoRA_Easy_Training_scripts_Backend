@@ -25,7 +25,7 @@ class RMSProp(BaseOptimizer):
         eps2 (float):
             Term to multiple the RMS of the grad to calculate adaptive eps. (default: 0.01).
         eps_floor (float):
-            Term to set a floor for the eps, to prevent NaNs. (default: 1e-8).
+            Term to set a floor for adaptive eps, to prevent NaNs, set to >= 0 to turn on adaptive eps (default: None).
         weight_decay (float):
             Weight decay, i.e. a L2 penalty (default: 0).
         centralization (float):
@@ -39,7 +39,7 @@ class RMSProp(BaseOptimizer):
         betas: float = 0.9,
         eps: float = 1e-8,
         eps2: float = 0.01,
-        eps_floor: float = 1e-8,
+        eps_floor: Optional[float] = None,
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
         fixed_decay: bool = False,
@@ -60,7 +60,6 @@ class RMSProp(BaseOptimizer):
         self.validate_non_negative(adaptive_clip_eps, 'adaptive_clip_eps')
         self.validate_non_negative(clip_eps, 'clip_eps')
         self.validate_non_negative(eps2, 'eps2')
-        self.validate_non_negative(eps_floor, 'eps_floor')
 
         defaults: DEFAULTS = {
             'lr':lr,
@@ -196,7 +195,7 @@ class RMSProp(BaseOptimizer):
                     p_fp32 = p.clone().to(torch.float32)
                     exp_avg_sq = exp_avg_sq.to(torch.float32)
 
-                if group["eps_floor"] < group["eps"]:
+                if group["eps_floor"] is not None and group["eps_floor"] < group["eps"]:
                     curr_eps = max(min(self.get_rms(grad) * group["eps2"], group["eps"]), group["eps_floor"] if group["eps_floor"] > 0 else torch.finfo(torch.float32).tiny) # Set a floor for eps to avoid NaN
                 else:
                     curr_eps = group["eps"]
