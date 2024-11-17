@@ -39,7 +39,7 @@ class Compass(BaseOptimizer):
         fixed_decay (bool): 
             fix weight decay (default: false).
         clip (float):
-            Clip gradient to this value (default: 0.0).
+            Clip gradient to this value (default: 0.01).
         amp_fac (float):
             amplification factor for the first moment filter (default: 2).
         eps (float):
@@ -66,12 +66,12 @@ class Compass(BaseOptimizer):
         params: PARAMETERS,
         lr: float = 1.4e-4, #Original default 1e-3
         betas: BETAS = (0.975, 0.999), #Original default 0.99, 0.999
-        weight_decay: float = 0.001, #Original default 0
+        weight_decay: float = 0.0,
         weight_decouple: bool = True,
         lr_decouple: bool = False,
         max_lr: float = 0.0,
         fixed_decay: bool = False,
-        clip: float = 0.01,
+        clip: float = 0.0,
         amp_fac: float = 2.0,
         eps: float = 1e-8,
         centralization: float = 0.0,
