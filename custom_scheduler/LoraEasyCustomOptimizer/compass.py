@@ -24,12 +24,12 @@ class Compass(BaseOptimizer):
             Iterable of parameters to optimize or dicts defining
             parameter groups.
         lr (float):
-            Learning rate parameter (default 7e-5)
+            Learning rate parameter (default 1.4e-4)
         betas (Tuple[float, float], optional):
             coefficients used for computing running averages of
             gradient and its square (default: (0.98, 0.999)).
         weight_decay (float):
-            Weight decay, i.e. a L2 penalty (default: 0.001).
+            Weight decay, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
             the optimizer uses decoupled weight decay as in AdamW. (default: true)
         lr_decouple (bool): 
@@ -39,7 +39,7 @@ class Compass(BaseOptimizer):
         fixed_decay (bool): 
             fix weight decay (default: false).
         clip (float):
-            Clip gradient to this value (default: 0.01).
+            Clip gradient to this value (default: 0.0).
         amp_fac (float):
             amplification factor for the first moment filter (default: 2).
         eps (float):
