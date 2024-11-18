@@ -15,10 +15,10 @@ class RMSProp(BaseOptimizer):
             Iterable of parameters to optimize or dicts defining
             parameter groups.
         lr (float):
-            Learning rate parameter (default 0.0025)
+            Learning rate parameter (default 0.001)
         betas (float, optional):
             coefficient used for computing running averages of
-            gradient's square (default: 0.999).
+            gradient's square (default: 0.95).
         eps (float):
             Term added to the denominator outside of the root operation to
             improve numerical stability. (default: 1e-8).
@@ -36,7 +36,7 @@ class RMSProp(BaseOptimizer):
         self,
         params: PARAMETERS,
         lr: float = 1e-3,
-        betas: float = 0.9,
+        betas: float = 0.95, # normal default is 0.999, but was accidently 0.9 for awhile, so adjusting to 0.95 for now
         eps: float = 1e-8,
         eps2: float = 0.01,
         eps_floor: Optional[float] = None,
