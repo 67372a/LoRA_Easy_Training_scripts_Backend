@@ -1,12 +1,13 @@
 import torch
 from .utils import copy_stochastic_, quantize, dequantize, agc
 import math
-from typing import Optional
+from typing import Optional, Literal
 
 from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 
+DATA_FORMAT = Literal['gradient', 'update', 'both']
 
 class RMSProp(BaseOptimizer):
     r"""
@@ -30,6 +31,14 @@ class RMSProp(BaseOptimizer):
             Weight decay, i.e. a L2 penalty (default: 0).
         centralization (float):
             center model grad (default: 0).
+        rectify (bool)
+            Rectify variance as per RAdam - https://arxiv.org/abs/1908.03265 (Default: false)
+        n_sma_threshold: (int)
+            Simple moving average threshold for variance rectification (recommended is 5) (Default: 5).
+        degenerated_to_sgd: (bool)
+            degenerated to SGD. (Default: false)
+        clip_loc: (string)
+            Control where clipping is applied. Can be selectively applied: gradient, update, both (Default: gradient)
     """
 
     def __init__(
@@ -38,8 +47,6 @@ class RMSProp(BaseOptimizer):
         lr: float = 1e-3,
         betas: float = 0.95, # normal default is 0.999, but was accidently 0.9 for awhile, so adjusting to 0.95 for now
         eps: float = 1e-8,
-        eps2: float = 0.01,
-        eps_floor: Optional[float] = None,
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
         fixed_decay: bool = False,
@@ -49,6 +56,10 @@ class RMSProp(BaseOptimizer):
         clip_eps: float = 1e-8,
         adaptive_clipping: bool = False,
         adaptive_clip_eps: float = 1e-3,
+        rectify_variance: bool = False,
+        n_sma_threshold: int = 5,
+        degenerated_to_sgd: bool = False,
+        clip_loc: DATA_FORMAT = 'gradient',
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -59,7 +70,6 @@ class RMSProp(BaseOptimizer):
         self.validate_non_negative(clip, 'clip')
         self.validate_non_negative(adaptive_clip_eps, 'adaptive_clip_eps')
         self.validate_non_negative(clip_eps, 'clip_eps')
-        self.validate_non_negative(eps2, 'eps2')
 
         defaults: DEFAULTS = {
             'lr':lr,
@@ -74,8 +84,10 @@ class RMSProp(BaseOptimizer):
             'clip_eps':clip_eps,
             'adaptive_clipping':adaptive_clipping,
             'adaptive_clip_eps':adaptive_clip_eps,
-            'eps2':eps2,
-            'eps_floor':eps_floor,
+            'rectify_variance':rectify_variance,
+            'n_sma_threshold':n_sma_threshold,
+            'degenerated_to_sgd':degenerated_to_sgd,
+            'clip_loc':clip_loc,
         }
 
         super().__init__(params, defaults)
@@ -147,7 +159,7 @@ class RMSProp(BaseOptimizer):
                         grad.mean(dim=tuple(range(1, grad.dim())), keepdim=True).mul_(group["centralization"])
                     )
 
-                if group['clip'] > 0.0:
+                if group['clip'] > 0.0 and group['clip_loc'] in {'gradient','both'}:
                     if group['adaptive_clipping']:
                         # Apply Adaptive Gradient Clipping (AGC)
                         grad.copy_(agc(p_fp32, grad, group['adaptive_clip_eps'], group['clip'], group['clip_eps']))
@@ -173,10 +185,18 @@ class RMSProp(BaseOptimizer):
         exp_avg_sq_mean: float = math.sqrt(exp_avg_sq_sum / param_size) #+ self.defaults['eps']
 
         for group in self.param_groups:
-            step_size = group["lr"]
             beta = group["betas"]
 
             bias_correction_sqrt: float = math.sqrt(self.debias(beta, group['step']))
+
+            step_size, n_sma = self.get_rectify_step_size(
+                is_rectify=group["rectify_variance"],
+                step=group['step'],
+                lr=group['lr'],
+                beta2=beta,
+                n_sma_threshold=group["n_sma_threshold"],
+                degenerated_to_sgd=group["degenerated_to_sgd"],
+            )
 
             for p in group["params"]:
                 if p.grad is None:
@@ -195,23 +215,36 @@ class RMSProp(BaseOptimizer):
                     p_fp32 = p.clone().to(torch.float32)
                     exp_avg_sq = exp_avg_sq.to(torch.float32)
 
-                if group["eps_floor"] is not None and group["eps_floor"] < group["eps"]:
-                    curr_eps = max(min(self.get_rms(grad) * group["eps2"], group["eps"]), group["eps_floor"] if group["eps_floor"] > 0 else torch.finfo(torch.float32).tiny) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = group["eps"]
+                if not group["rectify_variance"] or step_size > 0 or n_sma >= group["n_sma_threshold"]:
+                    if group["weight_decouple"]:
+                        # Perform stepweight decay
+                        p_fp32.mul_(1.0 - (1.0 if group["fixed_decay"] else step_size) * group["weight_decay"] / (exp_avg_sq_mean if group["stable_decay"] else 1.0))
+                    elif group["weight_decay"] > 0.0:
+                        grad.add_(p_fp32, alpha=group["weight_decay"])
 
-                # lr scaler + eps to prevent zero division
-                # denom = exp_avg_sq.sqrt() + group['eps']
-                de_nom = (exp_avg_sq.sqrt() / bias_correction_sqrt).add_(curr_eps)
+                if not group["rectify_variance"] or n_sma >= group["n_sma_threshold"]:
+                    # lr scaler + eps to prevent zero division
+                    # de_nom = exp_avg_sq.sqrt() + group['eps']
+                    if group["rectify_variance"]:
+                        de_nom = exp_avg_sq.sqrt().add_(group["eps"])
+                    else:
+                        de_nom = (exp_avg_sq.sqrt() / bias_correction_sqrt).add_(group["eps"])
 
-                if group["weight_decouple"]:
-                    # Perform stepweight decay
-                    p_fp32.mul_(1.0 - (1.0 if group["fixed_decay"] else step_size) * group["weight_decay"] / (exp_avg_sq_mean if group["stable_decay"] else 1.0))
-                elif group["weight_decay"] > 0.0:
-                    grad.add_(p_fp32, alpha=group["weight_decay"])
+                    # p = p - lr * grad / denom
+                    update = grad.div(de_nom)
+                elif step_size > 0:
+                    update = grad
 
-                # p = p - lr * grad / denom
-                p_fp32.addcdiv_(grad, de_nom, value=-step_size)
+                if group['clip'] > 0.0 and group['clip_loc'] in {'update','both'} and (step_size > 0 or n_sma >= group["n_sma_threshold"]):
+                    if group['adaptive_clipping']:
+                        # Apply Adaptive Gradient Clipping (AGC)
+                        update.copy_(agc(p_fp32, update, group['adaptive_clip_eps'], group['clip'], group['clip_eps']))
+                    else:
+                        # Clip the gradient 
+                        update.div_((self.get_rms(update).clamp_(group['clip_eps']) / group['clip']).clamp_(min=1.0))
+
+                if step_size > 0 or n_sma >= group["n_sma_threshold"]:
+                    p_fp32.add_(update, alpha=-step_size)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
