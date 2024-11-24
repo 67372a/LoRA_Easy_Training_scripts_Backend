@@ -236,6 +236,7 @@ class FARMSCropV2(Optimizer):
         momentum_beta=0.9999,
         momentum_lambda=0.25,
         clip=1.0,
+        **kwargs,
     ):
         defaults = dict(
             lr=lr,
