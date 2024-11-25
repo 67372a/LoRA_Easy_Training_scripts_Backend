@@ -1,4 +1,4 @@
-# FARMSCrop from https://github.com/Clybius/Personalized-Optimizers/blob/main/FARMSCrop.py by Clybius
+# FARMSCrop from https://github.com/Clybius/Personalized-Optimizers by Clybius
 import torch
 from torch.optim import Optimizer
 from .utils import copy_stochastic_
@@ -216,7 +216,7 @@ class FARMSCropV2(BaseOptimizer):
         eps2 (float):
             Term to multiple the RMS of the grad to calculate adaptive eps. (default: 1e-2).
         eps_floor (float):
-            Term to set a floor for the eps, to prevent NaNs. (default: 1e-30).
+            Term to set a floor for the eps, to prevent NaNs. (default: None, disabling adaptive eps).
         weight_decay (float):
             Weight decay, i.e. a L2 penalty (default: 0.0).
         centralization (float):
@@ -238,7 +238,7 @@ class FARMSCropV2(BaseOptimizer):
         betas: BETAS = (0.999, 0.9999),
         eps: float = 1e-6,
         eps2: float = 1e-2,
-        eps_floor: float = 1e-30,
+        eps_floor: float = None,
         weight_decay: float = 0.0,
         centralization: float = 0.0,
         diff_mult: float = 1.0,
@@ -252,7 +252,6 @@ class FARMSCropV2(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
         self.validate_non_negative(eps2, 'eps2')
-        self.validate_non_negative(eps_floor, 'eps_floor')
 
         defaults: DEFAULTS = {
             'lr':lr,
@@ -350,8 +349,9 @@ class FARMSCropV2(BaseOptimizer):
 
                 approx_grad_nat = grad
 
-                rms_grad = grad.pow(2).mean().sqrt_()
-                curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
+                if eps_floor is not None and eps_floor < eps:
+                    rms_grad = grad.pow(2).mean().sqrt_()
+                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
 
                 if diff_mult > 0:
                     # Get previous grad, initialized at 0 (first step is just grad)

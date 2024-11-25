@@ -6,7 +6,7 @@ from LoraEasyCustomOptimizer.ademamix import AdEMAMix
 from LoraEasyCustomOptimizer.came import CAME
 from LoraEasyCustomOptimizer.camefullsr import CAMEFullSR
 from LoraEasyCustomOptimizer.compass import Compass, Compass8BitBNB, CompassPlus
-from LoraEasyCustomOptimizer.farmscrop import FARMSCrop
+from LoraEasyCustomOptimizer.farmscrop import FARMSCrop, FARMSCropV2
 from LoraEasyCustomOptimizer.fcompass import FCompass, FCompassPlus
 from LoraEasyCustomOptimizer.fishmonger import FishMonger, FishMonger8BitBNB
 from LoraEasyCustomOptimizer.lpfadamw import LPFAdamW
@@ -24,7 +24,7 @@ from LoraEasyCustomOptimizer.adai import Adai
 from LoraEasyCustomOptimizer.adabelief import AdaBelief
 from LoraEasyCustomOptimizer.galore import GaLore
 from LoraEasyCustomOptimizer.schedulefree import ScheduleFreeWrapper
-from LoraEasyCustomOptimizer.farmscrop import FARMSCropV2
+from LoraEasyCustomOptimizer.fmarscrop import FMARSCrop
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdEMAMix,
@@ -57,6 +57,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     GaLore,
     ScheduleFreeWrapper,
     FARMSCropV2,
+    FMARSCrop,
 ]
 
 OPTIMIZERS: Dict[str, OPTIMIZER] = {str(f"{optimizer.__name__}".lower()): optimizer for optimizer in OPTIMIZER_LIST}
