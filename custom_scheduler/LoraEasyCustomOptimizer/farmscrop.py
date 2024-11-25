@@ -253,6 +253,10 @@ class FARMSCropV2(BaseOptimizer):
         self.validate_non_negative(eps, 'eps')
         self.validate_non_negative(eps2, 'eps2')
 
+        # Override zero to 1e-38, as zero and float32.tiny NaNs
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = 1e-38
+
         defaults: DEFAULTS = {
             'lr':lr,
             'betas':betas,
