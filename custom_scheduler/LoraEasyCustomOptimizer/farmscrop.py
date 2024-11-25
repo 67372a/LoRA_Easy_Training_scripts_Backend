@@ -2,7 +2,10 @@
 import torch
 from torch.optim import Optimizer
 from .utils import copy_stochastic_
-from typing import Optional
+
+from pytorch_optimizer.base.exception import NoSparseGradientError
+from pytorch_optimizer.base.optimizer import BaseOptimizer
+from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 
 class FARMSCrop(Optimizer):
     r"""
@@ -22,7 +25,7 @@ class FARMSCrop(Optimizer):
         eps2 (float):
             Term to multiple the RMS of the grad to calculate adaptive eps. (default: 0.01).
         eps_floor (float):
-            Term to set a floor for the eps, to prevent NaNs. (default: 1e-30).
+            Term to set a floor for the eps, to prevent NaNs. (default: 1e-16).
         weight_decay (float):
             Weight decay, i.e. a L2 penalty (default: 1e-6).
         centralization (float):
@@ -195,7 +198,7 @@ class FARMSCrop(Optimizer):
                     state['previous_grad'].copy_(-grad)
         return loss
 
-class FARMSCropV2(Optimizer):
+class FARMSCropV2(BaseOptimizer):
     r"""
     FARMSCropV2: Fisher-Accelerated RMSprop, with momentum-based Compass-style amplification, with ADOPT's AdamW changes. (https://arxiv.org/abs/2411.02853).
     Arguments:
@@ -210,6 +213,10 @@ class FARMSCropV2(Optimizer):
         eps (float):
             Term the denominator is minimally clamped to, to
             improve numerical stability. (default: 1e-6).
+        eps2 (float):
+            Term to multiple the RMS of the grad to calculate adaptive eps. (default: 1e-2).
+        eps_floor (float):
+            Term to set a floor for the eps, to prevent NaNs. (default: 1e-30).
         weight_decay (float):
             Weight decay, i.e. a L2 penalty (default: 0.0).
         centralization (float):
@@ -226,45 +233,85 @@ class FARMSCropV2(Optimizer):
 
     def __init__(
         self,
-        params,
-        lr=1e-4,
-        betas=(0.999, 0.9999),
-        eps=1e-6,
-        weight_decay=0.0,
-        centralization=0.0,
-        diff_mult=1.0,
-        momentum_beta=0.9999,
-        momentum_lambda=0.25,
-        clip=1.0,
+        params: PARAMETERS,
+        lr: float = 1e-4,
+        betas: BETAS = (0.999, 0.9999),
+        eps: float = 1e-6,
+        eps2: float = 1e-2,
+        eps_floor: float = 1e-30,
+        weight_decay: float = 0.0,
+        centralization: float = 0.0,
+        diff_mult: float = 1.0,
+        momentum_beta: float = 0.9999,
+        momentum_lambda: float = 0.25,
+        clip: float = 1.0,
         **kwargs,
     ):
-        defaults = dict(
-            lr=lr,
-            betas=betas,
-            eps=eps,
-            weight_decay=weight_decay,
-            centralization=centralization,
-            diff_mult=diff_mult,
-            momentum_beta=momentum_beta,
-            momentum_lambda=momentum_lambda,
-            clip=clip,
-        )
-        super(FARMSCropV2, self).__init__(params, defaults)
+        self.validate_learning_rate(lr)
+        self.validate_betas(betas)
+        self.validate_non_negative(weight_decay, 'weight_decay')
+        self.validate_non_negative(eps, 'eps')
+        self.validate_non_negative(eps2, 'eps2')
+        self.validate_non_negative(eps_floor, 'eps_floor')
+
+        defaults: DEFAULTS = {
+            'lr':lr,
+            'betas':betas,
+            'eps':eps,
+            'eps2':eps2,
+            'eps_floor':eps_floor,
+            'weight_decay':weight_decay,
+            'centralization':centralization,
+            'diff_mult':diff_mult,
+            'momentum_beta':momentum_beta,
+            'momentum_lambda':momentum_lambda,
+            'clip':clip,
+        }
+
+        super().__init__(params, defaults)
 
     def __str__(self) -> str:
         return 'FARMSCropV2'
+    
+    @torch.no_grad()
+    def reset(self):
+        for group in self.param_groups:
+            group['step'] = 0
+            for p in group["params"]:
+                state = self.state[p]
+
+                state["fim"] = torch.ones_like(p.data)
+                # Fisher information matrix
+                state["momentum"] = torch.zeros_like(p.data)
+                # Prev grad
+                if group["diff_mult"] > 0:
+                    state["previous_grad"] = torch.zeros_like(p.data).detach()
+                    state["grad_diff_fim"] = torch.ones_like(p.data)
 
     @torch.no_grad()
-    def step(self, closure=None):
-        loss = None
+    def step(self, closure: CLOSURE = None) -> LOSS:
+        loss: LOSS = None
         if closure is not None:
-            loss = closure()
+            with torch.enable_grad():
+                loss = closure()
 
         for group in self.param_groups:
             if 'step' in group:
                 group['step'] += 1
             else:
                 group['step'] = 1
+
+            beta1, beta2 = group["betas"]
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
+            centralization = group["centralization"]
+            momentum_beta = group["momentum_beta"]
+            momentum_lambda = group["momentum_lambda"]
+            clip = group["clip"]
+            step = group['step']
+            eps = group["eps"]
+            eps2 = group["eps2"]
+            eps_floor = group["eps_floor"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -290,14 +337,6 @@ class FARMSCropV2(Optimizer):
                 fim = state["fim"]
                 momentum = state["momentum"]
 
-                beta1, beta2 = group["betas"]
-                lr = group["lr"]
-                weight_decay = group["weight_decay"]
-                centralization = group["centralization"]
-                momentum_beta = group["momentum_beta"]
-                momentum_lambda = group["momentum_lambda"]
-                clip = group["clip"]
-
                 # Unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
@@ -305,11 +344,14 @@ class FARMSCropV2(Optimizer):
                     momentum = state["momentum"].to(torch.float32)
                     p_fp32 = p.clone().to(torch.float32)
 
-                clip_lambda = group['step']**0.25
+                clip_lambda = step**0.25
 
-                fim_slow_beta = ((beta2**group['step'] - beta2) / (beta2**group['step'] - 1.0)) ** (1/2)
+                fim_slow_beta = ((beta2**step - beta2) / (beta2**step - 1.0)) ** (1/2)
 
                 approx_grad_nat = grad
+
+                rms_grad = grad.pow(2).mean().sqrt_()
+                curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
 
                 if diff_mult > 0:
                     # Get previous grad, initialized at 0 (first step is just grad)
@@ -329,7 +371,7 @@ class FARMSCropV2(Optimizer):
                     grad_diff.div_(divisor)
 
                     # Get natural gradient (squared ema, obtained sqrt of ema)
-                    diff_fim_base = torch.clamp(grad_diff_fim.sqrt(), group["eps"])
+                    diff_fim_base = torch.clamp(grad_diff_fim.sqrt(), curr_eps)
 
                     grad_diff_fim.mul_(beta1).addcmul_(grad_diff, grad_diff, value=1 - beta1).clamp_(-clip_lambda, clip_lambda)
 
@@ -344,7 +386,7 @@ class FARMSCropV2(Optimizer):
                 divisor = max(clip, rms) / clip
                 approx_grad_nat.div_(divisor)
 
-                fim_base = torch.clamp(fim.sqrt(), group["eps"])
+                fim_base = torch.clamp(fim.sqrt(), curr_eps)
 
                 grad_nat = grad.div(fim_base).div_(diff_fim_base)
                 rms = grad_nat.pow(2).mean().sqrt_()
@@ -352,7 +394,7 @@ class FARMSCropV2(Optimizer):
                 grad_nat.div_(divisor)
 
                 # Compass-style amplification
-                full_step = grad_nat.add(momentum, alpha=group['step']**momentum_lambda)
+                full_step = grad_nat.add(momentum, alpha=step**momentum_lambda)
 
                 # center the gradient vector
                 if centralization != 0 and full_step.dim() > 1:
