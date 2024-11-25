@@ -352,6 +352,8 @@ class FARMSCropV2(BaseOptimizer):
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
                     curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
+                else:
+                    curr_eps = eps
 
                 if diff_mult > 0:
                     # Get previous grad, initialized at 0 (first step is just grad)
