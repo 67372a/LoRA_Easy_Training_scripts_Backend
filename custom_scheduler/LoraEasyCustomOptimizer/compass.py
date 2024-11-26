@@ -59,6 +59,8 @@ class Compass(BaseOptimizer):
             Simple moving average threshold for variance rectification (recommended is 5) (Default: 5).
         degenerated_to_sgd: (bool)
             degenerated to SGD. (Default: false)
+        cautious (bool):
+            Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
     """
 
     def __init__(
@@ -81,6 +83,7 @@ class Compass(BaseOptimizer):
         rectify_variance: bool = False,
         n_sma_threshold: int = 5,
         degenerated_to_sgd: bool = False,
+        cautious: bool = False,
         **kwargs,
     ):
         defaults: DEFAULTS = {
@@ -101,6 +104,7 @@ class Compass(BaseOptimizer):
             'rectify_variance': rectify_variance,
             'n_sma_threshold': n_sma_threshold,
             'degenerated_to_sgd': degenerated_to_sgd,
+            'cautious':cautious
         }
 
         self.clip = clip
@@ -223,16 +227,23 @@ class Compass(BaseOptimizer):
                 # ema = ema + (1 - beta1) * grad
                 ema.mul_(beta1).add_(grad, alpha=1 - beta1)
                 # grad = grad + ema * amp_fac
-                grad.add_(ema, alpha=amp_fac)
-                # ema_squared = ema + (1 - beta2) * grad ** 2
-                ema_squared.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                update = grad.add(ema, alpha=amp_fac)
+                # ema_squared = ema + (1 - beta2) * update ** 2
+                ema_squared.mul_(beta2).addcmul_(update, update, value=1 - beta2)
 
                 if not self.rectify_variance or step_size > 0 or n_sma >= self.n_sma_threshold:
                     if weight_decouple:
                         # Perform stepweight decay
                         p_fp32.mul_(1.0 - (1.0 if fixed_decay else step_size if not lr_decouple else step_size / max_lr) * weight_decay)
-                    elif weight_decay > 0.0 and grad is not None:
-                        grad.add_(p_fp32, alpha=weight_decay)
+                    elif weight_decay > 0.0 and update is not None:
+                        update.add_(p_fp32, alpha=weight_decay)
+
+                if group["cautious"]:
+                    # compute norm gradient
+                    mask = (update * grad > 0).to(grad.dtype)
+                    mask.mul_(mask.numel() / (mask.sum() + 1))
+                else:
+                    mask = 1.0
 
                 if not self.rectify_variance or n_sma >= self.n_sma_threshold:
                     # lr scaler + eps to prevent zero division
@@ -243,9 +254,9 @@ class Compass(BaseOptimizer):
                         de_nom = (ema_squared.sqrt() / bias_correction2_sqrt).add_(eps)
 
                     # p = p - lr * grad / de_nom
-                    p_fp32.addcdiv_(grad, de_nom, value=-step_size)
+                    p_fp32.addcdiv_(update * mask, de_nom, value=-step_size)
                 elif step_size > 0:
-                    p_fp32.add_(grad, alpha=-step_size)
+                    p_fp32.add_(update * mask, alpha=-step_size)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:

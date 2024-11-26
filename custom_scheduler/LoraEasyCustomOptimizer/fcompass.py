@@ -57,6 +57,11 @@ class FCompass(Optimizer):
         centralization=1.0,
         **kwargs,
     ):
+        
+        # Override zero to 1e-38, as zero and float32.tiny NaNs
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = 1e-38
+
         defaults = dict(
             lr=lr,
             betas=betas,
@@ -88,6 +93,16 @@ class FCompass(Optimizer):
             else:
                 group['step'] = 1
 
+            beta1, beta2 = group["betas"]
+            amplification_factor = group["amp_fac"]
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
+            clip = group["clip"]
+            centralization = group["centralization"]
+            eps = group["eps"]
+            eps2 = group["eps2"]
+            eps_floor = group["eps_floor"]
+
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -114,12 +129,7 @@ class FCompass(Optimizer):
                     grad = grad.data
                     momentum, fim, max_ema_squared = state["momentum"], state["fim"], state['max_ema_squared']
 
-                beta1, beta2 = group["betas"]
-                amplification_factor = group["amp_fac"]
-                lr = group["lr"]
-                weight_decay = group["weight_decay"]
-                clip = group["clip"]
-                centralization = group["centralization"]
+
 
                 # center the gradient vector
                 if centralization != 0 and grad.dim() > 1:
@@ -135,8 +145,11 @@ class FCompass(Optimizer):
                 # Update fim
                 fim.mul_(curr_beta2).addcmul_(grad, grad, value=1 - curr_beta2)
 
-                rms_grad = grad.pow(2).mean().sqrt_()
-                curr_eps = max(min(rms_grad.item() * self.eps2, self.eps), self.eps_floor) # Set a floor for eps to avoid NaN
+                if eps_floor is not None and eps_floor < eps:
+                    rms_grad = grad.pow(2).mean().sqrt_()
+                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
+                else:
+                    curr_eps = eps
 
                 fim_base = fim**0.5 + curr_eps
 
@@ -252,31 +265,10 @@ class FCompassPlus(BaseOptimizer):
         pnm_beta: float = 0.1,
         **kwargs,
     ):
-        defaults = dict(
-            lr=lr,
-            betas=betas,
-            amp_fac=amp_fac,
-            eps=eps,
-            eps2=eps2,
-            eps_floor=eps_floor,
-            weight_decay=weight_decay,
-            clip=clip,
-            use_lookahead = use_lookahead,
-            lookahead_merge_time = lookahead_merge_time,
-            lookahead_blending_alpha = lookahead_blending_alpha,
-            use_softplus = use_softplus,
-            beta_softplus = beta_softplus,
-            amsgrad = amsgrad,
-            diff_amp = diff_amp,
-            diff_amp_beta = diff_amp_beta,
-            centralize_gradients = centralize_gradients,
-            normalize_gradients = normalize_gradients,
-            threshold_softplus = threshold_softplus,
-            use_pnm = use_pnm,
-            pnm_beta = pnm_beta,
-            norm_loss_factor = norm_loss_factor,
-            norm_loss_eps = norm_loss_eps,
-        )
+        
+        # Override zero to 1e-38, as zero and float32.tiny NaNs
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = 1e-38
 
         defaults: DEFAULTS = {
             'lr':lr,
@@ -411,6 +403,9 @@ class FCompassPlus(BaseOptimizer):
         for group in self.param_groups:
 
             beta1, beta2 = group["betas"]
+            eps = group["eps"]
+            eps2 = group["eps2"]
+            eps_floor = group["eps_floor"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -471,8 +466,11 @@ class FCompassPlus(BaseOptimizer):
                 # Update fim
                 fim.mul_(curr_beta2).addcmul_(grad, grad, value=1 - curr_beta2)
 
-                rms_grad = grad.pow(2).mean().sqrt_()
-                curr_eps = max(min(rms_grad.item() * self.eps2, self.eps), self.eps_floor) # Set a floor for eps to avoid NaN
+                if eps_floor is not None and eps_floor < eps:
+                    rms_grad = grad.pow(2).mean().sqrt_()
+                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
+                else:
+                    curr_eps = eps
 
                 fim_base = fim**0.5 + curr_eps
 

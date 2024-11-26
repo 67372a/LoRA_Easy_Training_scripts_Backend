@@ -18,6 +18,7 @@ class ADOPT(BaseOptimizer):
     :param fixed_decay: bool. fix weight decay.
     :param eps: float. term added to the denominator to improve numerical stability.
     :param clip: float. special form of clip for ADOPT, recommended and default value is 0.25.
+    :param cautious: bool: Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
     """
 
     def __init__(
@@ -30,6 +31,7 @@ class ADOPT(BaseOptimizer):
         fixed_decay: bool = False,
         eps: float = 1e-6,
         clip: float = 0.25,
+        cautious: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -45,6 +47,7 @@ class ADOPT(BaseOptimizer):
             'fixed_decay': fixed_decay,
             'eps': eps,
             'clip': clip,
+            'cautious': cautious,
         }
 
         super().__init__(params, defaults)
@@ -128,7 +131,14 @@ class ADOPT(BaseOptimizer):
 
                 exp_avg.lerp_(normed_grad, 1 - beta1)
 
-                p_fp32.add_(exp_avg, alpha=-group['lr'])
+                if group["cautious"]:
+                    # compute norm gradient
+                    mask = (exp_avg * normed_grad > 0).to(normed_grad.dtype)
+                    mask.mul_(mask.numel() / (mask.sum() + 1))
+                else:
+                    mask = 1.0
+
+                p_fp32.add_(exp_avg * mask, alpha=-group['lr'])
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
                 # pack

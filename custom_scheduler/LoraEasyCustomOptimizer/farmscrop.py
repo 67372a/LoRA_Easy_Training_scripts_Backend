@@ -6,6 +6,9 @@ from .utils import copy_stochastic_
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from typing import Literal
+
+MASK_GRADS = Literal['grad', 'approx_grad_nat' 'grad_nat']
 
 class FARMSCrop(Optimizer):
     r"""
@@ -53,6 +56,11 @@ class FARMSCrop(Optimizer):
         momentum_amp=5.0,
         **kwargs,
     ):
+        
+        # Override zero to 1e-38, as zero and float32.tiny NaNs
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = 1e-38
+
         defaults = dict(
             lr=lr,
             betas=betas,
@@ -85,6 +93,17 @@ class FARMSCrop(Optimizer):
             else:
                 group['step'] = 1
 
+            beta1, beta2 = group["betas"]
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
+            centralization = group["centralization"]
+            diff_mult = group["diff_mult"]
+            momentum_beta = group["momentum_beta"]
+            momentum_amp = group["momentum_amp"]
+            eps = group["eps"]
+            eps2 = group["eps2"]
+            eps_floor = group["eps_floor"]
+
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -116,13 +135,6 @@ class FARMSCrop(Optimizer):
                     prev_grad = state["previous_grad"]
                     grad_diff_fim = state["grad_diff_fim"]
 
-                beta1, beta2 = group["betas"]
-                lr = group["lr"]
-                weight_decay = group["weight_decay"]
-                centralization = group["centralization"]
-                diff_mult = group["diff_mult"]
-                momentum_beta = group["momentum_beta"]
-                momentum_amp = group["momentum_amp"]
 
                 # bias correction step size
                 #bias_correction_sqrt = (1 - beta2 ** group["step"]) ** (1 / 2)
@@ -135,8 +147,11 @@ class FARMSCrop(Optimizer):
 
                 grad_diff_fim.mul_(beta1).addcmul_(grad_diff, grad_diff, value=1 - beta1)
 
-                rms_grad = grad.pow(2).mean().sqrt_()
-                curr_eps = max(min(rms_grad.item() * self.eps2, self.eps), self.eps_floor) # Set a floor for eps to avoid NaN
+                if eps_floor is not None and eps_floor < eps:
+                    rms_grad = grad.pow(2).mean().sqrt_()
+                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
+                else:
+                    curr_eps = eps
 
                 # Get natural gradient (squared ema, obtained sqrt of ema)
                 diff_fim_base = grad_diff_fim.sqrt().add_(curr_eps)
@@ -229,6 +244,16 @@ class FARMSCropV2(BaseOptimizer):
             Amplification exponent for slow momentum / EMA (default: 0.25) (Alternative recommendation: 0.5).
         clip (float):
             Value to clip the grad's RMS at (default: 1.0)
+        cautious (bool):
+            Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+        cautious_grad (str):
+            Which form of grad to use for the cautious mask, valid options are 'grad', 'approx_grad_nat' 'grad_nat' (Default: grad)
+        cautious_momentum (bool):
+            Only effective if cautious is True, controls if cautious mask is also applied to the momentum update. 
+            Experimental, doesn't align with original impl, may not behave as expected or produce better results. (default: False)
+        og_approx_grad_nat (bool):
+            Enables old, technicially unintended and likely incorrect way of handling approx_grad_nat that would cause it to replace
+            the original grad in place, thus resulting in it being used as grad for grad_nat. (Default: False)
     """
 
     def __init__(
@@ -245,6 +270,10 @@ class FARMSCropV2(BaseOptimizer):
         momentum_beta: float = 0.9999,
         momentum_lambda: float = 0.25,
         clip: float = 1.0,
+        cautious: bool = False,
+        cautious_grad: MASK_GRADS = 'grad',
+        cautious_momentum: bool = False,
+        og_approx_grad_nat: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -269,6 +298,10 @@ class FARMSCropV2(BaseOptimizer):
             'momentum_beta':momentum_beta,
             'momentum_lambda':momentum_lambda,
             'clip':clip,
+            'cautious':cautious,
+            'cautious_momentum': cautious_momentum,
+            'og_approx_grad_nat': og_approx_grad_nat,
+            'cautious_grad':cautious_grad,
         }
 
         super().__init__(params, defaults)
@@ -315,6 +348,8 @@ class FARMSCropV2(BaseOptimizer):
             eps = group["eps"]
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
+            og_approx_grad_nat = group["og_approx_grad_nat"]
+            cautious_grad = group["cautious_grad"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -351,8 +386,6 @@ class FARMSCropV2(BaseOptimizer):
 
                 fim_slow_beta = ((beta2**step - beta2) / (beta2**step - 1.0)) ** (1/2)
 
-                approx_grad_nat = grad
-
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
                     curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
@@ -387,7 +420,13 @@ class FARMSCropV2(BaseOptimizer):
                 else:
                     diff_fim_base = 1.0
 
-                approx_grad_nat.div_(diff_fim_base)
+                og_grad = grad.clone().detach()
+
+                if og_approx_grad_nat:
+                    approx_grad_nat = grad
+                    approx_grad_nat.div_(diff_fim_base)
+                else:
+                    approx_grad_nat = grad.div(diff_fim_base)
                 rms = approx_grad_nat.pow(2).mean().sqrt_()
                 divisor = max(clip, rms) / clip
                 approx_grad_nat.div_(divisor)
@@ -421,11 +460,26 @@ class FARMSCropV2(BaseOptimizer):
                     p_fp32.data.add_(grad_weights, alpha=-lr*weight_decay)
 
                 # Apply full step
-                p_fp32.data.add_(full_step, alpha=-lr)
+                if group["cautious"]:
+                    if cautious_grad == 'grad':
+                        grad_for_mask = og_grad
+                    elif cautious_grad == 'approx_grad_nat':
+                        grad_for_mask = approx_grad_nat
+                    elif cautious_grad == 'grad_nat':
+                        grad_for_mask = grad_nat
+
+                    # compute norm gradient
+                    mask = (full_step * grad_for_mask > 0).to(grad.dtype)
+                    mask.mul_(mask.numel() / (mask.sum() + 1))
+                else:
+                    mask = 1.0
+
+                # Apply full step
+                p_fp32.data.add_(full_step * mask, alpha=-lr)
 
                 fim.mul_(fim_slow_beta).addcmul_(approx_grad_nat, approx_grad_nat, value=1 - fim_slow_beta).clamp_(-clip_lambda, clip_lambda)
 
-                momentum.mul_(momentum_beta).add_(grad_nat, alpha=1 - momentum_beta)
+                momentum.mul_(momentum_beta).add_(grad_nat * (mask if group["cautious_momentum"] else 1.0), alpha=1 - momentum_beta)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:

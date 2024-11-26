@@ -52,6 +52,11 @@ class FishMonger(Optimizer):
         diff_amp_beta=0.999,
         **kwargs,
     ):
+        
+        # Override zero to 1e-38, as zero and float32.tiny NaNs
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = 1e-38
+
         defaults = dict(
             lr=lr,
             betas=betas,
@@ -83,6 +88,15 @@ class FishMonger(Optimizer):
                 group['step'] += 1
             else:
                 group['step'] = 1
+
+            beta1, beta2, beta3 = group["betas"]
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
+            clip = 1.0 if (group["clip"] <= 0) else group["clip"]
+            centralization = group["centralization"]
+            eps = group["eps"]
+            eps2 = group["eps2"]
+            eps_floor = group["eps_floor"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -118,12 +132,6 @@ class FishMonger(Optimizer):
                     momentum, momentum_slow, momentum_slow_squared, fim = state["momentum"], state["momentum_slow"], state["momentum_slow_squared"], state["fim"]
                     ema_diff = state["ema_diff"] if diff_amp else 0
 
-                beta1, beta2, beta3 = group["betas"]
-                lr = group["lr"]
-                weight_decay = group["weight_decay"]
-                clip = 1.0 if (group["clip"] <= 0) else group["clip"]
-                centralization = group["centralization"]
-                
                 if diff_amp:
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         grad_diff = state["previous_grad"].to(torch.float32)
@@ -151,8 +159,11 @@ class FishMonger(Optimizer):
                 # Update fim
                 fim.mul_(fim_beta).addcmul_(momentum, momentum, value=1 - fim_beta)
 
-                rms_grad = grad.pow(2).mean().sqrt_()
-                curr_eps = max(min(rms_grad.item() * self.eps2, self.eps), self.eps_floor) # Set a floor for eps to avoid NaN
+                if eps_floor is not None and eps_floor < eps:
+                    rms_grad = grad.pow(2).mean().sqrt_()
+                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
+                else:
+                    curr_eps = eps
 
                 fim_base = fim.sqrt() + curr_eps
 

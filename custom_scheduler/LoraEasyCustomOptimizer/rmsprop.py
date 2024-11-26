@@ -7,7 +7,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParamete
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 
-DATA_FORMAT = Literal['gradient', 'update', 'both']
+CLIP_LOC = Literal['gradient', 'update', 'both']
 
 class RMSProp(BaseOptimizer):
     r"""
@@ -59,7 +59,7 @@ class RMSProp(BaseOptimizer):
         rectify_variance: bool = False,
         n_sma_threshold: int = 5,
         degenerated_to_sgd: bool = False,
-        clip_loc: DATA_FORMAT = 'gradient',
+        clip_loc: CLIP_LOC = 'gradient',
         **kwargs,
     ):
         self.validate_learning_rate(lr)

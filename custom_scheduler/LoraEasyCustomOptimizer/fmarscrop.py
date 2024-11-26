@@ -2,10 +2,14 @@
 import torch
 from torch.optim import Optimizer
 from .utils import copy_stochastic_
+from typing import Literal
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+
+MASK_GRADS = Literal['grad', 'corrected_grad', 'approx_grad_nat' 'grad_nat']
+
 
 class FMARSCrop(BaseOptimizer):
     r"""
@@ -41,6 +45,16 @@ class FMARSCrop(BaseOptimizer):
             Amplification exponent for slow momentum / EMA (default: 0.25) (Alternative recommendation: 0.5).
         clip (float):
             Value to clip the grad's RMS at (default: 1.0)
+        cautious (bool):
+            Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+        cautious_grad (str):
+            Which form of grad to use for the cautious mask, valid options are 'grad', 'corrected_grad', 'approx_grad_nat' 'grad_nat' (Default: grad)
+        cautious_momentum (bool):
+            Only effective if cautious is True, controls if cautious mask is also applied to the momentum update. 
+            Experimental, doesn't align with original impl, may not behave as expected or produce better results. (default: False)
+        og_approx_grad_nat (bool):
+            Enables old, technicially unintended and likely incorrect way of handling approx_grad_nat that would cause it to replace
+            the original corrected grad in place, thus resulting in it being used as grad for grad_nat. (Default: False)
     """
 
     def __init__(
@@ -58,6 +72,10 @@ class FMARSCrop(BaseOptimizer):
         momentum_beta: float = 0.9999,
         momentum_lambda: float = 0.25,
         clip: float = 1.0,
+        cautious: bool = False,
+        cautious_grad: MASK_GRADS = 'grad',
+        cautious_momentum: bool = False,
+        og_approx_grad_nat: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -82,6 +100,10 @@ class FMARSCrop(BaseOptimizer):
             'momentum_beta':momentum_beta,
             'momentum_lambda':momentum_lambda,
             'clip':clip,
+            'cautious':cautious,
+            'cautious_grad':cautious_grad,
+            'cautious_momentum':cautious_momentum,
+            'og_approx_grad_nat':og_approx_grad_nat,
         }
 
         super().__init__(params, defaults)
@@ -130,6 +152,8 @@ class FMARSCrop(BaseOptimizer):
             eps = group["eps"]
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
+            og_approx_grad_nat = group["og_approx_grad_nat"]
+            cautious_grad = group["cautious_grad"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -175,8 +199,6 @@ class FMARSCrop(BaseOptimizer):
 
                 fim_slow_beta = ((beta2**step - beta2) / (beta2**step - 1.0)) ** (1/2)
 
-                approx_grad_nat = c_t
-
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
                     curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
@@ -210,7 +232,13 @@ class FMARSCrop(BaseOptimizer):
                 else:
                     diff_fim_base = 1.0
 
-                approx_grad_nat.div_(diff_fim_base)
+                og_c_t = c_t.clone().detach()
+
+                if og_approx_grad_nat:
+                    approx_grad_nat = c_t
+                    approx_grad_nat.div_(diff_fim_base)
+                else:
+                    approx_grad_nat = c_t.div(diff_fim_base)
                 rms = approx_grad_nat.pow(2).mean().sqrt_()
                 divisor = max(clip, rms) / clip
                 approx_grad_nat.div_(divisor)
@@ -249,11 +277,27 @@ class FMARSCrop(BaseOptimizer):
                     p_fp32.data.add_(grad_weights, alpha=-lr*weight_decay)
 
                 # Apply full step
-                p_fp32.data.add_(full_step, alpha=-lr)
+                if group["cautious"]:
+                    if cautious_grad == 'grad':
+                        grad_for_mask = grad
+                    elif cautious_grad == 'corrected_grad':
+                        grad_for_mask = og_c_t
+                    elif cautious_grad == 'approx_grad_nat':
+                        grad_for_mask = approx_grad_nat
+                    elif cautious_grad == 'grad_nat':
+                        grad_for_mask = grad_nat
+                    # compute norm gradient
+                    mask = (full_step * grad_for_mask > 0).to(grad.dtype)
+                    mask.mul_(mask.numel() / (mask.sum() + 1))
+                else:
+                    mask = 1.0
+
+                # Apply full step
+                p_fp32.data.add_(full_step * mask, alpha=-lr)
 
                 fim.mul_(fim_slow_beta).addcmul_(approx_grad_nat, approx_grad_nat, value=1 - fim_slow_beta).clamp_(-clip_lambda, clip_lambda)
 
-                momentum.mul_(momentum_beta).add_(grad_nat, alpha=1 - momentum_beta)
+                momentum.mul_(momentum_beta).add_(grad_nat * (mask if group["cautious_momentum"] else 1.0), alpha=1 - momentum_beta)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
