@@ -190,6 +190,8 @@ class AdEMAMix(BaseOptimizer):
 
                 de_nom = (exp_avg_sq.sqrt() / bias_correction2_sq).add_(eps)
 
+                update = (exp_avg.div(bias_correction1) + alpha_t * exp_avg_slow)
+
                 if group["cautious"]:
                     # compute norm gradient
                     mask = (update * grad > 0).to(grad.dtype)
@@ -197,7 +199,7 @@ class AdEMAMix(BaseOptimizer):
                 else:
                     mask = 1.0
 
-                update = ((exp_avg.div(bias_correction1) + alpha_t * exp_avg_slow) * mask) / de_nom
+                update = (update * mask) / de_nom
 
                 self.apply_weight_decay(
                     p=p_fp32,
