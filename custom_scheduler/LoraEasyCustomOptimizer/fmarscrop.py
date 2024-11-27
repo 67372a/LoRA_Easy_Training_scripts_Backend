@@ -76,6 +76,7 @@ class FMARSCrop(BaseOptimizer):
         cautious_grad: MASK_GRADS = 'grad',
         cautious_momentum: bool = False,
         og_approx_grad_nat: bool = False,
+        gamma: float = None,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -104,6 +105,7 @@ class FMARSCrop(BaseOptimizer):
             'cautious_grad':cautious_grad,
             'cautious_momentum':cautious_momentum,
             'og_approx_grad_nat':og_approx_grad_nat,
+            'gamma': gamma,
         }
 
         super().__init__(params, defaults)
@@ -154,6 +156,7 @@ class FMARSCrop(BaseOptimizer):
             eps_floor = group["eps_floor"]
             og_approx_grad_nat = group["og_approx_grad_nat"]
             cautious_grad = group["cautious_grad"]
+            gamma = group["gamma"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -187,7 +190,8 @@ class FMARSCrop(BaseOptimizer):
                 prev_grad = prev_grad.add(grad)
 
                 # Calculate cₜ (gradient with correction term)
-                correction = (1 - beta1) / 2 * beta1 / (1 - beta1) * prev_grad
+                #correction = (1 - beta1) / 2 * beta1 / (1 - beta1) * prev_grad
+                correction = (((1 - beta1) / 2) if gamma is None else gamma) * beta1 / (1 - beta1) * prev_grad
                 c_t = grad + correction
 
                 # Gradient clipping (if necessary)
