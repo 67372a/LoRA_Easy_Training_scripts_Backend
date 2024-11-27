@@ -24,6 +24,7 @@ class Adan(BaseOptimizer):
     :param r: float. EMA factor. between 0.9 ~ 0.99 is preferred.
     :param adanorm: bool. whether to use the AdaNorm variant.
     :param eps: float. term added to the denominator to improve numerical stability.
+    :param cautious: bool: Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085
     """
 
     def __init__(
@@ -38,6 +39,7 @@ class Adan(BaseOptimizer):
         r: float = 0.95,
         adanorm: bool = False,
         eps: float = 1e-8,
+        cautious: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -57,6 +59,7 @@ class Adan(BaseOptimizer):
             'max_grad_norm': max_grad_norm,
             'adanorm': adanorm,
             'eps': eps,
+            'cautious': cautious,
         }
         if adanorm:
             defaults.update({'r': r})
@@ -170,8 +173,23 @@ class Adan(BaseOptimizer):
                 if group['weight_decouple']:
                     p_fp32.mul_(1.0 - group['lr'] * group['weight_decay'])
 
-                p_fp32.addcdiv_(exp_avg, de_nom, value=-group['lr'] / bias_correction1)
-                p_fp32.addcdiv_(exp_avg_diff, de_nom, value=-group['lr'] * beta2 / bias_correction2)
+                if group["cautious"]:
+                    # compute norm gradient
+                    exp_avg_mask = (exp_avg * grad > 0).to(grad.dtype)
+                    exp_avg_mask.mul_(exp_avg_mask.numel() / (exp_avg_mask.sum() + 1))
+                else:
+                    exp_avg_mask = 1.0
+
+                p_fp32.addcdiv_(exp_avg * exp_avg_mask, de_nom, value=-group['lr'] / bias_correction1)
+
+                if group["cautious"]:
+                    # compute norm gradient
+                    exp_avg_diff_mask = (exp_avg * grad > 0).to(grad.dtype)
+                    exp_avg_diff_mask.mul_(exp_avg_diff_mask.numel() / (exp_avg_diff_mask.sum() + 1))
+                else:
+                    exp_avg_diff_mask = 1.0
+
+                p_fp32.addcdiv_(exp_avg_diff * exp_avg_diff_mask, de_nom, value=-group['lr'] * beta2 / bias_correction2)
 
                 if not group['weight_decouple']:
                     p_fp32.div_(1.0 + group['lr'] * group['weight_decay'])

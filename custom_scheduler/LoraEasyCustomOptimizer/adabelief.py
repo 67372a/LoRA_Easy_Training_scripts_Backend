@@ -26,6 +26,7 @@ class AdaBelief(BaseOptimizer):
     :param adanorm: bool. whether to use the AdaNorm variant.
     :param adam_debias: bool. Only correct the denominator to avoid inflating step sizes early in training.
     :param eps: float. term added to the denominator to improve numerical stability.
+    :param cautious: bool: Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085
     """
 
     def __init__(
@@ -44,6 +45,7 @@ class AdaBelief(BaseOptimizer):
         adanorm: bool = False,
         adam_debias: bool = False,
         eps: float = 1e-16,
+        cautious: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -65,6 +67,7 @@ class AdaBelief(BaseOptimizer):
             'adanorm': adanorm,
             'adam_debias': adam_debias,
             'eps': eps,
+            'cautious': cautious,
         }
         if adanorm:
             defaults.update({'r': r})
@@ -187,15 +190,22 @@ class AdaBelief(BaseOptimizer):
                     eps=group['eps'],
                 )
 
+                if group["cautious"]:
+                    # compute norm gradient
+                    mask = (exp_avg * grad > 0).to(grad.dtype)
+                    mask.mul_(mask.numel() / (mask.sum() + 1))
+                else:
+                    mask = 1.0
+
                 if not group['rectify']:
                     de_nom.div_(bias_correction2_sq)
-                    p_fp32.addcdiv_(exp_avg, de_nom, value=-step_size)
+                    p_fp32.addcdiv_(exp_avg * mask, de_nom, value=-step_size)
                     continue
 
                 if n_sma >= self.n_sma_threshold:
-                    p_fp32.addcdiv_(exp_avg, de_nom, value=-step_size)
+                    p_fp32.addcdiv_(exp_avg * mask, de_nom, value=-step_size)
                 elif step_size > 0:
-                    p_fp32.add_(exp_avg, alpha=-step_size)
+                    p_fp32.add_(exp_avg * mask, alpha=-step_size)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:

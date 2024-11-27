@@ -26,6 +26,7 @@ class AdEMAMix(BaseOptimizer):
     :param t_alpha_beta3: Optional[float]. total number of iterations is preferred when needed.
     :param eps: float. term added to the denominator to improve numerical stability.
     :param centralization: float. center model grad 
+    :param cautious: bool: Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085
     """
 
     def __init__(
@@ -36,11 +37,12 @@ class AdEMAMix(BaseOptimizer):
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         fixed_decay: bool = False,
-        clip=0.0,
+        clip: float = 0.0,
         alpha: float = 5.0,
         t_alpha_beta3: Optional[float] = None,
         eps: float = 1e-8,
-        centralization=0.0,
+        centralization: float = 0.0,
+        cautious: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -63,6 +65,7 @@ class AdEMAMix(BaseOptimizer):
             't_alpha_beta3': t_alpha_beta3,
             'eps': eps,
             'centralization': centralization,
+            'cautious': cautious,
         }
 
         super().__init__(params, defaults)
@@ -187,7 +190,14 @@ class AdEMAMix(BaseOptimizer):
 
                 de_nom = (exp_avg_sq.sqrt() / bias_correction2_sq).add_(eps)
 
-                update = (exp_avg.div(bias_correction1) + alpha_t * exp_avg_slow) / de_nom
+                if group["cautious"]:
+                    # compute norm gradient
+                    mask = (update * grad > 0).to(grad.dtype)
+                    mask.mul_(mask.numel() / (mask.sum() + 1))
+                else:
+                    mask = 1.0
+
+                update = ((exp_avg.div(bias_correction1) + alpha_t * exp_avg_slow) * mask) / de_nom
 
                 self.apply_weight_decay(
                     p=p_fp32,
