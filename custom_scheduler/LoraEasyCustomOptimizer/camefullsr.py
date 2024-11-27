@@ -28,6 +28,7 @@ class CAMEFullSR(BaseOptimizer):
     :param eps1: float. term added to the denominator to improve numerical stability.
     :param eps2: float. term added to the denominator to improve numerical stability.
     :param centralization: float. Center grad.
+    :param cautious: bool: Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085
     """
 
     def __init__(
@@ -43,6 +44,7 @@ class CAMEFullSR(BaseOptimizer):
         eps1: float = 1e-30,
         eps2: float = 1e-16,
         centralization: float = 0.0,
+        cautious: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -65,6 +67,7 @@ class CAMEFullSR(BaseOptimizer):
             'eps1': eps1,
             'eps2': eps2,
             'centralization': centralization,
+            'cautious':cautious,
         }
         super().__init__(params, defaults)
 
@@ -262,7 +265,14 @@ class CAMEFullSR(BaseOptimizer):
 
                 update.mul_(group['lr'])
 
-                p_data_fp32.add_(-update)
+                if group["cautious"]:
+                    # compute norm gradient
+                    mask = (update * grad > 0).to(grad.dtype)
+                    mask.mul_(mask.numel() / (mask.sum() + 1))
+                else:
+                    mask = 1.0
+
+                p_data_fp32.add_(-(update * mask))
 
                 # Pack
                 if p.dtype in {torch.float16, torch.bfloat16}:

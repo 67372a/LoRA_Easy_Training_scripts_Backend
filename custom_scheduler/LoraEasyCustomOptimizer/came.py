@@ -25,6 +25,7 @@ class CAME(BaseOptimizer):
     :param ams_bound: bool. whether to use the AMSBound variant.
     :param eps1: float. term added to the denominator to improve numerical stability.
     :param eps2: float. term added to the denominator to improve numerical stability.
+    :param cautious: bool: Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085
     """
 
     def __init__(
@@ -39,6 +40,7 @@ class CAME(BaseOptimizer):
         ams_bound: bool = False,
         eps1: float = 1e-30,
         eps2: float = 1e-16,
+        cautious: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -60,6 +62,7 @@ class CAME(BaseOptimizer):
             'ams_bound': ams_bound,
             'eps1': eps1,
             'eps2': eps2,
+            'cautious':cautious,
         }
         super().__init__(params, defaults)
 
@@ -222,7 +225,14 @@ class CAME(BaseOptimizer):
 
                 update.mul_(group['lr'])
 
-                p_data_fp32.add_(-update)
+                if group["cautious"]:
+                    # compute norm gradient
+                    mask = (update * grad > 0).to(grad.dtype)
+                    mask.mul_(mask.numel() / (mask.sum() + 1))
+                else:
+                    mask = 1.0
+
+                p_data_fp32.add_(-(update * mask))
 
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     copy_stochastic_(p, p_data_fp32)
