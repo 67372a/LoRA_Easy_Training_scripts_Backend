@@ -73,7 +73,7 @@ class FMARSCrop(BaseOptimizer):
         momentum_lambda: float = 0.25,
         clip: float = 1.0,
         cautious: bool = False,
-        cautious_grad: MASK_GRADS = 'grad',
+        cautious_grad: MASK_GRADS = 'corrected_grad',
         cautious_momentum: bool = False,
         og_approx_grad_nat: bool = False,
         gamma: float = None,
