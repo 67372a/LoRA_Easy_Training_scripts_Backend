@@ -8,7 +8,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 
-MASK_GRADS = Literal['grad', 'corrected_grad', 'approx_grad_nat' 'grad_nat']
+MASK_GRADS = Literal['grad', 'corrected_grad_pre_clip','corrected_grad', 'approx_grad_nat' 'grad_nat']
 
 
 class FMARSCrop(BaseOptimizer):
@@ -193,6 +193,7 @@ class FMARSCrop(BaseOptimizer):
                 #correction = (1 - beta1) / 2 * beta1 / (1 - beta1) * prev_grad
                 correction = (((1 - beta1) / 2) if gamma is None else gamma) * beta1 / (1 - beta1) * prev_grad
                 c_t = grad + correction
+                pre_clip_c_t = c_t.clone().detach()
 
                 # Gradient clipping (if necessary)
                 grad_norm = torch.norm(c_t)
@@ -236,7 +237,7 @@ class FMARSCrop(BaseOptimizer):
                 else:
                     diff_fim_base = 1.0
 
-                og_c_t = c_t.clone().detach()
+                clipped_c_t = c_t.clone().detach()
 
                 if og_approx_grad_nat:
                     approx_grad_nat = c_t
@@ -284,8 +285,10 @@ class FMARSCrop(BaseOptimizer):
                 if group["cautious"]:
                     if cautious_grad == 'grad':
                         grad_for_mask = grad
+                    elif cautious_grad == 'corrected_grad_pre_clip':
+                        grad_for_mask = pre_clip_c_t
                     elif cautious_grad == 'corrected_grad':
-                        grad_for_mask = og_c_t
+                        grad_for_mask = clipped_c_t
                     elif cautious_grad == 'approx_grad_nat':
                         grad_for_mask = approx_grad_nat
                     elif cautious_grad == 'grad_nat':
