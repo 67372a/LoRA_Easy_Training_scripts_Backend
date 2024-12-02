@@ -54,7 +54,7 @@ class FMARSCrop(BaseOptimizer):
             Enables old, technicially unintended and likely incorrect way of handling approx_grad_nat that would cause it to replace
             the original corrected grad in place, thus resulting in it being used as grad for grad_nat. (Default: False)
         adaptive_clip (float):
-            Adaptive clip value to apply to the gradient first, before any further process or use by the optimizer. (default: 0.0).
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 0.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
