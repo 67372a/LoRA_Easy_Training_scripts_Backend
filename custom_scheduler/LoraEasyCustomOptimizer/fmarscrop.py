@@ -1,10 +1,8 @@
 # FMARSCrop from https://github.com/Clybius/Personalized-Optimizers by Clybius
 import torch
-from torch.optim import Optimizer
-from .utils import copy_stochastic_
+from .utils import copy_stochastic_, agc, NORM_TYPE
 from typing import Literal
 
-from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 
@@ -55,6 +53,16 @@ class FMARSCrop(BaseOptimizer):
         og_approx_grad_nat (bool):
             Enables old, technicially unintended and likely incorrect way of handling approx_grad_nat that would cause it to replace
             the original corrected grad in place, thus resulting in it being used as grad for grad_nat. (Default: False)
+        adaptive_clip (float):
+            Adaptive clip value to apply to the gradient first, before any further process or use by the optimizer. (default: 0.0).
+        adaptive_clip_eps (float):
+            The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
+            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+        adaptive_clip_type (string):
+            The type of clipping, can be unit or global. If done at the unit level can change
+            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
+            Valid values: global, unit (default: global).
     """
 
     def __init__(
@@ -77,6 +85,9 @@ class FMARSCrop(BaseOptimizer):
         cautious_momentum: bool = False,
         og_approx_grad_nat: bool = False,
         gamma: float = None,
+        adaptive_clip: float = 0.0,
+        adaptive_clip_eps: float = 1e-3,
+        adaptive_clip_type: NORM_TYPE = 'global',
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -106,6 +117,9 @@ class FMARSCrop(BaseOptimizer):
             'cautious_momentum':cautious_momentum,
             'og_approx_grad_nat':og_approx_grad_nat,
             'gamma': gamma,
+            'adaptive_clip':adaptive_clip,
+            'adaptive_clip_eps':adaptive_clip_eps,
+            'adaptive_clip_type':adaptive_clip_type,
         }
 
         super().__init__(params, defaults)
@@ -157,6 +171,9 @@ class FMARSCrop(BaseOptimizer):
             og_approx_grad_nat = group["og_approx_grad_nat"]
             cautious_grad = group["cautious_grad"]
             gamma = group["gamma"]
+            adaptive_clip = group["adaptive_clip"]
+            adaptive_clip_type = group["adaptive_clip_type"]
+            adaptive_clip_eps = group["adaptive_clip_eps"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -186,6 +203,10 @@ class FMARSCrop(BaseOptimizer):
                     momentum = state["momentum"].to(torch.float32)
                     prev_grad = state["prev_grad"].to(torch.float32)
                     p_fp32 = p.clone().to(torch.float32)
+
+                if adaptive_clip > 0.0:
+                    # Apply Adaptive Gradient Clipping (AGC)
+                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
 
                 prev_grad = prev_grad.add(grad)
 

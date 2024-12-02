@@ -7,6 +7,8 @@ from pytorch_optimizer.optimizer.utils import unit_norm
 
 OPTIMIZER = Type[Optimizer]
 
+NORM_TYPE = Literal['unit','global']
+
 def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     # thanks to Nerogar for fast stochastic pytorch implementation
     # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
@@ -77,8 +79,8 @@ def dequantize(tensor, details, dtype=torch.float32):
 
     return tensor
     
-def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float, eps: float = 1e-6) -> torch.Tensor:
-    r"""Clip gradient values in excess of the unit wise norm.
+def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float, eps: float = 1e-6, norm_type: NORM_TYPE = 'unit') -> torch.Tensor:
+    r"""Clip gradient values in excess of the norm.
         Clip updates to be at most clipping * parameter_norm.
 
     References:
@@ -91,11 +93,31 @@ def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float
     :param agc_clip_val: float. norm clip.
     :param eps: float. simple stop from div by zero and no relation to standard optimizer eps.
     """
-    p_norm = unit_norm(p).clamp_(agc_eps)
-    g_norm = unit_norm(grad)
+    if norm_type == 'global':
+        # Compute the global norm of the parameters and gradients
+        p_norm = torch.norm(p).clamp_(min=agc_eps)
+        g_norm = torch.norm(grad)
 
-    max_norm = p_norm * agc_clip_val
+        # Compute the maximum allowed norm for the gradients
+        max_norm = p_norm * agc_clip_val
 
-    clipped_grad = grad * (max_norm / g_norm.clamp_min_(eps))
+        # Compute the clipping coefficient
+        clip_coef = max_norm / g_norm.clamp(min=eps)
 
-    return torch.where(g_norm > max_norm, clipped_grad, grad)
+        # If the gradient norm exceeds the maximum allowed norm, scale the gradients
+        if g_norm > max_norm:
+            # Scale the gradients holistically
+            grad = grad * clip_coef
+
+        return grad
+    elif norm_type == 'unit':
+        p_norm = unit_norm(p).clamp_(agc_eps)
+        g_norm = unit_norm(grad)
+
+        max_norm = p_norm * agc_clip_val
+
+        clipped_grad = grad * (max_norm / g_norm.clamp_min_(eps))
+
+        return torch.where(g_norm > max_norm, clipped_grad, grad)
+    else:
+        raise ValueError(f"'{norm_type}' is not a supported value for norm_type.")
