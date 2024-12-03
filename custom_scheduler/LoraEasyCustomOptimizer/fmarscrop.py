@@ -200,10 +200,8 @@ class FMARSCrop(BaseOptimizer):
                 prev_grad = prev_grad.add(grad)
 
                 # Calculate cₜ (gradient with correction term)
-                #correction = (1 - beta1) / 2 * beta1 / (1 - beta1) * prev_grad
                 correction = (((1 - beta1) / 2) if gamma is None else gamma) * beta1 / (1 - beta1) * prev_grad
                 c_t = grad + correction
-                pre_clip_c_t = c_t.clone().detach()
 
                 # Gradient clipping (if necessary)
                 grad_norm = torch.norm(c_t)
@@ -222,7 +220,6 @@ class FMARSCrop(BaseOptimizer):
 
                 if diff_mult > 0:
                     # Get previous grad, initialized at 0 (first step is just grad)
-                    #prev_grad = prev_grads[i]
                     # grad_diff will contain the difference between prev grad and current grad
                     grad_diff = prev_grad * diff_mult
 
