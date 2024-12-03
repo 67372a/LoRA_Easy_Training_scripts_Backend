@@ -46,7 +46,7 @@ class FMARSCrop(BaseOptimizer):
         cautious (bool):
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
         cautious_grad (str):
-            Which form of grad to use for the cautious mask, valid options are 'grad', 'corrected_grad_pre_clip', 'corrected_grad', 'approx_grad_nat' 'grad_nat' (Default: corrected_grad)
+            Which form of grad to use for the cautious mask, valid options are 'grad', 'corrected_grad', 'approx_grad_nat' 'grad_nat' (Default: corrected_grad)
         adaptive_clip (float):
             Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 0.0).
         adaptive_clip_eps (float):
