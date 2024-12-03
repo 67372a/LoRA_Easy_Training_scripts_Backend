@@ -6,7 +6,7 @@ from typing import Literal
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 
-MASK_GRADS = Literal['grad', 'corrected_grad_pre_clip','corrected_grad', 'approx_grad_nat' 'grad_nat']
+MASK_GRADS = Literal['grad', 'corrected_grad', 'approx_grad_nat' 'grad_nat']
 
 
 class FMARSCrop(BaseOptimizer):
@@ -47,12 +47,6 @@ class FMARSCrop(BaseOptimizer):
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
         cautious_grad (str):
             Which form of grad to use for the cautious mask, valid options are 'grad', 'corrected_grad_pre_clip', 'corrected_grad', 'approx_grad_nat' 'grad_nat' (Default: corrected_grad)
-        cautious_momentum (bool):
-            Only effective if cautious is True, controls if cautious mask is also applied to the momentum update. 
-            Experimental, doesn't align with original impl, may not behave as expected or produce better results. (default: False)
-        og_approx_grad_nat (bool):
-            Enables old, technicially unintended and likely incorrect way of handling approx_grad_nat that would cause it to replace
-            the original corrected grad in place, thus resulting in it being used as grad for grad_nat. (Default: False)
         adaptive_clip (float):
             Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 0.0).
         adaptive_clip_eps (float):
@@ -82,8 +76,6 @@ class FMARSCrop(BaseOptimizer):
         clip: float = 1.0,
         cautious: bool = False,
         cautious_grad: MASK_GRADS = 'corrected_grad',
-        cautious_momentum: bool = False,
-        og_approx_grad_nat: bool = False,
         gamma: float = None,
         adaptive_clip: float = 0.0,
         adaptive_clip_eps: float = 1e-3,
@@ -114,8 +106,6 @@ class FMARSCrop(BaseOptimizer):
             'clip':clip,
             'cautious':cautious,
             'cautious_grad':cautious_grad,
-            'cautious_momentum':cautious_momentum,
-            'og_approx_grad_nat':og_approx_grad_nat,
             'gamma': gamma,
             'adaptive_clip':adaptive_clip,
             'adaptive_clip_eps':adaptive_clip_eps,
@@ -168,7 +158,6 @@ class FMARSCrop(BaseOptimizer):
             eps = group["eps"]
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
-            og_approx_grad_nat = group["og_approx_grad_nat"]
             cautious_grad = group["cautious_grad"]
             gamma = group["gamma"]
             adaptive_clip = group["adaptive_clip"]
@@ -260,11 +249,7 @@ class FMARSCrop(BaseOptimizer):
 
                 clipped_c_t = c_t.clone().detach()
 
-                if og_approx_grad_nat:
-                    approx_grad_nat = c_t
-                    approx_grad_nat.div_(diff_fim_base)
-                else:
-                    approx_grad_nat = c_t.div(diff_fim_base)
+                approx_grad_nat = c_t.div(diff_fim_base)
                 rms = approx_grad_nat.pow(2).mean().sqrt_()
                 divisor = max(clip, rms) / clip
                 approx_grad_nat.div_(divisor)
@@ -306,8 +291,6 @@ class FMARSCrop(BaseOptimizer):
                 if group["cautious"]:
                     if cautious_grad == 'grad':
                         grad_for_mask = grad
-                    elif cautious_grad == 'corrected_grad_pre_clip':
-                        grad_for_mask = pre_clip_c_t
                     elif cautious_grad == 'corrected_grad':
                         grad_for_mask = clipped_c_t
                     elif cautious_grad == 'approx_grad_nat':
@@ -325,7 +308,7 @@ class FMARSCrop(BaseOptimizer):
 
                 fim.mul_(fim_slow_beta).addcmul_(approx_grad_nat, approx_grad_nat, value=1 - fim_slow_beta).clamp_(-clip_lambda, clip_lambda)
 
-                momentum.mul_(momentum_beta).add_(grad_nat * (mask if group["cautious_momentum"] else 1.0), alpha=1 - momentum_beta)
+                momentum.mul_(momentum_beta).add_(grad_nat, alpha=1 - momentum_beta)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:

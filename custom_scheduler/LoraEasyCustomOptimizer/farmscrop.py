@@ -248,12 +248,6 @@ class FARMSCropV2(BaseOptimizer):
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
         cautious_grad (str):
             Which form of grad to use for the cautious mask, valid options are 'grad', 'approx_grad_nat' 'grad_nat' (Default: grad)
-        cautious_momentum (bool):
-            Only effective if cautious is True, controls if cautious mask is also applied to the momentum update. 
-            Experimental, doesn't align with original impl, may not behave as expected or produce better results. (default: False)
-        og_approx_grad_nat (bool):
-            Enables old, technicially unintended and likely incorrect way of handling approx_grad_nat that would cause it to replace
-            the original grad in place, thus resulting in it being used as grad for grad_nat. (Default: False)
     """
 
     def __init__(
@@ -272,8 +266,6 @@ class FARMSCropV2(BaseOptimizer):
         clip: float = 1.0,
         cautious: bool = False,
         cautious_grad: MASK_GRADS = 'grad',
-        cautious_momentum: bool = False,
-        og_approx_grad_nat: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -299,8 +291,6 @@ class FARMSCropV2(BaseOptimizer):
             'momentum_lambda':momentum_lambda,
             'clip':clip,
             'cautious':cautious,
-            'cautious_momentum': cautious_momentum,
-            'og_approx_grad_nat': og_approx_grad_nat,
             'cautious_grad':cautious_grad,
         }
 
@@ -348,7 +338,6 @@ class FARMSCropV2(BaseOptimizer):
             eps = group["eps"]
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
-            og_approx_grad_nat = group["og_approx_grad_nat"]
             cautious_grad = group["cautious_grad"]
 
             for p in group["params"]:
@@ -420,13 +409,7 @@ class FARMSCropV2(BaseOptimizer):
                 else:
                     diff_fim_base = 1.0
 
-                og_grad = grad.clone().detach()
-
-                if og_approx_grad_nat:
-                    approx_grad_nat = grad
-                    approx_grad_nat.div_(diff_fim_base)
-                else:
-                    approx_grad_nat = grad.div(diff_fim_base)
+                approx_grad_nat = grad.div(diff_fim_base)
                 rms = approx_grad_nat.pow(2).mean().sqrt_()
                 divisor = max(clip, rms) / clip
                 approx_grad_nat.div_(divisor)
@@ -462,7 +445,7 @@ class FARMSCropV2(BaseOptimizer):
                 # Apply full step
                 if group["cautious"]:
                     if cautious_grad == 'grad':
-                        grad_for_mask = og_grad
+                        grad_for_mask = grad
                     elif cautious_grad == 'approx_grad_nat':
                         grad_for_mask = approx_grad_nat
                     elif cautious_grad == 'grad_nat':
@@ -479,7 +462,7 @@ class FARMSCropV2(BaseOptimizer):
 
                 fim.mul_(fim_slow_beta).addcmul_(approx_grad_nat, approx_grad_nat, value=1 - fim_slow_beta).clamp_(-clip_lambda, clip_lambda)
 
-                momentum.mul_(momentum_beta).add_(grad_nat * (mask if group["cautious_momentum"] else 1.0), alpha=1 - momentum_beta)
+                momentum.mul_(momentum_beta).add_(grad_nat, alpha=1 - momentum_beta)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
