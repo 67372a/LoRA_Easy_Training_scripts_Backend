@@ -245,13 +245,14 @@ def validate_save_tags(dataset: dict) -> dict:
 def validate_optimizer(args: dict) -> None:
     config = json.loads(Path("config.json").read_text())
     opt_type_lower = args["optimizer_type"].lower()
-    if opt_type_lower == "came":
-        if "colab" in config and config["colab"]:
-            args["optimizer_type"] = "came_pytorch.CAME.CAME"
-        else:
-            args["optimizer_type"] = f"{OPTIMIZERS[opt_type_lower].__module__}.{OPTIMIZERS[opt_type_lower].__qualname__}"
-    else:
+    if opt_type_lower == "came" and "colab" in config and config["colab"]:
+        args["optimizer_type"] = "came_pytorch.CAME.CAME"
+        return
+        
+    if opt_type_lower in OPTIMIZERS:
         args["optimizer_type"] = f"{OPTIMIZERS[opt_type_lower].__module__}.{OPTIMIZERS[opt_type_lower].__qualname__}"
+        return
+    
 
 
 def get_tags_from_file(file: str, tags: dict) -> None:
