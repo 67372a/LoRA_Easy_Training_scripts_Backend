@@ -176,7 +176,7 @@ class Adan(BaseOptimizer):
                 if group["cautious"]:
                     # compute norm gradient
                     exp_avg_mask = (exp_avg * grad > 0).to(grad.dtype)
-                    exp_avg_mask.mul_(exp_avg_mask.numel() / (exp_avg_mask.sum() + 1))
+                    exp_avg_mask.div_(exp_avg_mask.mean().clamp_(min=1e-3))
                 else:
                     exp_avg_mask = 1.0
 
@@ -185,7 +185,7 @@ class Adan(BaseOptimizer):
                 if group["cautious"]:
                     # compute norm gradient
                     exp_avg_diff_mask = (exp_avg_diff * grad > 0).to(grad.dtype)
-                    exp_avg_diff_mask.mul_(exp_avg_diff_mask.numel() / (exp_avg_diff_mask.sum() + 1))
+                    exp_avg_diff_mask.div_(exp_avg_diff_mask.mean().clamp_(min=1e-3))
                 else:
                     exp_avg_diff_mask = 1.0
 

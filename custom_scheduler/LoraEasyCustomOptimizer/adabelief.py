@@ -193,7 +193,7 @@ class AdaBelief(BaseOptimizer):
                 if group["cautious"]:
                     # compute norm gradient
                     mask = (exp_avg * grad > 0).to(grad.dtype)
-                    mask.mul_(mask.numel() / (mask.sum() + 1))
+                    mask.div_(mask.mean().clamp_(min=1e-3))
                 else:
                     mask = 1.0
 

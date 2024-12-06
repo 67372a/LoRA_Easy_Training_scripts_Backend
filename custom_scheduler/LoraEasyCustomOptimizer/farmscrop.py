@@ -453,7 +453,7 @@ class FARMSCropV2(BaseOptimizer):
 
                     # compute norm gradient
                     mask = (full_step * grad_for_mask > 0).to(grad.dtype)
-                    mask.mul_(mask.numel() / (mask.sum() + 1))
+                    mask.div_(mask.mean().clamp_(min=1e-3))
                 else:
                     mask = 1.0
 
