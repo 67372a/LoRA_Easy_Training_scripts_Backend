@@ -87,9 +87,10 @@ class FMARSCrop(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
-        # Override zero to 1e-38, as zero and float32.tiny NaNs
+        # Override zero to 1e-37, as zero and float32.tiny NaNs
+        # Using 1e-37 as 1e-38 NaNs for Flux loras
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-38
+            eps_floor = 1e-37
 
         defaults: DEFAULTS = {
             'lr':lr,

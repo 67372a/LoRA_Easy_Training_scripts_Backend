@@ -1,9 +1,10 @@
 import torch
-from typing import Any, Dict, List, Tuple, Union, Type, Literal
+from typing import Any, Dict, List, Tuple, Union, Type, Literal, Optional
 import torch.nn.functional as F
 from torch.optim import Optimizer
 from einops import rearrange
 from pytorch_optimizer.optimizer.utils import unit_norm
+import math
 
 OPTIMIZER = Type[Optimizer]
 
@@ -93,7 +94,7 @@ def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float
     :param agc_clip_val: float. norm clip.
     :param eps: float. simple stop from div by zero and no relation to standard optimizer eps.
     """
-    if norm_type == 'global':
+    if norm_type in {'global','layer'}:
         # Compute the global norm of the parameters and gradients
         p_norm = torch.norm(p).clamp_(min=agc_eps)
         g_norm = torch.norm(grad)
@@ -121,3 +122,24 @@ def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float
         return torch.where(g_norm > max_norm, clipped_grad, grad)
     else:
         raise ValueError(f"'{norm_type}' is not a supported value for norm_type.")
+
+
+def schedule_alpha(t_alpha: Optional[float], step: int, alpha: float) -> float:
+    if t_alpha is None:
+        return alpha
+    return min(step * alpha / t_alpha, alpha)
+
+
+def schedule_beta(t_beta: Optional[float], step: int, beta_initial: float, beta_final: float, eps: float = 1e-8) -> float:
+    if t_beta is None:
+        return beta_initial
+
+    # Add eps to prevent log 0
+    log_beta_intial, log_beta_final = math.log(max(beta_initial, eps)), math.log(beta_final)
+
+    return min(
+        math.exp(
+            log_beta_intial * log_beta_final / ((1.0 - step / t_beta) * log_beta_final + (step / t_beta) * log_beta_intial)
+        ),
+        beta_final,
+    )
