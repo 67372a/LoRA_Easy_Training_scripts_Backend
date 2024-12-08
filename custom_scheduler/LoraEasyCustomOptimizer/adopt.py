@@ -126,7 +126,7 @@ class ADOPT(BaseOptimizer):
                 denom = torch.clamp(exp_avg_sq.sqrt(), group['eps'])
                 normed_grad = grad.div(denom)
                 if group['clip'] is not None:
-                    clip = group['step']-1 **group['clip']
+                    clip = (group['step']-1)**group['clip']
                     normed_grad.clamp_(-clip, clip)
 
                 exp_avg.lerp_(normed_grad, 1 - beta1)
