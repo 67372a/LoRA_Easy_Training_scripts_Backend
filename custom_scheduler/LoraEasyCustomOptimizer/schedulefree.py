@@ -251,7 +251,7 @@ class ADOPTScheduleFree(BaseOptimizer):
         r: float = 0.0,
         weight_lr_power: float = 2.0,
         warmup_steps: int = 0,
-        eps: float = 1e-8,
+        eps: float = 1e-6,
         cautious: bool = True,
         **kwargs,
     ):
@@ -375,6 +375,9 @@ class ADOPTScheduleFree(BaseOptimizer):
                     exp_avg_sq.mul_(debias).addcmul_(grad, grad.conj(), value=1 - debias)
 
                     update = grad.div(de_nom)
+
+                    clip = (group['step']-1) **0.25
+                    normed_grad.clamp_(-clip, clip)
 
                     # Weight decay calculated at y
                     if group["weight_decay"] != 0:
