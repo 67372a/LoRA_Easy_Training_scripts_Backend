@@ -112,7 +112,7 @@ class ADOPT(BaseOptimizer):
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     exp_avg, exp_avg_sq = exp_avg.to(torch.float32), exp_avg_sq.to(torch.float32)
 
-                if group['weight_decay'] != 0 and not group['decouple']:
+                if group['weight_decay'] != 0 and not group['weight_decouple']:
                     grad = grad.add(p_fp32, alpha=group['weight_decay'])
 
                 if group['step'] == 1:
@@ -120,7 +120,7 @@ class ADOPT(BaseOptimizer):
                     copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
                     continue
 
-                if group['weight_decay'] != 0 and group['decouple']:
+                if group['weight_decay'] != 0 and group['weight_decouple']:
                     p_fp32.add_(p_fp32, alpha=-group['lr'] * group['weight_decay'])
 
                 denom = torch.clamp(exp_avg_sq.sqrt(), group['eps'])

@@ -8,7 +8,7 @@ import math
 
 OPTIMIZER = Type[Optimizer]
 
-NORM_TYPE = Literal['unit','global']
+NORM_TYPE = Literal['unit','global','layer']
 
 def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     # thanks to Nerogar for fast stochastic pytorch implementation
