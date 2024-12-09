@@ -481,7 +481,7 @@ class ADOPTScheduleFree(BaseOptimizer):
                     p_fp32.add_(update, alpha=adaptive_y_lr)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum_()
+                        exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum()
 
                     z.sub_(update, alpha=lr)
 
