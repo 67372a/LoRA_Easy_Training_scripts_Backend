@@ -426,7 +426,7 @@ class ADOPTScheduleFree(BaseOptimizer):
                 p_fp32 = p
                 state = self.state[p]
 
-                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_Decay']:
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                     param_size += p.numel()                
 
                 if len(state) == 0:
