@@ -258,14 +258,13 @@ class ADOPTScheduleFree(BaseOptimizer):
             the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
             Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
             Valid values: global, unit (default: global).
-        rectify: (bool)
-            Rectify variance as per RAdam - https://arxiv.org/abs/1908.03265 (Default: false)
-        bias_correction_beta2: (bool)
+        bias_correction_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
-        :param r: float. use polynomial weighting in the average with power r.
-        :param weight_lr_power: float. during warmup, the weights in the average will be equal to lr raised to this power.
-            set to 0 for no weighting.
-        :param warmup_steps: int. enables a linear learning rate warmup.
+        r (float): 
+            use polynomial weighting in the average with power r.  (Default: 0.0)
+        weight_lr_power (float): 
+            during warmup, the weights in the average will be equal to lr raised to this power.
+            set to 0 for no weighting. (Default: 2,0)
     """
 
     def __init__(
@@ -285,7 +284,6 @@ class ADOPTScheduleFree(BaseOptimizer):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        rectify: bool = False,
         bias_correction_beta2: bool = False,
         **kwargs,
     ):
@@ -317,7 +315,6 @@ class ADOPTScheduleFree(BaseOptimizer):
             'adaptive_clip':adaptive_clip,
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
-            'rectify':rectify,
             'bias_correction_beta2':bias_correction_beta2,
         }
         super().__init__(params, defaults)
@@ -373,27 +370,12 @@ class ADOPTScheduleFree(BaseOptimizer):
             param_size: int = 0
             exp_avg_sq_sum: float = 0.0
 
-            warmup_steps: int = group['warmup_steps']
-            schedule: float = group['step'] / warmup_steps if group['step'] < warmup_steps else 1.0
-
             beta1, beta2 = group['betas']
 
             beta2_t = beta2**group['step']
             bias_correction2 = 1 - beta2_t
 
-            if group['rectify']:
-                # maximum length of the approximated SMA
-                rho_inf = 2 / (1 - beta2) - 1
-                # compute the length of the approximated SMA
-                rho_t = rho_inf - 2 * group['step'] * beta2_t / bias_correction2
-                rect = (
-                    ((rho_t - 4) * (rho_t - 2) * rho_inf / ((rho_inf - 4) * (rho_inf - 2) * rho_t)) ** 0.5
-                    if rho_t > 4.0
-                    else 0.0
-                )
-                lr: float = group['lr'] * rect
-            else:
-                lr: float = group['lr'] * schedule
+            lr: float = group['lr']
 
             if not group['bias_correction_beta2']:
                 bias_correction2 = 1.0
@@ -454,15 +436,10 @@ class ADOPTScheduleFree(BaseOptimizer):
                 if group['step'] == 1:
                     exp_avg_sq.addcmul_(grad, grad.conj())
                 else:
-                    if not group['rectify'] or rho_t > 4.0:
-                        de_nom = exp_avg_sq.div(bias_correction2).sqrt_().clamp_(curr_eps)
+                    de_nom = exp_avg_sq.div(bias_correction2).sqrt_().clamp_(curr_eps)
 
-                        # Reuse grad buffer for memory efficiency
-                        update = grad.div(de_nom)
-                        update.clamp_(-adopt_clip, adopt_clip)
-                    else:
-                        # Fall back to SGD (or nothing)
-                        update = grad
+                    update = grad.div(de_nom)
+                    update.clamp_(-adopt_clip, adopt_clip)
 
                     exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
@@ -473,7 +450,7 @@ class ADOPTScheduleFree(BaseOptimizer):
                         else:
                             swd_scaling = 1.0
 
-                        p_fp32.data.mul_(1.0 - group['weight_decay'] * group['lr'] * swd_scaling)
+                        p_fp32.data.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
                     elif group["weight_decay"] != 0:
                         update.add_(p_fp32, alpha=group["weight_decay"])
 
