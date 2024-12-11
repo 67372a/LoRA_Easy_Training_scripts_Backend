@@ -456,10 +456,10 @@ class ADOPTScheduleFree(BaseOptimizer):
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(update, alpha=adaptive_y_lr)
 
+                    z.sub_(update, alpha=lr)
+
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum()
-
-                    z.sub_(update, alpha=lr)
 
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                     group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
@@ -748,10 +748,10 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(full_update, alpha=adaptive_y_lr)
 
+                    z.sub_(full_update, alpha=lr)
+
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum()
-
-                    z.sub_(full_update, alpha=lr)
 
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                     group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
@@ -762,5 +762,280 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
                     copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
                     copy_stochastic_(state["exp_avg_slow"], exp_avg_slow)
                     copy_stochastic_(p, p_fp32)
+
+        return loss
+    
+class ADOPTNesterovScheduleFree(BaseOptimizer):
+    r"""Schedule-Free ADOPT + Adan style nesterov momentum.
+    Arguments:
+        params (iterable):
+            Iterable of parameters to optimize or dicts defining
+            parameter groups.
+        lr (float):
+            Learning rate parameter (default 2.5e-3).
+        betas (float, float):
+            coefficients for momentum and exponential moving average squared (default: 0.9, 0.9999).
+        eps (float):
+            Term the denominator is minimally clamped to, to
+            improve numerical stability. (default: 1e-6).
+        eps2 (float):
+            Term to multiple the RMS of the grad to calculate adaptive eps. (default: 1e-2).
+        eps_floor (float):
+            Term to set a floor for the eps, to prevent NaNs. (default: None, disabling adaptive eps).
+        weight_decay (float):
+            Weight decay at y, i.e. a L2 penalty (default: 0.0).
+        weight_decouple (bool): 
+            the optimizer uses decoupled weight decay as in AdamW.
+        centralization (float):
+            Center model grad (default: 0.0).
+        adaptive_clip (float):
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+        adaptive_clip_eps (float):
+            The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
+            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+        adaptive_clip_type (string):
+            The type of clipping, can be unit or global. If done at the unit level can change
+            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
+            Valid values: global, unit (default: global).
+        bias_correction_beta2 (bool):
+            Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
+        r (float): 
+            use polynomial weighting in the average with power r.  (Default: 0.0)
+        weight_lr_power (float): 
+            during warmup, the weights in the average will be equal to lr raised to this power.
+            set to 0 for no weighting. (Default: 2,0)
+    """
+
+    def __init__(
+        self,
+        params: PARAMETERS,
+        lr: float = 2.5e-3,
+        betas: BETAS = (0.9, 0.92, 0.9999),
+        weight_decay: float = 0.0,
+        weight_decouple: bool = False,
+        stable_weight_decay: bool = False,
+        r: float = 0.0,
+        weight_lr_power: float = 2.0,
+        warmup_steps: int = 0,
+        eps: float = 1e-6,
+        eps2: float = 1e-2,
+        eps_floor: float = None,
+        adaptive_clip: float = 1.0,
+        adaptive_clip_eps: float = 1e-3,
+        adaptive_clip_type: NORM_TYPE = 'layer',
+        bias_correction_beta3: bool = False,
+        cautious: bool = True,
+        **kwargs,
+    ):
+        self.validate_learning_rate(lr)
+        self.validate_betas(betas)
+        self.validate_non_negative(weight_decay, 'weight_decay')
+        self.validate_non_negative(eps, 'eps')
+
+        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = 1e-30
+
+        defaults: DEFAULTS = {
+            'lr': lr,
+            'betas': betas,
+            'weight_decay': weight_decay,
+            'weight_decouple':weight_decouple,
+            'stable_weight_decay':stable_weight_decay,
+            'r': r,
+            'weight_lr_power': weight_lr_power,
+            'warmup_steps': warmup_steps,
+            'eps': eps,
+            'eps2': eps2,
+            'eps_floor':eps_floor,
+            'train_mode': True,
+            'weight_sum': 0.0,
+            'lr_max': -1.0,
+            'adaptive_clip':adaptive_clip,
+            'adaptive_clip_eps':adaptive_clip_eps,
+            'adaptive_clip_type':adaptive_clip_type,
+            'bias_correction_beta3':bias_correction_beta3,
+            'cautious': cautious,
+        }
+        super().__init__(params, defaults)
+
+    def __str__(self) -> str:
+        return 'ADOPTNesterovScheduleFree'
+
+    def eval(self):
+        for group in self.param_groups:
+            beta1, _, _ = group['betas']
+            if group['train_mode']:
+                for p in group['params']:
+                    state = self.state[p]
+                    if 'z' in state:
+                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                group['train_mode'] = False
+
+    def train(self):
+        for group in self.param_groups:
+            beta1, _, _ = group['betas']
+            if not group['train_mode']:
+                for p in group['params']:
+                    state = self.state[p]
+                    if 'z' in state:
+                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                group['train_mode'] = True
+
+    @torch.no_grad()
+    def reset(self):
+        for group in self.param_groups:
+            group['step'] = 0
+            group['exp_avg_mean_sqrt'] = 0.0
+            for p in group['params']:
+                state = self.state[p]
+
+                state['z'] = p.clone()
+                state['exp_avg_sq'] = torch.zeros_like(p)
+                state['exp_avg_diff'] = torch.zeros_like(p)
+                state['previous_grad'] = torch.zeros_like(p)
+
+    @torch.no_grad()
+    def step(self, closure: CLOSURE = None) -> LOSS:
+        loss: LOSS = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+                group['exp_avg_mean_sqrt'] = 0.0
+
+            param_size: int = 0
+            exp_avg_sq_sum: float = 0.0
+
+            beta1, beta2, beta3 = group['betas']
+
+            beta3_t = beta3**group['step']
+            bias_correction3 = 1 - beta3_t
+
+            lr: float = group['lr']
+
+            if not group['bias_correction_beta3']:
+                bias_correction3 = 1.0
+
+            lr_max = group['lr_max'] = max(lr, group['lr_max'])
+
+            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
+            weight_sum = group['weight_sum'] = group['weight_sum'] + weight
+
+            checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
+
+            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
+            adopt_clip: float = (group['step']-1)**0.25
+
+            adaptive_clip = group["adaptive_clip"]
+            adaptive_clip_type = group["adaptive_clip_type"]
+            adaptive_clip_eps = group["adaptive_clip_eps"]
+            eps = group["eps"]
+            eps2 = group["eps2"]
+            eps_floor = group["eps_floor"]
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad
+                if grad.is_sparse:
+                    raise NoSparseGradientError(str(self))
+
+                p_fp32 = p
+                state = self.state[p]
+
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    param_size += p.numel()                
+
+                if len(state) == 0:
+                    state['z'] = p.clone()
+                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    state['exp_avg_diff'] = torch.zeros_like(p)
+                    state['previous_grad'] = p.grad.to(dtype=p.dtype, copy=True).detach()
+
+                z, exp_avg_sq, exp_avg_diff = state['z'], state['exp_avg_sq'], state['exp_avg_diff']
+                grad_diff = state['previous_grad']
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
+                    z, exp_avg_sq, exp_avg_diff = z.to(torch.float32), exp_avg_sq.to(torch.float32), exp_avg_diff.to(torch.float32)
+                    grad_diff = grad_diff.to(torch.float32)
+                    p_fp32 = p.clone().to(torch.float32)
+
+                if adaptive_clip > 0.0:
+                    # Apply Adaptive Gradient Clipping (AGC)
+                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+                if eps_floor is not None and eps_floor < eps:
+                    rms_grad = grad.pow(2).mean().sqrt_()
+                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
+                else:
+                    curr_eps = eps
+
+                grad_diff.add_(grad)
+
+                if group['step'] == 1:
+                    grad_diff.mul_(beta2).add_(grad)
+                    exp_avg_sq.addcmul_(grad_diff, grad_diff.conj())
+                else:
+                    de_nom = exp_avg_sq.div(bias_correction3).sqrt_().clamp_(curr_eps)
+                    exp_avg_diff.mul_(beta2).add_(grad_diff, alpha=1.0 - beta2)
+
+                    grad_diff.mul_(beta2).add_(grad)
+                    exp_avg_sq.mul_(beta3).addcmul_(grad_diff, grad_diff.conj(), value=1 - beta3)
+                    
+                    ema_diff_update = exp_avg_diff.div(de_nom)
+                    ema_diff_update.clamp_(-adopt_clip, adopt_clip)
+
+                    grad_update = grad.div(de_nom)
+                    grad_update.clamp_(-adopt_clip, adopt_clip)
+
+                    if group["cautious"]:
+                        # compute norm gradient
+                        mask = (ema_diff_update * grad_update > 0).to(grad.dtype)
+                        mask.div_(mask.mean().clamp_(min=1e-3))
+                        ema_diff_update.mul_(mask)
+
+                    full_update = grad_update + ema_diff_update
+
+                    # Weight decay calculated at y
+                    if group["weight_decay"] != 0 and group['weight_decouple']:
+                        if group['stable_weight_decay'] and group['exp_avg_mean_sqrt'] > 0:
+                            swd_scaling = 1.0 / group['exp_avg_mean_sqrt']
+                        else:
+                            swd_scaling = 1.0
+
+                        p_fp32.data.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
+                    elif group["weight_decay"] != 0:
+                        full_update.add_(p_fp32, alpha=group["weight_decay"])
+
+                    p_fp32.lerp_(z, weight=checkpoint)
+                    p_fp32.add_(full_update, alpha=adaptive_y_lr)
+
+                    z.sub_(full_update, alpha=lr)
+
+                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                        exp_avg_sq_sum += exp_avg_sq.div(bias_correction3).sum()
+
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state["z"], z)
+                    copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
+                    copy_stochastic_(state['exp_avg_diff'], exp_avg_diff)
+                    copy_stochastic_(state['previous_grad'], -grad)
+                    copy_stochastic_(p, p_fp32)
+                else:
+                    state['previous_grad'].copy_(-grad)
 
         return loss
