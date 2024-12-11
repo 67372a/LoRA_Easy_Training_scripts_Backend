@@ -1,13 +1,11 @@
 # FMARSCrop from https://github.com/Clybius/Personalized-Optimizers by Clybius
 import torch
-from .utils import copy_stochastic_, agc, NORM_TYPE
-from typing import Literal
+from .utils import copy_stochastic_, agc, NORM_TYPE, schedule_beta, schedule_alpha
+from typing import Literal, Optional
+import math
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-
-MASK_GRADS = Literal['grad', 'corrected_grad', 'approx_grad_nat' 'grad_nat']
-
 
 class FMARSCrop(BaseOptimizer):
     r"""
@@ -24,7 +22,7 @@ class FMARSCrop(BaseOptimizer):
             gradient difference FIM and approx. natural grad FIM (default: 0.999, 0.9999).
         eps (float):
             Term the denominator is minimally clamped to, to
-            improve numerical stability. (default: 1e-6).
+            improve numerical stability. (default: 1e-8).
         eps2 (float):
             Term to multiple the RMS of the grad to calculate adaptive eps. (default: 1e-2).
         eps_floor (float):
@@ -34,21 +32,19 @@ class FMARSCrop(BaseOptimizer):
         centralization (float):
             Center model grad (default: 0.0).
         moment_centralization (float):
-            Center the slow momentum / EMA (default: 1.0).
+            Center the slow momentum / EMA (default: 0.0).
         diff_mult (float):
             Multiplier for difference amplification (default: 1.0).
-        momentum_beta (float):
-            Beta value for slow momentum / EMA (default: 0.9999) (Alternative recommendation: 0.99999).
         momentum_lambda (float):
-            Amplification exponent for slow momentum / EMA (default: 0.25) (Alternative recommendation: 0.5).
+            The lambda value for slow momentum / EMA, controlling how much the momentum is amplified while being added to the update. (default: 2.0).
+        momentum_beta (float):
+            Beta value for slow momentum / EMA (default: 0.99).
         clip (float):
             Value to clip the grad's RMS at (default: 1.0)
         cautious (bool):
-            Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
-        cautious_grad (str):
-            Which form of grad to use for the cautious mask, valid options are 'grad', 'corrected_grad', 'approx_grad_nat' 'grad_nat' (Default: corrected_grad)
+            Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: True)
         adaptive_clip (float):
-            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 0.0).
+            Adaptive clip value to applied to the MARS corrected gradient. (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
@@ -57,29 +53,31 @@ class FMARSCrop(BaseOptimizer):
             the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
             Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
             Valid values: global, unit (default: global).
+        gamma (float):
+            Scaling value for the MARS style correction of the gradient (default: 0.0005)
     """
 
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float = 1e-4,
+        lr: float = 5e-4,
         betas: BETAS = (0.999, 0.9999),
         eps: float = 1e-6,
         eps2: float = 1e-2,
         eps_floor: float = None,
         weight_decay: float = 0.0,
         centralization: float = 0.0,
-        moment_centralization: float = 1.0,
+        moment_centralization: float = 0.0,
         diff_mult: float = 1.0,
-        momentum_beta: float = 0.9999,
-        momentum_lambda: float = 0.25,
+        momentum_lambda: float = 0.1,
+        momentum_beta: float = 0.99,
         clip: float = 1.0,
-        cautious: bool = False,
-        cautious_grad: MASK_GRADS = 'corrected_grad',
-        gamma: float = None,
-        adaptive_clip: float = 0.0,
+        cautious: bool = True,
+        gamma: float = 0.0005,
+        adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'global',
+        stable_weight_decay: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -106,11 +104,11 @@ class FMARSCrop(BaseOptimizer):
             'momentum_lambda':momentum_lambda,
             'clip':clip,
             'cautious':cautious,
-            'cautious_grad':cautious_grad,
             'gamma': gamma,
             'adaptive_clip':adaptive_clip,
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
+            'stable_weight_decay': stable_weight_decay,
         }
 
         super().__init__(params, defaults)
@@ -122,6 +120,7 @@ class FMARSCrop(BaseOptimizer):
     def reset(self):
         for group in self.param_groups:
             group['step'] = 0
+            group['fim_mean_sqrt'] = None
             for p in group["params"]:
                 state = self.state[p]
 
@@ -145,6 +144,10 @@ class FMARSCrop(BaseOptimizer):
                 group['step'] += 1
             else:
                 group['step'] = 1
+                group['fim_mean_sqrt'] = None
+
+            param_size: int = 0
+            fim_sum: float = 0.0
 
             beta1, beta2 = group["betas"]
             lr = group["lr"]
@@ -159,22 +162,27 @@ class FMARSCrop(BaseOptimizer):
             eps = group["eps"]
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
-            cautious_grad = group["cautious_grad"]
             gamma = group["gamma"]
             adaptive_clip = group["adaptive_clip"]
             adaptive_clip_type = group["adaptive_clip_type"]
             adaptive_clip_eps = group["adaptive_clip_eps"]
+            stable_weight_decay = group["stable_weight_decay"]
+
+            clip_lambda = (step - 1)**0.25
 
             for p in group["params"]:
                 if p.grad is None:
                     continue
                 state = self.state[p]
 
+                if stable_weight_decay:
+                    param_size += p.numel()
+
                 # State initialization
                 if len(state) == 0:
                     state["momentum"] = torch.zeros_like(p)
                     state["fim"] = torch.ones_like(p)
-                    state["prev_grad"] = -p.grad.clone().to(p.dtype).detach()
+                    state["prev_grad"] = -p.grad.to(dtype=p.dtype, copy=True).detach()
                     if diff_mult > 0:
                         state["grad_diff_fim"] = torch.ones_like(p)
 
@@ -194,27 +202,18 @@ class FMARSCrop(BaseOptimizer):
                     prev_grad = state["prev_grad"].to(torch.float32)
                     p_fp32 = p.clone().to(torch.float32)
 
-                if adaptive_clip > 0.0:
-                    # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
-
                 prev_grad = prev_grad.add(grad)
 
                 # Calculate cₜ (gradient with correction term)
                 correction = (((1 - beta1) / 2) if gamma is None else gamma) * beta1 / (1 - beta1) * prev_grad
                 c_t = grad + correction
 
-                # Gradient clipping (if necessary)
-                grad_norm = torch.norm(c_t)
-                if grad_norm > clip:
-                    c_t = c_t * clip / grad_norm
-
-                clip_lambda = step**0.25
-
-                fim_slow_beta = ((beta2**step - beta2) / (beta2**step - 1.0)) ** (1/2)
+                if adaptive_clip > 0.0:
+                    # Apply Adaptive Gradient Clipping (AGC)
+                    c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
+                    rms_grad = c_t.pow(2).mean().sqrt_()
                     curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
                 else:
                     curr_eps = eps
@@ -237,7 +236,7 @@ class FMARSCrop(BaseOptimizer):
                     # Get natural gradient (squared ema, obtained sqrt of ema)
                     diff_fim_base = torch.clamp(grad_diff_fim.sqrt(), curr_eps)
 
-                    grad_diff_fim.mul_(beta1).addcmul_(grad_diff, grad_diff, value=1 - beta1).clamp_(-clip_lambda, clip_lambda)
+                    grad_diff_fim.mul_(beta1).addcmul_(grad_diff, grad_diff, value=1.0 - beta1).clamp_(-clip_lambda, clip_lambda)
 
                     # pack
                     if p.dtype in {torch.float16, torch.bfloat16}:
@@ -245,68 +244,72 @@ class FMARSCrop(BaseOptimizer):
                 else:
                     diff_fim_base = 1.0
 
-                clipped_c_t = c_t.clone().detach()
-
                 approx_grad_nat = c_t.div(diff_fim_base)
                 rms = approx_grad_nat.pow(2).mean().sqrt_()
                 divisor = max(clip, rms) / clip
                 approx_grad_nat.div_(divisor)
 
-                fim_base = torch.clamp(fim.sqrt(), curr_eps)
-
-                grad_nat = c_t.div(fim_base).div_(diff_fim_base)
-                rms = grad_nat.pow(2).mean().sqrt_()
-                divisor = max(clip, rms) / clip
-                grad_nat.div_(divisor)
-
-                if moment_centralization != 0:
-                    momentum_cent = momentum - torch.mean(momentum)
+                if group['step'] == 1:
+                    fim.addcmul_(approx_grad_nat, approx_grad_nat)
                 else:
-                    momentum_cent = momentum
+                    fim_base = torch.clamp(fim.sqrt(), curr_eps)
 
-                # Compass-style amplification
-                full_step = grad_nat.add(momentum_cent, alpha=step**momentum_lambda)
-
-                # center the gradient vector
-                if centralization != 0 and full_step.dim() > 1:
-                    full_step.sub_(
-                        full_step.mean(dim=tuple(range(1, full_step.dim())), keepdim=True).mul_(
-                            centralization
-                        )
-                    )
-                
-                if weight_decay != 0:
-                    # Perform weight decay
-                    grad_weights = p_fp32.data.div(fim_base).div_(diff_fim_base)
-
-                    rms = grad_weights.pow(2).mean().sqrt_()
+                    grad_nat = approx_grad_nat.div(fim_base).div_(diff_fim_base)
+                    rms = grad_nat.pow(2).mean().sqrt_()
                     divisor = max(clip, rms) / clip
-                    grad_weights.div_(divisor)
+                    grad_nat.div_(divisor)
 
-                    p_fp32.data.add_(grad_weights, alpha=-lr*weight_decay)
+                    momentum.mul_(momentum_beta).add_(grad_nat, alpha=1.0 - momentum_beta)
 
-                # Apply full step
-                if group["cautious"]:
-                    if cautious_grad == 'grad':
-                        grad_for_mask = grad
-                    elif cautious_grad == 'corrected_grad':
-                        grad_for_mask = clipped_c_t
-                    elif cautious_grad == 'approx_grad_nat':
-                        grad_for_mask = approx_grad_nat
-                    elif cautious_grad == 'grad_nat':
-                        grad_for_mask = grad_nat
-                    # compute norm gradient
-                    mask = (full_step * grad_for_mask > 0).to(grad.dtype)
-                    mask.mul_(mask.numel() / (mask.sum() + 1))
-                else:
-                    mask = 1.0
+                    if moment_centralization != 0:
+                        momentum_cent = momentum.sub(torch.mean(momentum).mul_(moment_centralization))
+                    else:
+                        momentum_cent = momentum
 
-                # Apply full step
-                p_fp32.data.add_(full_step * mask, alpha=-lr)
+                    if group['cautious']:
+                        mask = (momentum_cent * grad_nat < 0).to(momentum_cent.dtype)
+                        mask.div_(mask.mean().clamp_(min=1e-3))
+                        momentum_cent = momentum_cent * mask
 
-                fim.mul_(fim_slow_beta).addcmul_(approx_grad_nat, approx_grad_nat, value=1 - fim_slow_beta).clamp_(-clip_lambda, clip_lambda)
+                    # Compass-style amplification
+                    full_step = grad_nat.add(momentum_cent, alpha=step**momentum_lambda)
 
-                momentum.mul_(momentum_beta).add_(grad_nat, alpha=1 - momentum_beta)
+                    # center the gradient vector
+                    if centralization != 0 and full_step.dim() > 1:
+                        full_step.sub_(
+                            full_step.mean(dim=tuple(range(1, full_step.dim())), keepdim=True).mul_(
+                                centralization
+                            )
+                        )
+
+                    if weight_decay != 0:
+                        # Perform weight decay
+                        grad_weights = p_fp32.data.div(fim_base).div_(diff_fim_base)
+
+                        rms = grad_weights.pow(2).mean().sqrt_()
+                        divisor = max(clip, rms) / clip
+                        grad_weights.div_(divisor)
+
+                        if stable_weight_decay and group['fim_mean_sqrt'] is not None:
+                            scale = 1.0 / group['fim_mean_sqrt']
+                        else:
+                            scale = 1.0
+
+                        p_fp32.data.add_(grad_weights, alpha=-lr * weight_decay * scale)
+
+                    if group["cautious"]:
+                        mask = (full_step * grad_nat > 0).to(grad_nat.dtype)
+                        mask.div_(mask.mean().clamp_(min=1e-3))
+                    else:
+                        mask = 1.0
+
+                    # Apply full step
+                    p_fp32.data.add_(full_step * mask, alpha=-lr)
+
+                    fim.mul_(beta2).addcmul_(approx_grad_nat, approx_grad_nat, value=1.0 - beta2).clamp_(-clip_lambda, clip_lambda)
+
+                if stable_weight_decay:
+                    fim_sum += fim.sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -317,4 +320,8 @@ class FMARSCrop(BaseOptimizer):
                 else:
                     # Copy the negative of the current grad (next step diff is -prev_grad + grad, or alternatively grad - prev_grad)
                     state["prev_grad"].copy_(-grad)
+
+            if stable_weight_decay:
+                group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
+
         return loss
