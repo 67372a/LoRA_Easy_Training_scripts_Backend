@@ -9,11 +9,10 @@ scipy
 came-pytorch
 pytorch_optimizer==3.3.0
 #https://github.com/67372a/LyCORIS/tree/dev
-../installables/lycoris_lora-3.1.0.67372a0-py3-none-any.whl
+../installables/lycoris_lora-3.1.1.post1-py3-none-any.whl
 wheel
 typing
 triton==3.1.0; platform_system == "Linux"
-torch-optimi
 
 # Triton wheels
 https://github.com/woct0rdho/triton-windows/releases/download/v3.1.0-windows.post5/triton-3.1.0-cp312-cp312-win_amd64.whl; platform_system == "Windows" and python_version == "3.12"
