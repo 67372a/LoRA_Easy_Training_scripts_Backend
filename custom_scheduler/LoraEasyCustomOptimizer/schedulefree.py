@@ -2375,7 +2375,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
 
                             p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
                         elif group["weight_decay"] != 0:
-                            update.add_(grad_nat, alpha=group["weight_decay"])
+                            update.add_(grad_weights, alpha=group["weight_decay"])
 
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(update, alpha=adaptive_y_lr)
