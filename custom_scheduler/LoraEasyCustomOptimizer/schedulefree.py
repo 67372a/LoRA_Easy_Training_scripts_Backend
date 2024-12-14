@@ -2590,9 +2590,10 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                     fim.mul_(beta2).addcmul_(c_t, c_t.conj(), value=1 - beta2).clamp_(-adopt_clip, adopt_clip)
 
                     grad_nat = c_t.div(fim_base)
-                    rms = grad_nat.pow(2).mean().sqrt_()
-                    divisor = max(fisher_clip, rms) / fisher_clip
-                    grad_nat.div_(divisor)
+                    if group['fisher_clip'] > 0:
+                        rms = grad_nat.pow(2).mean().sqrt_()
+                        divisor = max(fisher_clip, rms) / fisher_clip
+                        grad_nat.div_(divisor)
 
                     update = grad_nat
                     
@@ -2600,9 +2601,10 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                         # Perform weight decay
                         grad_weights = p_fp32.div(fim_base)
 
-                        rms = grad_weights.pow(2).mean().sqrt_()
-                        divisor = max(fisher_clip, rms) / fisher_clip
-                        grad_weights.div_(divisor)
+                        if group['fisher_clip'] > 0:
+                            rms = grad_weights.pow(2).mean().sqrt_()
+                            divisor = max(fisher_clip, rms) / fisher_clip
+                            grad_weights.div_(divisor)
 
                         # Weight decay calculated at y
                         if group["weight_decay"] != 0 and group['weight_decouple']:
