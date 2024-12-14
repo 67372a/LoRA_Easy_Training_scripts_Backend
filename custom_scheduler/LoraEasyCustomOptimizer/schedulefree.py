@@ -1981,20 +1981,18 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
                     curr_eps = eps
 
                 if group['step'] == 1:
-                    fim.addcmul_(grad, grad.conj())
+                    fim.addcmul_(grad, grad.conj()).clamp_(-adopt_clip, adopt_clip)
                 else:
                     fim_base = torch.clamp(fim.sqrt(), curr_eps)
-                    fim.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
+                    fim.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2).clamp_(-adopt_clip, adopt_clip)
 
                     grad_nat = grad.div(fim_base)
                     rms = grad_nat.pow(2).mean().sqrt_()
                     divisor = max(fisher_clip, rms) / fisher_clip
                     grad_nat.div_(divisor)
-                    grad_nat.clamp_(-adopt_clip, adopt_clip)
 
                     exp_avg_slow.mul_(beta3_t).add_(grad_nat, alpha=1.0 - beta3_t)
                     slow_ema_update = (alpha_t * exp_avg_slow)
-                    slow_ema_update.clamp_(-adopt_clip, adopt_clip)
 
                     if group["cautious"]:
                         # compute norm gradient
@@ -2283,21 +2281,20 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
 
                 if group['step'] == 1:
                     grad_diff.mul_(beta2).add_(grad)
-                    fim.addcmul_(grad_diff, grad_diff.conj())
+                    fim.addcmul_(grad_diff, grad_diff.conj()).clamp_(-adopt_clip, adopt_clip)
                 else:
                     fim_base = torch.clamp(fim.sqrt(), curr_eps)
                     exp_avg_diff.mul_(beta2).add_(grad_diff, alpha=1.0 - beta2)
 
                     grad_diff.mul_(beta2).add_(grad)
-                    fim.mul_(beta3).addcmul_(grad_diff, grad_diff.conj(), value=1 - beta3)
+                    fim.mul_(beta3).addcmul_(grad_diff, grad_diff.conj(), value=1 - beta3).clamp_(-adopt_clip, adopt_clip)
 
                     grad_nat = grad.div(fim_base)
                     rms = grad_nat.pow(2).mean().sqrt_()
                     divisor = max(fisher_clip, rms) / fisher_clip
                     grad_nat.div_(divisor)
-                    grad_nat.clamp_(-adopt_clip, adopt_clip)
 
-                    ema_diff_update = exp_avg_diff.clamp(-adopt_clip, adopt_clip)
+                    ema_diff_update = exp_avg_diff
 
                     if group["cautious"]:
                         # compute norm gradient
