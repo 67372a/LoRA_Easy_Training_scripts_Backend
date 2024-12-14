@@ -1428,7 +1428,7 @@ class CompassADOPT(BaseOptimizer):
 
                     exp_avg.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
 
-                    update = grad.add(exp_avg, alpha=amp_fac)
+                    update = normed_grad.add(exp_avg, alpha=amp_fac)
 
                     # Weight decay calculated at y
                     if group["weight_decay"] != 0 and group['weight_decouple']:

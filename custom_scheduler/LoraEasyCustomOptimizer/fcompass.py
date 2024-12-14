@@ -343,7 +343,7 @@ class FCompassADOPT(BaseOptimizer):
                     param_size += p.numel()                
 
                 if len(state) == 0:
-                    state['momentum'] = p.clone()
+                    state['momentum'] = torch.zeros_like(p)
                     state['fim'] = torch.ones_like(p)
                     state['previous_grad'] = -p.grad.to(dtype=p.dtype, copy=True).detach()
 
