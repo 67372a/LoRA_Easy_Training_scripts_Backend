@@ -1096,12 +1096,11 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
         eps: float = 1e-6,
         eps2: float = 1e-2,
         eps_floor: float = None,
-        adaptive_clip: float = 0.0,
+        adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         bias_correction_beta2: bool = False,
         gamma: float = 0.025,
-        mars_clip: float = 1.0,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1133,7 +1132,6 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
             'adaptive_clip_type':adaptive_clip_type,
             'bias_correction_beta2':bias_correction_beta2,
             'gamma':gamma,
-            'mars_clip':mars_clip,
         }
         super().__init__(params, defaults)
 
@@ -1234,7 +1232,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                 if len(state) == 0:
                     state['z'] = p.clone()
                     state['exp_avg_sq'] = torch.zeros_like(p)
-                    state['previous_grad'] = p.grad.to(dtype=p.dtype, copy=True).detach()
+                    state['previous_grad'] = -p.grad.to(dtype=p.dtype, copy=True).detach()
 
                 z, exp_avg_sq = state['z'], state['exp_avg_sq']
                 grad_diff = state['previous_grad']
@@ -1246,21 +1244,15 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                     grad_diff = grad_diff.to(torch.float32)
                     p_fp32 = p.clone().to(torch.float32)
 
-                if adaptive_clip > 0.0:
-                    # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
-
                 grad_diff.add_(grad)
 
                 # MARS Calculate cₜ (gradient with correction term)
                 correction = gamma * beta1 / (1 - beta1) * grad_diff
                 c_t = grad + correction
 
-                # MARS Gradient clipping
-                if group["mars_clip"] > 0:
-                    grad_norm = torch.norm(c_t)
-                    if grad_norm > group["mars_clip"]:
-                        c_t = c_t * group["mars_clip"] / grad_norm
+                if adaptive_clip > 0.0:
+                    # Apply Adaptive Gradient Clipping (AGC)
+                    c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -1562,5 +1554,847 @@ class FADOPTScheduleFree(BaseOptimizer):
                     copy_stochastic_(state["z"], z)
                     copy_stochastic_(state["fim"], fim)
                     copy_stochastic_(p, p_fp32)
+
+        return loss
+
+class FADOPTEMAMixScheduleFree(BaseOptimizer):
+    r"""Schedule-Free fisher ADOPT.
+    Arguments:
+        params (iterable):
+            Iterable of parameters to optimize or dicts defining
+            parameter groups.
+        lr (float):
+            Learning rate parameter (default 2.5e-3).
+        betas (float, float):
+            coefficients for momentum and exponential moving average squared (default: 0.9, 0.9999).
+        eps (float):
+            Term the denominator is minimally clamped to, to
+            improve numerical stability. (default: 1e-6).
+        eps2 (float):
+            Term to multiple the RMS of the grad to calculate adaptive eps. (default: 1e-2).
+        eps_floor (float):
+            Term to set a floor for the eps, to prevent NaNs. (default: None, disabling adaptive eps).
+        weight_decay (float):
+            Weight decay at y, i.e. a L2 penalty (default: 0.0).
+        weight_decouple (bool): 
+            the optimizer uses decoupled weight decay as in AdamW.
+        centralization (float):
+            Center model grad (default: 0.0).
+        adaptive_clip (float):
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+        adaptive_clip_eps (float):
+            The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
+            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+        adaptive_clip_type (string):
+            The type of clipping, can be unit or global. If done at the unit level can change
+            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
+            Valid values: global, unit (default: global).
+        bias_correction_beta2 (bool):
+            Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
+        r (float): 
+            use polynomial weighting in the average with power r.  (Default: 0.0)
+        weight_lr_power (float): 
+            during warmup, the weights in the average will be equal to lr raised to this power.
+            set to 0 for no weighting. (Default: 2,0)
+    """
+
+    def __init__(
+        self,
+        params: PARAMETERS,
+        lr: float = 2.5e-3,
+        betas: BETAS = (0.9, 0.9999, 0.9999),
+        weight_decay: float = 0.0,
+        weight_decouple: bool = False,
+        stable_weight_decay: bool = False,
+        r: float = 0.0,
+        weight_lr_power: float = 2.0,
+        warmup_steps: int = 0,
+        eps: float = 1e-6,
+        eps2: float = 1e-2,
+        eps_floor: float = None,
+        adaptive_clip: float = 0.0,
+        adaptive_clip_eps: float = 1e-3,
+        adaptive_clip_type: NORM_TYPE = 'layer',
+        fisher_clip: float = 1.0,
+        cautious: bool = True,
+        alpha: float = 2.0,
+        t_alpha_beta3: Optional[float] = None,
+        **kwargs,
+    ):
+        self.validate_learning_rate(lr)
+        self.validate_betas(betas)
+        self.validate_non_negative(weight_decay, 'weight_decay')
+        self.validate_non_negative(eps, 'eps')
+
+        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = 1e-30
+
+        defaults: DEFAULTS = {
+            'lr': lr,
+            'betas': betas,
+            'weight_decay': weight_decay,
+            'weight_decouple':weight_decouple,
+            'stable_weight_decay':stable_weight_decay,
+            'r': r,
+            'weight_lr_power': weight_lr_power,
+            'warmup_steps': warmup_steps,
+            'eps': eps,
+            'eps2': eps2,
+            'eps_floor':eps_floor,
+            'train_mode': True,
+            'weight_sum': 0.0,
+            'lr_max': -1.0,
+            'adaptive_clip':adaptive_clip,
+            'adaptive_clip_eps':adaptive_clip_eps,
+            'adaptive_clip_type':adaptive_clip_type,
+            'fisher_clip':fisher_clip,
+            'cautious':cautious,
+            'alpha':alpha,
+            't_alpha_beta3':t_alpha_beta3,
+        }
+        super().__init__(params, defaults)
+
+    def __str__(self) -> str:
+        return 'FADOPTEMAMixScheduleFree'
+
+    def eval(self):
+        for group in self.param_groups:
+            beta1, _, _ = group['betas']
+            if group['train_mode']:
+                for p in group['params']:
+                    state = self.state[p]
+                    if 'z' in state:
+                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                group['train_mode'] = False
+
+    def train(self):
+        for group in self.param_groups:
+            beta1, _, _ = group['betas']
+            if not group['train_mode']:
+                for p in group['params']:
+                    state = self.state[p]
+                    if 'z' in state:
+                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                group['train_mode'] = True
+
+    @torch.no_grad()
+    def reset(self):
+        for group in self.param_groups:
+            group['step'] = 0
+            group['fim_mean_sqrt'] = 0.0
+            for p in group['params']:
+                state = self.state[p]
+
+                state['z'] = p.clone()
+                state['fim'] = torch.ones_like(p)
+                state['exp_avg_slow'] = torch.zeros_like(p)
+
+    @staticmethod
+    def schedule_alpha(t_alpha_beta3: Optional[float], step: int, alpha: float) -> float:
+        if t_alpha_beta3 is None:
+            return alpha
+        return min(step * alpha / t_alpha_beta3, alpha)
+
+    @staticmethod
+    def schedule_beta3(t_alpha_beta3: Optional[float], step: int, beta1: float, beta3: float, eps: float) -> float:
+        if t_alpha_beta3 is None:
+            return beta3
+
+        # Add eps to prevent log 0
+        log_beta1, log_beta3 = math.log(beta1 + eps), math.log(beta3)
+
+        return min(
+            math.exp(
+                log_beta1 * log_beta3 / ((1.0 - step / t_alpha_beta3) * log_beta3 + (step / t_alpha_beta3) * log_beta1)
+            ),
+            beta3,
+        )
+
+    @torch.no_grad()
+    def step(self, closure: CLOSURE = None) -> LOSS:
+        loss: LOSS = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+                group['fim_mean_sqrt'] = 0.0
+
+            param_size: int = 0
+            fim_sum: float = 0.0
+
+            beta1, beta2, beta3 = group['betas']
+
+            lr: float = group['lr']
+
+            lr_max = group['lr_max'] = max(lr, group['lr_max'])
+
+            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
+            weight_sum = group['weight_sum'] = group['weight_sum'] + weight
+
+            checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
+
+            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
+            adopt_clip: float = (group['step']-1)**0.25
+
+            adaptive_clip = group["adaptive_clip"]
+            adaptive_clip_type = group["adaptive_clip_type"]
+            adaptive_clip_eps = group["adaptive_clip_eps"]
+            eps = group["eps"]
+            eps2 = group["eps2"]
+            eps_floor = group["eps_floor"]
+            fisher_clip = group["fisher_clip"]
+
+            alpha_t: float = self.schedule_alpha(group['t_alpha_beta3'], group['step'], group['alpha'])
+            beta3_t: float = self.schedule_beta3(group['t_alpha_beta3'], group['step'], beta1, beta3, 1e-8)
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad
+                if grad.is_sparse:
+                    raise NoSparseGradientError(str(self))
+
+                p_fp32 = p
+                state = self.state[p]
+
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    param_size += p.numel()                
+
+                if len(state) == 0:
+                    state['z'] = p.clone()
+                    state['fim'] = torch.ones_like(p)
+                    state['exp_avg_slow'] = torch.zeros_like(p)
+
+                z, fim, exp_avg_slow = state['z'], state['fim'], state['exp_avg_slow']
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
+                    z, fim, exp_avg_slow = z.to(torch.float32), fim.to(torch.float32), exp_avg_slow.to(torch.float32),
+                    p_fp32 = p.clone().to(torch.float32)
+
+                if adaptive_clip > 0.0:
+                    # Apply Adaptive Gradient Clipping (AGC)
+                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+                if eps_floor is not None and eps_floor < eps:
+                    rms_grad = grad.pow(2).mean().sqrt_()
+                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
+                else:
+                    curr_eps = eps
+
+                if group['step'] == 1:
+                    fim.addcmul_(grad, grad.conj())
+                else:
+                    fim_base = torch.clamp(fim.sqrt(), curr_eps)
+                    fim.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
+
+                    grad_nat = grad.div(fim_base)
+                    rms = grad_nat.pow(2).mean().sqrt_()
+                    divisor = max(fisher_clip, rms) / fisher_clip
+                    grad_nat.div_(divisor)
+                    grad_nat.clamp_(-adopt_clip, adopt_clip)
+
+                    exp_avg_slow.mul_(beta3_t).add_(grad_nat, alpha=1.0 - beta3_t)
+                    slow_ema_update = (alpha_t * exp_avg_slow)
+                    slow_ema_update.clamp_(-adopt_clip, adopt_clip)
+
+                    if group["cautious"]:
+                        # compute norm gradient
+                        mask = (slow_ema_update * grad_nat > 0).to(grad_nat.dtype)
+                        mask.div_(mask.mean().clamp_(min=1e-3))
+                        slow_ema_update.mul_(mask)
+
+                    full_update = grad_nat + slow_ema_update
+                    
+                    if group["weight_decay"] != 0:
+                        # Perform weight decay
+                        grad_weights = p_fp32.div(fim_base)
+
+                        rms = grad_weights.pow(2).mean().sqrt_()
+                        divisor = max(fisher_clip, rms) / fisher_clip
+                        grad_weights.div_(divisor)
+
+                        # Weight decay calculated at y
+                        if group["weight_decay"] != 0 and group['weight_decouple']:
+                            if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
+                                swd_scaling = 1.0 / group['fim_mean_sqrt']
+                            else:
+                                swd_scaling = 1.0
+
+                            p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
+                        elif group["weight_decay"] != 0:
+                            full_update.add_(grad_weights, alpha=group["weight_decay"])
+
+                    p_fp32.lerp_(z, weight=checkpoint)
+                    p_fp32.add_(full_update, alpha=adaptive_y_lr)
+
+                    z.sub_(full_update, alpha=lr)
+
+                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                        fim_sum += fim.sum()
+
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    group['exp_avg_mean_sqrt'] = math.sqrt(fim_sum / param_size)
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state["z"], z)
+                    copy_stochastic_(state["fim"], fim)
+                    copy_stochastic_(state["exp_avg_slow"], exp_avg_slow)
+                    copy_stochastic_(p, p_fp32)
+
+        return loss
+    
+class FADOPTNesterovScheduleFree(BaseOptimizer):
+    r"""Schedule-Free fisher ADOPT.
+    Arguments:
+        params (iterable):
+            Iterable of parameters to optimize or dicts defining
+            parameter groups.
+        lr (float):
+            Learning rate parameter (default 2.5e-3).
+        betas (float, float):
+            coefficients for momentum and exponential moving average squared (default: 0.9, 0.9999).
+        eps (float):
+            Term the denominator is minimally clamped to, to
+            improve numerical stability. (default: 1e-6).
+        eps2 (float):
+            Term to multiple the RMS of the grad to calculate adaptive eps. (default: 1e-2).
+        eps_floor (float):
+            Term to set a floor for the eps, to prevent NaNs. (default: None, disabling adaptive eps).
+        weight_decay (float):
+            Weight decay at y, i.e. a L2 penalty (default: 0.0).
+        weight_decouple (bool): 
+            the optimizer uses decoupled weight decay as in AdamW.
+        centralization (float):
+            Center model grad (default: 0.0).
+        adaptive_clip (float):
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+        adaptive_clip_eps (float):
+            The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
+            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+        adaptive_clip_type (string):
+            The type of clipping, can be unit or global. If done at the unit level can change
+            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
+            Valid values: global, unit (default: global).
+        bias_correction_beta2 (bool):
+            Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
+        r (float): 
+            use polynomial weighting in the average with power r.  (Default: 0.0)
+        weight_lr_power (float): 
+            during warmup, the weights in the average will be equal to lr raised to this power.
+            set to 0 for no weighting. (Default: 2,0)
+    """
+
+    def __init__(
+        self,
+        params: PARAMETERS,
+        lr: float = 2.5e-3,
+        betas: BETAS = (0.9, 0.92, 0.9999),
+        weight_decay: float = 0.0,
+        weight_decouple: bool = False,
+        stable_weight_decay: bool = False,
+        r: float = 0.0,
+        weight_lr_power: float = 2.0,
+        warmup_steps: int = 0,
+        eps: float = 1e-6,
+        eps2: float = 1e-2,
+        eps_floor: float = None,
+        adaptive_clip: float = 0.0,
+        adaptive_clip_eps: float = 1e-3,
+        adaptive_clip_type: NORM_TYPE = 'layer',
+        fisher_clip: float = 1.0,
+        cautious: bool = True,
+        **kwargs,
+    ):
+        self.validate_learning_rate(lr)
+        self.validate_betas(betas)
+        self.validate_non_negative(weight_decay, 'weight_decay')
+        self.validate_non_negative(eps, 'eps')
+
+        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = 1e-30
+
+        defaults: DEFAULTS = {
+            'lr': lr,
+            'betas': betas,
+            'weight_decay': weight_decay,
+            'weight_decouple':weight_decouple,
+            'stable_weight_decay':stable_weight_decay,
+            'r': r,
+            'weight_lr_power': weight_lr_power,
+            'warmup_steps': warmup_steps,
+            'eps': eps,
+            'eps2': eps2,
+            'eps_floor':eps_floor,
+            'train_mode': True,
+            'weight_sum': 0.0,
+            'lr_max': -1.0,
+            'adaptive_clip':adaptive_clip,
+            'adaptive_clip_eps':adaptive_clip_eps,
+            'adaptive_clip_type':adaptive_clip_type,
+            'fisher_clip':fisher_clip,
+            'cautious':cautious,
+        }
+        super().__init__(params, defaults)
+
+    def __str__(self) -> str:
+        return 'FADOPTNesterovScheduleFree'
+
+    def eval(self):
+        for group in self.param_groups:
+            beta1, _, _ = group['betas']
+            if group['train_mode']:
+                for p in group['params']:
+                    state = self.state[p]
+                    if 'z' in state:
+                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                group['train_mode'] = False
+
+    def train(self):
+        for group in self.param_groups:
+            beta1, _, _ = group['betas']
+            if not group['train_mode']:
+                for p in group['params']:
+                    state = self.state[p]
+                    if 'z' in state:
+                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                group['train_mode'] = True
+
+    @torch.no_grad()
+    def reset(self):
+        for group in self.param_groups:
+            group['step'] = 0
+            group['fim_mean_sqrt'] = 0.0
+            for p in group['params']:
+                state = self.state[p]
+
+                state['z'] = p.clone()
+                state['fim'] = torch.ones_like(p)
+                state['exp_avg_diff'] = torch.zeros_like(p)
+                state['previous_grad'] = torch.zeros_like(p)
+
+    @torch.no_grad()
+    def step(self, closure: CLOSURE = None) -> LOSS:
+        loss: LOSS = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+                group['fim_mean_sqrt'] = 0.0
+
+            param_size: int = 0
+            fim_sum: float = 0.0
+
+            beta1, beta2, beta3 = group['betas']
+
+            lr: float = group['lr']
+
+            lr_max = group['lr_max'] = max(lr, group['lr_max'])
+
+            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
+            weight_sum = group['weight_sum'] = group['weight_sum'] + weight
+
+            checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
+
+            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
+            adopt_clip: float = (group['step']-1)**0.25
+
+            adaptive_clip = group["adaptive_clip"]
+            adaptive_clip_type = group["adaptive_clip_type"]
+            adaptive_clip_eps = group["adaptive_clip_eps"]
+            eps = group["eps"]
+            eps2 = group["eps2"]
+            eps_floor = group["eps_floor"]
+            fisher_clip = group["fisher_clip"]
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad
+                if grad.is_sparse:
+                    raise NoSparseGradientError(str(self))
+
+                p_fp32 = p
+                state = self.state[p]
+
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    param_size += p.numel()                
+
+                if len(state) == 0:
+                    state['z'] = p.clone()
+                    state['fim'] = torch.ones_like(p)
+                    state['exp_avg_diff'] = torch.zeros_like(p)
+                    state['previous_grad'] = p.grad.to(dtype=p.dtype, copy=True).detach()
+
+                z, fim, exp_avg_diff, grad_diff = state['z'], state['fim'], state['exp_avg_diff'], state['previous_grad']
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
+                    z, fim, exp_avg_slow = z.to(torch.float32), fim.to(torch.float32), exp_avg_slow.to(torch.float32),
+                    p_fp32 = p.clone().to(torch.float32)
+
+                if adaptive_clip > 0.0:
+                    # Apply Adaptive Gradient Clipping (AGC)
+                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+                if eps_floor is not None and eps_floor < eps:
+                    rms_grad = grad.pow(2).mean().sqrt_()
+                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
+                else:
+                    curr_eps = eps
+
+                grad_diff.add_(grad)
+
+                if group['step'] == 1:
+                    grad_diff.mul_(beta2).add_(grad)
+                    fim.addcmul_(grad_diff, grad_diff.conj())
+                else:
+                    fim_base = torch.clamp(fim.sqrt(), curr_eps)
+                    exp_avg_diff.mul_(beta2).add_(grad_diff, alpha=1.0 - beta2)
+
+                    grad_diff.mul_(beta2).add_(grad)
+                    fim.mul_(beta3).addcmul_(grad_diff, grad_diff.conj(), value=1 - beta3)
+
+                    grad_nat = grad.div(fim_base)
+                    rms = grad_nat.pow(2).mean().sqrt_()
+                    divisor = max(fisher_clip, rms) / fisher_clip
+                    grad_nat.div_(divisor)
+                    grad_nat.clamp_(-adopt_clip, adopt_clip)
+
+                    ema_diff_update = exp_avg_diff.clamp(-adopt_clip, adopt_clip)
+
+                    if group["cautious"]:
+                        # compute norm gradient
+                        mask = (ema_diff_update * grad_nat > 0).to(grad_nat.dtype)
+                        mask.div_(mask.mean().clamp_(min=1e-3))
+                        ema_diff_update.mul_(mask)
+
+                    full_update = grad_nat + ema_diff_update
+                    
+                    if group["weight_decay"] != 0:
+                        # Perform weight decay
+                        grad_weights = p_fp32.div(fim_base)
+
+                        rms = grad_weights.pow(2).mean().sqrt_()
+                        divisor = max(fisher_clip, rms) / fisher_clip
+                        grad_weights.div_(divisor)
+
+                        # Weight decay calculated at y
+                        if group["weight_decay"] != 0 and group['weight_decouple']:
+                            if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
+                                swd_scaling = 1.0 / group['fim_mean_sqrt']
+                            else:
+                                swd_scaling = 1.0
+
+                            p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
+                        elif group["weight_decay"] != 0:
+                            full_update.add_(grad_weights, alpha=group["weight_decay"])
+
+                    p_fp32.lerp_(z, weight=checkpoint)
+                    p_fp32.add_(full_update, alpha=adaptive_y_lr)
+
+                    z.sub_(full_update, alpha=lr)
+
+                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                        fim_sum += fim.sum()
+
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    group['exp_avg_mean_sqrt'] = math.sqrt(fim_sum / param_size)
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state["z"], z)
+                    copy_stochastic_(state["fim"], fim)
+                    copy_stochastic_(state['exp_avg_diff'], exp_avg_diff)
+                    copy_stochastic_(state['previous_grad'], -grad)
+                    copy_stochastic_(p, p_fp32)
+                else:
+                    state['previous_grad'].copy_(-grad)
+
+        return loss
+    
+class FADOPTMARSScheduleFree(BaseOptimizer):
+    r"""Schedule-Free fisher ADOPT.
+    Arguments:
+        params (iterable):
+            Iterable of parameters to optimize or dicts defining
+            parameter groups.
+        lr (float):
+            Learning rate parameter (default 2.5e-3).
+        betas (float, float):
+            coefficients for momentum and exponential moving average squared (default: 0.9, 0.9999).
+        eps (float):
+            Term the denominator is minimally clamped to, to
+            improve numerical stability. (default: 1e-6).
+        eps2 (float):
+            Term to multiple the RMS of the grad to calculate adaptive eps. (default: 1e-2).
+        eps_floor (float):
+            Term to set a floor for the eps, to prevent NaNs. (default: None, disabling adaptive eps).
+        weight_decay (float):
+            Weight decay at y, i.e. a L2 penalty (default: 0.0).
+        weight_decouple (bool): 
+            the optimizer uses decoupled weight decay as in AdamW.
+        centralization (float):
+            Center model grad (default: 0.0).
+        adaptive_clip (float):
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+        adaptive_clip_eps (float):
+            The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
+            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+        adaptive_clip_type (string):
+            The type of clipping, can be unit or global. If done at the unit level can change
+            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
+            Valid values: global, unit (default: global).
+        bias_correction_beta2 (bool):
+            Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
+        r (float): 
+            use polynomial weighting in the average with power r.  (Default: 0.0)
+        weight_lr_power (float): 
+            during warmup, the weights in the average will be equal to lr raised to this power.
+            set to 0 for no weighting. (Default: 2,0)
+    """
+
+    def __init__(
+        self,
+        params: PARAMETERS,
+        lr: float = 2.5e-3,
+        betas: BETAS = (0.9, 0.9999),
+        weight_decay: float = 0.0,
+        weight_decouple: bool = False,
+        stable_weight_decay: bool = False,
+        r: float = 0.0,
+        weight_lr_power: float = 2.0,
+        warmup_steps: int = 0,
+        eps: float = 1e-6,
+        eps2: float = 1e-2,
+        eps_floor: float = None,
+        adaptive_clip: float = 1.0,
+        adaptive_clip_eps: float = 1e-3,
+        adaptive_clip_type: NORM_TYPE = 'layer',
+        fisher_clip: float = 1.0,
+        gamma: float = 0.025,
+        **kwargs,
+    ):
+        self.validate_learning_rate(lr)
+        self.validate_betas(betas)
+        self.validate_non_negative(weight_decay, 'weight_decay')
+        self.validate_non_negative(eps, 'eps')
+
+        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = 1e-30
+
+        defaults: DEFAULTS = {
+            'lr': lr,
+            'betas': betas,
+            'weight_decay': weight_decay,
+            'weight_decouple':weight_decouple,
+            'stable_weight_decay':stable_weight_decay,
+            'r': r,
+            'weight_lr_power': weight_lr_power,
+            'warmup_steps': warmup_steps,
+            'eps': eps,
+            'eps2': eps2,
+            'eps_floor':eps_floor,
+            'train_mode': True,
+            'weight_sum': 0.0,
+            'lr_max': -1.0,
+            'adaptive_clip':adaptive_clip,
+            'adaptive_clip_eps':adaptive_clip_eps,
+            'adaptive_clip_type':adaptive_clip_type,
+            'fisher_clip':fisher_clip,
+            'gamma': gamma,
+        }
+        super().__init__(params, defaults)
+
+    def __str__(self) -> str:
+        return 'FADOPTMARSScheduleFree'
+
+    def eval(self):
+        for group in self.param_groups:
+            beta1, _ = group['betas']
+            if group['train_mode']:
+                for p in group['params']:
+                    state = self.state[p]
+                    if 'z' in state:
+                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                group['train_mode'] = False
+
+    def train(self):
+        for group in self.param_groups:
+            beta1, _ = group['betas']
+            if not group['train_mode']:
+                for p in group['params']:
+                    state = self.state[p]
+                    if 'z' in state:
+                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                group['train_mode'] = True
+
+    @torch.no_grad()
+    def reset(self):
+        for group in self.param_groups:
+            group['step'] = 0
+            group['fim_mean_sqrt'] = 0.0
+            for p in group['params']:
+                state = self.state[p]
+
+                state['z'] = p.clone()
+                state['fim'] = torch.ones_like(p)
+                state['previous_grad'] = torch.zeros_like(p)
+
+    @torch.no_grad()
+    def step(self, closure: CLOSURE = None) -> LOSS:
+        loss: LOSS = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+                group['fim_mean_sqrt'] = 0.0
+
+            param_size: int = 0
+            fim_sum: float = 0.0
+
+            beta1, beta2 = group['betas']
+
+            lr: float = group['lr']
+
+            lr_max = group['lr_max'] = max(lr, group['lr_max'])
+
+            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
+            weight_sum = group['weight_sum'] = group['weight_sum'] + weight
+
+            checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
+
+            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
+            adopt_clip: float = (group['step']-1)**0.25
+
+            adaptive_clip = group["adaptive_clip"]
+            adaptive_clip_type = group["adaptive_clip_type"]
+            adaptive_clip_eps = group["adaptive_clip_eps"]
+            eps = group["eps"]
+            eps2 = group["eps2"]
+            eps_floor = group["eps_floor"]
+            fisher_clip = group["fisher_clip"]
+            gamma = group["gamma"]
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad
+                if grad.is_sparse:
+                    raise NoSparseGradientError(str(self))
+
+                p_fp32 = p
+                state = self.state[p]
+
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    param_size += p.numel()                
+
+                if len(state) == 0:
+                    state['z'] = p.clone()
+                    state['fim'] = torch.ones_like(p)
+                    state['previous_grad'] = -p.grad.to(dtype=p.dtype, copy=True).detach()
+
+                z, fim, grad_diff = state['z'], state['fim'], state['previous_grad']
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
+                    z, fim, grad_diff = z.to(torch.float32), fim.to(torch.float32), grad_diff.to(torch.float32)
+                    p_fp32 = p.clone().to(torch.float32)
+
+                grad_diff.add_(grad)
+
+                # MARS Calculate cₜ (gradient with correction term)
+                correction = gamma * beta1 / (1 - beta1) * grad_diff
+                c_t = grad + correction
+
+                if adaptive_clip > 0.0:
+                    # Apply Adaptive Gradient Clipping (AGC)
+                    c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+                if eps_floor is not None and eps_floor < eps:
+                    rms_grad = c_t.pow(2).mean().sqrt_()
+                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
+                else:
+                    curr_eps = eps
+
+                if group['step'] == 1:
+                    fim.addcmul_(c_t, c_t.conj()).clamp_(-adopt_clip, adopt_clip)
+                else:
+                    fim_base = torch.clamp(fim.sqrt(), curr_eps)
+                    fim.mul_(beta2).addcmul_(c_t, c_t.conj(), value=1 - beta2).clamp_(-adopt_clip, adopt_clip)
+
+                    grad_nat = c_t.div(fim_base)
+                    rms = grad_nat.pow(2).mean().sqrt_()
+                    divisor = max(fisher_clip, rms) / fisher_clip
+                    grad_nat.div_(divisor)
+
+                    update = grad_nat
+                    
+                    if group["weight_decay"] != 0:
+                        # Perform weight decay
+                        grad_weights = p_fp32.div(fim_base)
+
+                        rms = grad_weights.pow(2).mean().sqrt_()
+                        divisor = max(fisher_clip, rms) / fisher_clip
+                        grad_weights.div_(divisor)
+
+                        # Weight decay calculated at y
+                        if group["weight_decay"] != 0 and group['weight_decouple']:
+                            if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
+                                swd_scaling = 1.0 / group['fim_mean_sqrt']
+                            else:
+                                swd_scaling = 1.0
+
+                            p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
+                        elif group["weight_decay"] != 0:
+                            update.add_(grad_nat, alpha=group["weight_decay"])
+
+                    p_fp32.lerp_(z, weight=checkpoint)
+                    p_fp32.add_(update, alpha=adaptive_y_lr)
+
+                    z.sub_(update, alpha=lr)
+
+                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                        fim_sum += fim.sum()
+
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    group['exp_avg_mean_sqrt'] = math.sqrt(fim_sum / param_size)
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state['z'], z)
+                    copy_stochastic_(state['fim'], fim)
+                    copy_stochastic_(state['previous_grad'], -grad)
+                    copy_stochastic_(p, p_fp32)
+                else:
+                    state['previous_grad'].copy_(-grad)
 
         return loss
