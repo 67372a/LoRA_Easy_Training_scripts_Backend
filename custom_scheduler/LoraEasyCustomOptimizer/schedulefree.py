@@ -958,16 +958,14 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
                     state['z'] = p.clone()
                     state['exp_avg_sq'] = torch.zeros_like(p)
                     state['exp_avg_diff'] = torch.zeros_like(p)
-                    state['previous_grad'] = p.grad.to(dtype=p.dtype, copy=True).detach()
+                    state['previous_grad'] = -p.grad.to(dtype=p.dtype, copy=True).detach()
 
-                z, exp_avg_sq, exp_avg_diff = state['z'], state['exp_avg_sq'], state['exp_avg_diff']
-                grad_diff = state['previous_grad']
+                z, exp_avg_sq, exp_avg_diff, grad_diff = state['z'], state['exp_avg_sq'], state['exp_avg_diff'], state['previous_grad']
 
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
-                    z, exp_avg_sq, exp_avg_diff = z.to(torch.float32), exp_avg_sq.to(torch.float32), exp_avg_diff.to(torch.float32)
-                    grad_diff = grad_diff.to(torch.float32)
+                    z, exp_avg_sq, exp_avg_diff, grad_diff = z.to(torch.float32), exp_avg_sq.to(torch.float32), exp_avg_diff.to(torch.float32), grad_diff.to(torch.float32)
                     p_fp32 = p.clone().to(torch.float32)
 
                 if adaptive_clip > 0.0:
@@ -2042,14 +2040,14 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
                     state['z'] = p.clone()
                     state['fim'] = torch.ones_like(p)
                     state['exp_avg_diff'] = torch.zeros_like(p)
-                    state['previous_grad'] = p.grad.to(dtype=p.dtype, copy=True).detach()
+                    state['previous_grad'] = -p.grad.to(dtype=p.dtype, copy=True).detach()
 
                 z, fim, exp_avg_diff, grad_diff = state['z'], state['fim'], state['exp_avg_diff'], state['previous_grad']
 
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
-                    z, fim, exp_avg_slow = z.to(torch.float32), fim.to(torch.float32), exp_avg_slow.to(torch.float32),
+                    z, fim, exp_avg_slow, grad_diff = z.to(torch.float32), fim.to(torch.float32), exp_avg_slow.to(torch.float32), grad_diff.to(torch.float32)
                     p_fp32 = p.clone().to(torch.float32)
 
                 if adaptive_clip > 0.0:
