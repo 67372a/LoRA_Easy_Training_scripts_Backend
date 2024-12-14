@@ -97,8 +97,20 @@ class ScheduleFreeWrapper(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
                         # Set p to x
-                        p.lerp_(end=state['z'], weight=1-1/self.sf_momentum)
+                        p_fp32.lerp_(end=z, weight=1.0 - 1.0 / self.sf_momentum)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
         self.train_mode = False
 
     @torch.no_grad()
@@ -108,8 +120,20 @@ class ScheduleFreeWrapper(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
                         # Set p to y
-                        p.lerp_(end=state['z'], weight=1-self.sf_momentum)
+                        p_fp32.lerp_(end=z, weight=1.0 - self.sf_momentum)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
         self.train_mode = True
 
     @staticmethod
@@ -328,7 +352,20 @@ class ADOPTScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to x
+                        p_fp32.lerp_(end=z, weight=1.0 - 1.0 / beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
                 group['train_mode'] = False
 
     def train(self):
@@ -338,7 +375,21 @@ class ADOPTScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to y
+                        p_fp32.lerp_(end=z, weight=1.0 - beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
+
                 group['train_mode'] = True
 
     @torch.no_grad()
@@ -581,7 +632,20 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to x
+                        p_fp32.lerp_(end=z, weight=1.0 - 1.0 / beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
                 group['train_mode'] = False
 
     def train(self):
@@ -591,7 +655,21 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to y
+                        p_fp32.lerp_(end=z, weight=1.0 - beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
+
                 group['train_mode'] = True
 
     @torch.no_grad()
@@ -870,7 +948,20 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to x
+                        p_fp32.lerp_(end=z, weight=1.0 - 1.0 / beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
                 group['train_mode'] = False
 
     def train(self):
@@ -880,7 +971,21 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to y
+                        p_fp32.lerp_(end=z, weight=1.0 - beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
+
                 group['train_mode'] = True
 
     @torch.no_grad()
@@ -1143,7 +1248,20 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to x
+                        p_fp32.lerp_(end=z, weight=1.0 - 1.0 / beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
                 group['train_mode'] = False
 
     def train(self):
@@ -1153,7 +1271,21 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to y
+                        p_fp32.lerp_(end=z, weight=1.0 - beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
+
                 group['train_mode'] = True
 
     @torch.no_grad()
@@ -1403,7 +1535,20 @@ class FADOPTScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to x
+                        p_fp32.lerp_(end=z, weight=1.0 - 1.0 / beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
                 group['train_mode'] = False
 
     def train(self):
@@ -1413,7 +1558,21 @@ class FADOPTScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to y
+                        p_fp32.lerp_(end=z, weight=1.0 - beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
+
                 group['train_mode'] = True
 
     @torch.no_grad()
@@ -1664,7 +1823,20 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to x
+                        p_fp32.lerp_(end=z, weight=1.0 - 1.0 / beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
                 group['train_mode'] = False
 
     def train(self):
@@ -1674,7 +1846,21 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to y
+                        p_fp32.lerp_(end=z, weight=1.0 - beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
+
                 group['train_mode'] = True
 
     @torch.no_grad()
@@ -1957,7 +2143,20 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to x
+                        p_fp32.lerp_(end=z, weight=1.0 - 1.0 / beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
                 group['train_mode'] = False
 
     def train(self):
@@ -1967,7 +2166,21 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to y
+                        p_fp32.lerp_(end=z, weight=1.0 - beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
+
                 group['train_mode'] = True
 
     @torch.no_grad()
@@ -2235,7 +2448,20 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to x
+                        p_fp32.lerp_(end=z, weight=1.0 - 1.0 / beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
                 group['train_mode'] = False
 
     def train(self):
@@ -2245,7 +2471,21 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                        p_fp32 = p
+                        z = state['z'] 
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+                            z = z.to(dtype=torch.float32)
+
+                        # Set p to y
+                        p_fp32.lerp_(end=z, weight=1.0 - beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
+
                 group['train_mode'] = True
 
     @torch.no_grad()
