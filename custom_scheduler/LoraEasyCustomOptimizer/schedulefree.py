@@ -2235,7 +2235,20 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - 1.0 / beta1)
+                        p_fp32 = p
+
+                        z = state['z']
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            z = z.to(torch.float32)
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+
+                        p_fp32.data.lerp_(end=z, weight=1.0 - 1.0 / beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
                 group['train_mode'] = False
 
     def train(self):
@@ -2245,7 +2258,20 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
-                        p.data.lerp_(end=state['z'], weight=1.0 - beta1)
+                        p_fp32 = p
+
+                        z = state['z']
+
+                        # unpack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            z = z.to(torch.float32)
+                            p_fp32 = p.to(dtype=torch.float32, copy=True)
+
+                        p_fp32.data.lerp_(end=z, weight=1.0 - beta1)
+
+                        # pack
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(p, p_fp32)
                 group['train_mode'] = True
 
     @torch.no_grad()
@@ -2325,7 +2351,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
                     z, fim, grad_diff = z.to(torch.float32), fim.to(torch.float32), grad_diff.to(torch.float32)
-                    p_fp32 = p.clone().to(torch.float32)
+                    p_fp32 = p.to(dtype=torch.float32, copy=True)
 
                 grad_diff.add_(grad)
 
@@ -2358,14 +2384,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                     update = grad_nat
                     
                     if group["weight_decay"] != 0:
-                        # Perform weight decay
-                        grad_weights = p_fp32.div(fim_base)
-
-                        if group['fisher_clip'] > 0:
-                            rms = grad_weights.pow(2).mean().sqrt_()
-                            divisor = max(fisher_clip, rms) / fisher_clip
-                            grad_weights.div_(divisor)
-
                         # Weight decay calculated at y
                         if group["weight_decay"] != 0 and group['weight_decouple']:
                             if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
@@ -2375,6 +2393,14 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
 
                             p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
                         elif group["weight_decay"] != 0:
+                            # Perform weight decay
+                            grad_weights = p_fp32.div(fim_base)
+
+                            if group['fisher_clip'] > 0:
+                                rms = grad_weights.pow(2).mean().sqrt_()
+                                divisor = max(fisher_clip, rms) / fisher_clip
+                                grad_weights.div_(divisor)
+
                             update.add_(grad_weights, alpha=group["weight_decay"])
 
                     p_fp32.lerp_(z, weight=checkpoint)
