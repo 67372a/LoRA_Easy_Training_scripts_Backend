@@ -411,7 +411,7 @@ class FCompassADOPT(BaseOptimizer):
                         fim_sum += fim.sum()
 
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['exp_avg_mean_sqrt'] = math.sqrt(fim_sum / param_size)
+                    group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
