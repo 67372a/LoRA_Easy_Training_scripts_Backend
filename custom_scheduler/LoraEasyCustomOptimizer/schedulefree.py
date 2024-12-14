@@ -1667,28 +1667,20 @@ class FADOPTScheduleFree(BaseOptimizer):
                     curr_eps = eps
 
                 if group['step'] == 1:
-                    fim.addcmul_(grad, grad.conj())
+                    fim.addcmul_(grad, grad.conj()).clamp_(-adopt_clip, adopt_clip)
                 else:
-                    fim_base = torch.clamp(fim.sqrt(), curr_eps)
+                    fim_base = torch.clamp(fim.sqrt(), curr_eps).clamp_(-adopt_clip, adopt_clip)
 
                     grad_nat = grad.div(fim_base)
                     rms = grad_nat.pow(2).mean().sqrt_()
                     divisor = max(fisher_clip, rms) / fisher_clip
                     grad_nat.div_(divisor)
-                    grad_nat.clamp_(-adopt_clip, adopt_clip)
 
                     fim.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
                     update = grad_nat
                     
                     if group["weight_decay"] != 0:
-                        # Perform weight decay
-                        grad_weights = p_fp32.div(fim_base)
-
-                        rms = grad_weights.pow(2).mean().sqrt_()
-                        divisor = max(fisher_clip, rms) / fisher_clip
-                        grad_weights.div_(divisor)
-
                         # Weight decay calculated at y
                         if group["weight_decay"] != 0 and group['weight_decouple']:
                             if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
@@ -1698,6 +1690,13 @@ class FADOPTScheduleFree(BaseOptimizer):
 
                             p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
                         elif group["weight_decay"] != 0:
+                            # Perform weight decay
+                            grad_weights = p_fp32.div(fim_base)
+
+                            rms = grad_weights.pow(2).mean().sqrt_()
+                            divisor = max(fisher_clip, rms) / fisher_clip
+                            grad_weights.div_(divisor)
+
                             update.add_(grad_weights, alpha=group["weight_decay"])
 
                     p_fp32.lerp_(z, weight=checkpoint)
