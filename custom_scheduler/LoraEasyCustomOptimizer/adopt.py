@@ -559,7 +559,7 @@ class FADOPTMARS(BaseOptimizer):
 
                     update = momentum.clone()
 
-                    # Weight decay calculated at y
+                    # Perform weight decay
                     if group["weight_decay"] != 0 and group['weight_decouple']:
                         if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
                             swd_scaling = 1.0 / group['fim_mean_sqrt']
@@ -568,7 +568,6 @@ class FADOPTMARS(BaseOptimizer):
 
                         p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
                     elif group["weight_decay"] != 0:
-                        # Perform weight decay
                         grad_weights = p_fp32.div(fim_base)
 
                         rms = grad_weights.pow(2).mean().sqrt_()

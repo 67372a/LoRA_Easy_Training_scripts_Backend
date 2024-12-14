@@ -1680,24 +1680,22 @@ class FADOPTScheduleFree(BaseOptimizer):
 
                     update = grad_nat
                     
-                    if group["weight_decay"] != 0:
-                        # Weight decay calculated at y
-                        if group["weight_decay"] != 0 and group['weight_decouple']:
-                            if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
-                                swd_scaling = 1.0 / group['fim_mean_sqrt']
-                            else:
-                                swd_scaling = 1.0
+                    # Perform weight decay
+                    if group["weight_decay"] != 0 and group['weight_decouple']:
+                        if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
+                            swd_scaling = 1.0 / group['fim_mean_sqrt']
+                        else:
+                            swd_scaling = 1.0
 
-                            p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
-                        elif group["weight_decay"] != 0:
-                            # Perform weight decay
-                            grad_weights = p_fp32.div(fim_base)
+                        p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
+                    elif group["weight_decay"] != 0:
+                        grad_weights = p_fp32.div(fim_base)
 
-                            rms = grad_weights.pow(2).mean().sqrt_()
-                            divisor = max(fisher_clip, rms) / fisher_clip
-                            grad_weights.div_(divisor)
+                        rms = grad_weights.pow(2).mean().sqrt_()
+                        divisor = max(fisher_clip, rms) / fisher_clip
+                        grad_weights.div_(divisor)
 
-                            update.add_(grad_weights, alpha=group["weight_decay"])
+                        update.add_(grad_weights, alpha=group["weight_decay"])
 
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(update, alpha=adaptive_y_lr)
@@ -2000,31 +1998,29 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
                         mask.div_(mask.mean().clamp_(min=1e-3))
                         slow_ema_update.mul_(mask)
 
-                    full_update = grad_nat + slow_ema_update
+                    update = grad_nat + slow_ema_update
                     
-                    if group["weight_decay"] != 0:
-                        # Perform weight decay
+                    # Perform weight decay
+                    if group["weight_decay"] != 0 and group['weight_decouple']:
+                        if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
+                            swd_scaling = 1.0 / group['fim_mean_sqrt']
+                        else:
+                            swd_scaling = 1.0
+
+                        p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
+                    elif group["weight_decay"] != 0:
                         grad_weights = p_fp32.div(fim_base)
 
                         rms = grad_weights.pow(2).mean().sqrt_()
                         divisor = max(fisher_clip, rms) / fisher_clip
                         grad_weights.div_(divisor)
 
-                        # Weight decay calculated at y
-                        if group["weight_decay"] != 0 and group['weight_decouple']:
-                            if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
-                                swd_scaling = 1.0 / group['fim_mean_sqrt']
-                            else:
-                                swd_scaling = 1.0
-
-                            p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
-                        elif group["weight_decay"] != 0:
-                            full_update.add_(grad_weights, alpha=group["weight_decay"])
+                        update.add_(grad_weights, alpha=group["weight_decay"])
 
                     p_fp32.lerp_(z, weight=checkpoint)
-                    p_fp32.add_(full_update, alpha=adaptive_y_lr)
+                    p_fp32.add_(update, alpha=adaptive_y_lr)
 
-                    z.sub_(full_update, alpha=lr)
+                    z.sub_(update, alpha=lr)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         fim_sum += fim.sum()
@@ -2302,31 +2298,29 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
                         mask.div_(mask.mean().clamp_(min=1e-3))
                         ema_diff_update.mul_(mask)
 
-                    full_update = grad_nat + ema_diff_update
+                    update = grad_nat + ema_diff_update
                     
-                    if group["weight_decay"] != 0:
-                        # Perform weight decay
+                    # Perform weight decay
+                    if group["weight_decay"] != 0 and group['weight_decouple']:
+                        if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
+                            swd_scaling = 1.0 / group['fim_mean_sqrt']
+                        else:
+                            swd_scaling = 1.0
+
+                        p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
+                    elif group["weight_decay"] != 0:
                         grad_weights = p_fp32.div(fim_base)
 
                         rms = grad_weights.pow(2).mean().sqrt_()
                         divisor = max(fisher_clip, rms) / fisher_clip
                         grad_weights.div_(divisor)
 
-                        # Weight decay calculated at y
-                        if group["weight_decay"] != 0 and group['weight_decouple']:
-                            if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
-                                swd_scaling = 1.0 / group['fim_mean_sqrt']
-                            else:
-                                swd_scaling = 1.0
-
-                            p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
-                        elif group["weight_decay"] != 0:
-                            full_update.add_(grad_weights, alpha=group["weight_decay"])
+                        update.add_(grad_weights, alpha=group["weight_decay"])
 
                     p_fp32.lerp_(z, weight=checkpoint)
-                    p_fp32.add_(full_update, alpha=adaptive_y_lr)
+                    p_fp32.add_(update, alpha=adaptive_y_lr)
 
-                    z.sub_(full_update, alpha=lr)
+                    z.sub_(update, alpha=lr)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         fim_sum += fim.sum()
@@ -2600,24 +2594,22 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
 
                     update = grad_nat
                     
-                    if group["weight_decay"] != 0:
-                        # Weight decay calculated at y
-                        if group["weight_decay"] != 0 and group['weight_decouple']:
-                            if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
-                                swd_scaling = 1.0 / group['fim_mean_sqrt']
-                            else:
-                                swd_scaling = 1.0
+                    # Perform weight decay
+                    if group["weight_decay"] != 0 and group['weight_decouple']:
+                        if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
+                            swd_scaling = 1.0 / group['fim_mean_sqrt']
+                        else:
+                            swd_scaling = 1.0
 
-                            p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
-                        elif group["weight_decay"] != 0:
-                            # Perform weight decay
-                            grad_weights = p_fp32.div(fim_base)
+                        p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
+                    elif group["weight_decay"] != 0:
+                        grad_weights = p_fp32.div(fim_base)
 
-                            rms = grad_weights.pow(2).mean().sqrt_()
-                            divisor = max(fisher_clip, rms) / fisher_clip
-                            grad_weights.div_(divisor)
+                        rms = grad_weights.pow(2).mean().sqrt_()
+                        divisor = max(fisher_clip, rms) / fisher_clip
+                        grad_weights.div_(divisor)
 
-                            update.add_(grad_weights, alpha=group["weight_decay"])
+                        update.add_(grad_weights, alpha=group["weight_decay"])
 
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(update, alpha=adaptive_y_lr)
