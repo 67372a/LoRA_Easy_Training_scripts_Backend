@@ -219,6 +219,8 @@ class FCompassADOPT(BaseOptimizer):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
             the optimizer uses decoupled weight decay as in AdamW. (default: False)
+        stable_weight_decay (bool): 
+            Requires weight_decouple be True. Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
         adaptive_clip (float):
             Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
         adaptive_clip_eps (float):
@@ -231,6 +233,8 @@ class FCompassADOPT(BaseOptimizer):
             Valid values: layer, unit (default: layer).
         cautious (bool)
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+        fisher_clip (float):
+            Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
     """
 
     def __init__(
@@ -249,7 +253,6 @@ class FCompassADOPT(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
-        gamma: float = 0.025,
         cautious: bool = True,
         **kwargs,
     ):
@@ -276,7 +279,6 @@ class FCompassADOPT(BaseOptimizer):
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
             'fisher_clip':fisher_clip,
-            'gamma': gamma,
             'cautious': cautious,
         }
         super().__init__(params, defaults)

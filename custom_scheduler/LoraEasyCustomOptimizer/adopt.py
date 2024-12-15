@@ -172,8 +172,10 @@ class ADOPTMARS(BaseOptimizer):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
             the optimizer uses decoupled weight decay as in AdamW. (default: False)
+        stable_weight_decay (bool): 
+            Requires weight_decouple be True. Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
         adaptive_clip (float):
-            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+            Adaptive clip value to apply to the MARS corrected gradient - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
@@ -390,8 +392,10 @@ class FADOPTMARS(BaseOptimizer):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
             the optimizer uses decoupled weight decay as in AdamW. (default: False)
+        stable_weight_decay (bool): 
+            Requires weight_decouple be True. Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
         adaptive_clip (float):
-            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+            Adaptive clip value to apply to the MARS corrected gradient - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
@@ -402,6 +406,8 @@ class FADOPTMARS(BaseOptimizer):
             Valid values: layer, unit (default: layer).
         cautious (bool)
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+        fisher_clip (float):
+            Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
     """
 
     def __init__(
