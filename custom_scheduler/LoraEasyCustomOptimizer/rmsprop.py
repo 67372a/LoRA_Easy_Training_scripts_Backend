@@ -431,7 +431,7 @@ class RMSPropADOPT(BaseOptimizer):
             param_size: int = 0
             exp_avg_sq_sum: float = 0.0
 
-            beta1, beta2 = group['betas']
+            beta = group['betas']
 
             lr: float = group['lr']
 
@@ -443,7 +443,6 @@ class RMSPropADOPT(BaseOptimizer):
             eps = group["eps"]
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
-            amp_fac = group["amp_fac"]
             use_muon_pp = group["use_muon_pp"]
             muon_location = group['muon_location']
 
@@ -512,13 +511,13 @@ class RMSPropADOPT(BaseOptimizer):
 
                 if group['step'] == 1:
                     if group['factor_second_moment']:
-                        exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2)
+                        exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta)
                     else:
                         #Special handling for ADOPT first step
                         exp_avg_sq.addcmul_(grad, grad)
                 else:
                     de_nom = get_denom(exp_avg_sq).clamp_(curr_eps)
-                    exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2)
+                    exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta)
 
                     normed_grad = grad.div(de_nom)
                     normed_grad.clamp_(-adopt_clip, adopt_clip)
