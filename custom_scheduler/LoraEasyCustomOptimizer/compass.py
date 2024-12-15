@@ -5,7 +5,7 @@
 
 import torch
 from torch.optim import Optimizer
-from .utils import copy_stochastic_, quantize, dequantize, agc, NORM_TYPE, newton_schulz_
+from .utils import copy_stochastic_, quantize, dequantize, agc, NORM_TYPE, newton_schulz_, create_factored_dims, get_denom, update_second_moment
 import math
 from torch.nn.functional import softplus
 from typing import Optional, Literal
@@ -1295,6 +1295,9 @@ class CompassADOPT(BaseOptimizer):
             (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
             May not work well with small batch sizes or finetuning.
             (default: False)
+        factor_second_moment (bool):
+            Calculates the second moment, i.e. ema_aq / epoential moving average aqurard, at the row/column level 
+            instead of per parameter saving vram at the cost of lower precision (Default: False)
         muon_location (string):
             'before_clip','after_clip'
             (default: after_clip)
@@ -1318,6 +1321,7 @@ class CompassADOPT(BaseOptimizer):
         cautious: bool = False,
         use_muon_pp: bool = False,
         muon_location: MOUN_LOC = 'after_clip',
+        factor_second_moment: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1345,6 +1349,7 @@ class CompassADOPT(BaseOptimizer):
             'cautious': cautious,
             'use_muon_pp': use_muon_pp,
             'muon_location': muon_location,
+            'factor_second_moment':factor_second_moment,
         }
         super().__init__(params, defaults)
 
@@ -1358,9 +1363,31 @@ class CompassADOPT(BaseOptimizer):
             group['exp_avg_sq_mean_sqrt'] = 0.0
             for p in group['params']:
                 state = self.state[p]
+                grad = p.grad
 
                 state['exp_avg'] = torch.zeros_like(p)
-                state['exp_avg_sq'] = torch.zeros_like(p)
+
+                factored_dims = create_factored_dims(
+                    grad.shape,
+                    factored=group['factor_second_moment'],
+                    min_dim_size_to_factor=32
+                )
+
+                if factored_dims is not None:
+                    dc, dr = factored_dims
+                    row_shape = list(p.grad.shape)
+                    row_shape[dr] = 1
+                    col_shape = list(p.grad.shape)
+                    col_shape[dc] = 1
+                    reduce_dc = dc - 1 if dc > dr else dc
+                    # Store reduction variables so we don't have to recalculate each step.
+                    # Always store second moment low ranks in fp32 to avoid precision issues. Memory difference 
+                    # between bf16/fp16 and fp32 is negligible here.
+                    state["exp_avg_sq"] = [torch.zeros(row_shape, dtype=torch.float32, device=p.device).detach(), 
+                                            torch.zeros(col_shape, dtype=torch.float32, device=p.device).detach(), 
+                                            dr, dc, reduce_dc]
+                else:
+                    state['exp_avg_sq'] = torch.zeros_like(p)
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
@@ -1410,8 +1437,28 @@ class CompassADOPT(BaseOptimizer):
                     param_size += p.numel()                
 
                 if len(state) == 0:
-                    state['momentum'] = torch.zeros_like(p)
-                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    state['exp_avg'] = torch.zeros_like(p)
+                    factored_dims = create_factored_dims(
+                        grad.shape,
+                        factored=group['factor_second_moment'],
+                        min_dim_size_to_factor=32
+                    )
+
+                    if factored_dims is not None:
+                        dc, dr = factored_dims
+                        row_shape = list(p.grad.shape)
+                        row_shape[dr] = 1
+                        col_shape = list(p.grad.shape)
+                        col_shape[dc] = 1
+                        reduce_dc = dc - 1 if dc > dr else dc
+                        # Store reduction variables so we don't have to recalculate each step.
+                        # Always store second moment low ranks in fp32 to avoid precision issues. Memory difference 
+                        # between bf16/fp16 and fp32 is negligible here.
+                        state["exp_avg_sq"] = [torch.zeros(row_shape, dtype=torch.float32, device=p.device).detach(), 
+                                                torch.zeros(col_shape, dtype=torch.float32, device=p.device).detach(), 
+                                                dr, dc, reduce_dc]
+                    else:
+                        state['exp_avg_sq'] = torch.zeros_like(p)
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
 
@@ -1438,10 +1485,14 @@ class CompassADOPT(BaseOptimizer):
                     curr_eps = eps
 
                 if group['step'] == 1:
-                    exp_avg_sq.addcmul_(grad, grad.conj())
+                    if group['factor_second_moment']:
+                        exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2)
+                    else:
+                        #Special handling for ADOPT first step
+                        exp_avg_sq.addcmul_(grad, grad)
                 else:
-                    de_nom = exp_avg_sq.sqrt_().clamp_(curr_eps)
-                    exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
+                    de_nom = get_denom(exp_avg_sq).clamp_(curr_eps)
+                    exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2)
 
                     normed_grad = grad.div(de_nom)
                     normed_grad.clamp_(-adopt_clip, adopt_clip)
@@ -1479,7 +1530,8 @@ class CompassADOPT(BaseOptimizer):
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     copy_stochastic_(state['exp_avg'], exp_avg)
-                    copy_stochastic_(state['exp_avg_sq'], exp_avg_sq)
+                    if not group['factor_second_moment']:
+                        copy_stochastic_(state['exp_avg_sq'], exp_avg_sq)
                     copy_stochastic_(p, p_fp32)
 
         return loss

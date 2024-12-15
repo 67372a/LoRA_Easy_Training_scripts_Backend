@@ -147,7 +147,7 @@ def schedule_beta(t_beta: Optional[float], step: int, beta_initial: float, beta_
 # Modified Adafactor factorisation implementation by Ross Wightman 
 # https://github.com/huggingface/pytorch-image-models/pull/2320
 @torch.no_grad()
-def factored_dims(
+def create_factored_dims(
     shape,
     factored,
     min_dim_size_to_factor):
@@ -170,12 +170,12 @@ def factored_dims(
     
 # https://github.com/LoganBooker/prodigy-plus-schedule-free/blob/23f752a3901686d270dfdcb9b29823541ad1c3c7/prodigyplus/core_optimiser.py#L389
 @torch.no_grad()
-def get_denom(second_moment):
+def get_denom(second_moment, eps: float = 1e-30):
     # Get denom
     if isinstance(second_moment, list):
         row_var, col_var, _, _, reduce_dc = second_moment
 
-        row_col_mean = row_var.mean(dim=reduce_dc, keepdim=True).add_(1e-30)
+        row_col_mean = row_var.mean(dim=reduce_dc, keepdim=True).clamp_(eps)
         row_factor = row_var.div(row_col_mean).sqrt_()
         col_factor = col_var.sqrt()
         denom = row_factor * col_factor
