@@ -206,15 +206,15 @@ def update_second_moment(second_moment, grad, beta2):
 
 # From: https://github.com/KellerJordan/Muon/blob/master/muon.py
 @torch.no_grad()
-def newton_schulz_(G, steps=6, eps=1e-28):
+def newton_schulz_(grad, steps=6, eps=1e-20):
     # Inline reshaping step within the method itself.
     original_shape = None
-    if len(G.shape) > 2:
-        original_shape = G.shape
-        G = G.view(G.size(0), -1)
+    if len(grad.shape) > 2:
+        original_shape = grad.shape
+        grad = grad.view(grad.size(0), -1)
     a, b, c = (3.4445, -4.7750,  2.0315)
-    X = G.bfloat16()
-    if G.size(0) > G.size(1):
+    X = grad.bfloat16()
+    if grad.size(0) > grad.size(1):
         X = X.T
 
     # Use the Frobenius norm of (X @ X.T)^2 computed during first NS iteration to ensure spectral norm
@@ -234,11 +234,11 @@ def newton_schulz_(G, steps=6, eps=1e-28):
         B = b * A + c * A @ A # adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
         X = a * X + B @ X
 
-    if G.size(0) > G.size(1):
+    if grad.size(0) > grad.size(1):
         X = X.T
-    if X is not G:
-        G.copy_(X)
+    if X is not grad:
+        grad.copy_(X)
         del X
     if original_shape is not None:
-        G = G.view(*original_shape)
-    return G
+        grad = grad.view(*original_shape)
+    return grad
