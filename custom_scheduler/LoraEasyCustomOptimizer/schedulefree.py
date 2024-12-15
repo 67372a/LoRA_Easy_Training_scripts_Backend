@@ -8,9 +8,7 @@ import math
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
-from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz_
-
-MOUN_LOC = Literal['first','after_c_t','after_c_t_clipping']
+from .utils import copy_stochastic_, NORM_TYPE, agc
 
 class ScheduleFreeWrapper(BaseOptimizer):
     r"""
@@ -2398,14 +2396,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             When set to none, will calculate gamma value based on current beta1 to keep same resulting value as though gamma is 0.025 and beta1 is 0.95 (default: None)
         fisher_clip (float):
             Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
-        use_muon_pp (boolean):
-            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
-            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
-            May not work well with small batch sizes or finetuning.
-            (default: False)
-        muon_location (string):
-            'first','after_c_t','after_c_t_clipping'
-            (default: first)
     """
 
     def __init__(
@@ -2426,8 +2416,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
         gamma: Optional[float] = None,
-        use_muon_pp: bool = False,
-        muon_location: MOUN_LOC = 'first',
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -2458,8 +2446,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             'adaptive_clip_type':adaptive_clip_type,
             'fisher_clip':fisher_clip,
             'gamma': gamma,
-            'use_muon_pp': use_muon_pp,
-            'muon_location': muon_location,
+
         }
         super().__init__(params, defaults)
 
@@ -2565,8 +2552,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             eps_floor = group["eps_floor"]
             fisher_clip = group["fisher_clip"]
             gamma = group["gamma"]
-            use_muon_pp = group["use_muon_pp"]
-            muon_location = group['muon_location']
+
 
             for p in group['params']:
                 if p.grad is None:
@@ -2594,10 +2580,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                     grad = grad.to(torch.float32)
                     z, fim, grad_diff = z.to(torch.float32), fim.to(torch.float32), grad_diff.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
-                    
-                if use_muon_pp and muon_location == 'first' and p.ndim >= 2 and p.size(0) < 10000:
-                    grad.copy_(newton_schulz_(grad))
-
+                
                 grad_diff.add_(grad)
 
                 # MARS Calculate cₜ (gradient with correction term)
@@ -2605,15 +2588,9 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 correction = (gamma if gamma is not None else (0.475 * (1 - beta1) / beta1)) * beta1 / (1 - beta1) * grad_diff
                 c_t = grad + correction
 
-                if use_muon_pp and muon_location == 'after_c_t' and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t.copy_(newton_schulz_(c_t))
-
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
-
-                if use_muon_pp and muon_location == 'after_c_t_clipping' and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t.copy_(newton_schulz_(c_t))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()

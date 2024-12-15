@@ -5,10 +5,10 @@
 
 import torch
 from torch.optim import Optimizer
-from .utils import copy_stochastic_, quantize, dequantize, agc, NORM_TYPE
+from .utils import copy_stochastic_, quantize, dequantize, agc, NORM_TYPE, newton_schulz_
 import math
 from torch.nn.functional import softplus
-from typing import Optional
+from typing import Optional, Literal
 
 from bitsandbytes.functional import quantize_blockwise, dequantize_blockwise
 from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
@@ -16,6 +16,8 @@ from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 from pytorch_optimizer.optimizer.gc import centralize_gradient
 from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
+
+MOUN_LOC = Literal['before_clip','after_clip']
 
 class Compass(BaseOptimizer):
     r"""
@@ -1288,6 +1290,14 @@ class CompassADOPT(BaseOptimizer):
             Valid values: layer, unit (default: layer).
         cautious (bool)
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+        use_muon_pp (boolean):
+            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
+            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
+            May not work well with small batch sizes or finetuning.
+            (default: False)
+        muon_location (string):
+            'before_clip','after_clip'
+            (default: after_clip)
     """
 
     def __init__(
@@ -1305,7 +1315,9 @@ class CompassADOPT(BaseOptimizer):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        cautious: bool = True,
+        cautious: bool = False,
+        use_muon_pp: bool = False,
+        muon_location: MOUN_LOC = 'after_clip',
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1331,6 +1343,8 @@ class CompassADOPT(BaseOptimizer):
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
             'cautious': cautious,
+            'use_muon_pp': use_muon_pp,
+            'muon_location': muon_location,
         }
         super().__init__(params, defaults)
 
@@ -1378,6 +1392,8 @@ class CompassADOPT(BaseOptimizer):
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
             amp_fac = group["amp_fac"]
+            use_muon_pp = group["use_muon_pp"]
+            muon_location = group['muon_location']
 
             for p in group['params']:
                 if p.grad is None:
@@ -1405,9 +1421,15 @@ class CompassADOPT(BaseOptimizer):
                     exp_avg, exp_avg_sq = exp_avg.to(torch.float32), exp_avg_sq.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
+                if use_muon_pp and muon_location == 'before_clip' and p.ndim >= 2 and p.size(0) < 10000:
+                    grad.copy_(newton_schulz_(grad))
+
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+                if use_muon_pp and muon_location == 'after_clip' and p.ndim >= 2 and p.size(0) < 10000:
+                    grad.copy_(newton_schulz_(grad))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
