@@ -49,10 +49,10 @@ class FMARSCrop(BaseOptimizer):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
-            The type of clipping, can be unit or global. If done at the unit level can change
-            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
-            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
-            Valid values: global, unit (default: global).
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
         gamma (float):
             Scaling value for the MARS style correction of the gradient (default: 0.0005)
     """

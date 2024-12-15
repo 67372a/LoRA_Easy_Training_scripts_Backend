@@ -171,19 +171,17 @@ class ADOPTMARS(BaseOptimizer):
         weight_decay (float):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
-            the optimizer uses decoupled weight decay as in AdamW.
-        centralization (float):
-            Center model grad (default: 0.0).
+            the optimizer uses decoupled weight decay as in AdamW. (default: False)
         adaptive_clip (float):
             Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
-            The type of clipping, can be unit or global. If done at the unit level can change
-            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
-            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
-            Valid values: global, unit (default: global).
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
         cautious (bool)
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
     """
@@ -391,19 +389,17 @@ class FADOPTMARS(BaseOptimizer):
         weight_decay (float):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
-            the optimizer uses decoupled weight decay as in AdamW.
-        centralization (float):
-            Center model grad (default: 0.0).
+            the optimizer uses decoupled weight decay as in AdamW. (default: False)
         adaptive_clip (float):
             Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
-            The type of clipping, can be unit or global. If done at the unit level can change
-            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
-            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
-            Valid values: global, unit (default: global).
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
         cautious (bool)
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
     """

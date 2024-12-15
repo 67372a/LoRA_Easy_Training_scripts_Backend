@@ -38,6 +38,7 @@ class ScheduleFreeWrapper(BaseOptimizer):
                 base_optimizer_type=LoraEasyCustomOptimizer.compass.Compass
                 base_optimizer_type=LoraEasyCustomOptimizer.came.CAME
                 base_optimizer_type=LoraEasyCustomOptimizer.adopt.ADOPT
+                base_optimizer_type=torch.optim.AdamW
         sf_momentum (float): 
             Apply momentum on the outer optimizer (default 0.9)
         sf_weight_decay_at_y (float): 
@@ -269,19 +270,19 @@ class ADOPTScheduleFree(BaseOptimizer):
         weight_decay (float):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
-            the optimizer uses decoupled weight decay as in AdamW.
-        centralization (float):
-            Center model grad (default: 0.0).
+            the optimizer uses decoupled weight decay as in AdamW. (default: False)
+        stable_weight_decay (bool): 
+            Requires weight_decouple be True. Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
         adaptive_clip (float):
-            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
-            The type of clipping, can be unit or global. If done at the unit level can change
-            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
-            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
-            Valid values: global, unit (default: global).
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
         bias_correction_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
@@ -301,11 +302,10 @@ class ADOPTScheduleFree(BaseOptimizer):
         stable_weight_decay: bool = False,
         r: float = 0.0,
         weight_lr_power: float = 2.0,
-        warmup_steps: int = 0,
         eps: float = 1e-6,
         eps2: float = 1e-2,
-        eps_floor: float = None,
-        adaptive_clip: float = 0.0,
+        eps_floor: Optional[float] = None,
+        adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         bias_correction_beta2: bool = False,
@@ -328,7 +328,6 @@ class ADOPTScheduleFree(BaseOptimizer):
             'stable_weight_decay':stable_weight_decay,
             'r': r,
             'weight_lr_power': weight_lr_power,
-            'warmup_steps': warmup_steps,
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
@@ -533,7 +532,7 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
         lr (float):
             Learning rate parameter (default 2.5e-3).
         betas (float, float):
-            coefficients for momentum and exponential moving average squared (default: 0.9, 0.9999).
+            coefficients for momentum, exponential moving average squared, and slow ema/momentum (default: 0.9, 0.9999, 0.9999).
         eps (float):
             Term the denominator is minimally clamped to, to
             improve numerical stability. (default: 1e-6).
@@ -544,19 +543,19 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
         weight_decay (float):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
-            the optimizer uses decoupled weight decay as in AdamW.
-        centralization (float):
-            Center model grad (default: 0.0).
+            the optimizer uses decoupled weight decay as in AdamW. (default: False)
+        stable_weight_decay (bool): 
+            Requires weight_decouple be True. Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
         adaptive_clip (float):
-            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
-            The type of clipping, can be unit or global. If done at the unit level can change
-            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
-            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
-            Valid values: global, unit (default: global).
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
         bias_correction_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
@@ -564,6 +563,12 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
         weight_lr_power (float): 
             during warmup, the weights in the average will be equal to lr raised to this power.
             set to 0 for no weighting. (Default: 2,0)
+        alpha (float): 
+            usually between 2 and 5 would work well. (default: 2)
+        t_alpha_beta3 (Optional[float]): 
+            Steps to warmup alpha and beta 3. Total number of steps is recommended when needed. (Default: None)
+        cautious (bool):
+            Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: True)
     """
 
     def __init__(
@@ -576,11 +581,10 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
         stable_weight_decay: bool = False,
         r: float = 0.0,
         weight_lr_power: float = 2.0,
-        warmup_steps: int = 0,
         eps: float = 1e-6,
         eps2: float = 1e-2,
-        eps_floor: float = None,
-        adaptive_clip: float = 0.0,
+        eps_floor: Optional[float] = None,
+        adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         bias_correction_beta2: bool = False,
@@ -606,7 +610,6 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
             'stable_weight_decay':stable_weight_decay,
             'r': r,
             'weight_lr_power': weight_lr_power,
-            'warmup_steps': warmup_steps,
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
@@ -854,7 +857,7 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
         lr (float):
             Learning rate parameter (default 2.5e-3).
         betas (float, float):
-            coefficients for momentum and exponential moving average squared (default: 0.9, 0.9999).
+            coefficients for momentum, grad diff ema, and exponential moving average squared (default: 0.9, 0.92, 0.9999).
         eps (float):
             Term the denominator is minimally clamped to, to
             improve numerical stability. (default: 1e-6).
@@ -865,19 +868,19 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
         weight_decay (float):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
-            the optimizer uses decoupled weight decay as in AdamW.
-        centralization (float):
-            Center model grad (default: 0.0).
+            the optimizer uses decoupled weight decay as in AdamW. (default: False)
+        stable_weight_decay (bool): 
+            Requires weight_decouple be True. Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
         adaptive_clip (float):
-            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
-            The type of clipping, can be unit or global. If done at the unit level can change
-            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
-            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
-            Valid values: global, unit (default: global).
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
         bias_correction_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
@@ -885,6 +888,8 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
         weight_lr_power (float): 
             during warmup, the weights in the average will be equal to lr raised to this power.
             set to 0 for no weighting. (Default: 2,0)
+        cautious (bool):
+            Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: True)
     """
 
     def __init__(
@@ -897,11 +902,10 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
         stable_weight_decay: bool = False,
         r: float = 0.0,
         weight_lr_power: float = 2.0,
-        warmup_steps: int = 0,
         eps: float = 1e-6,
         eps2: float = 1e-2,
-        eps_floor: float = None,
-        adaptive_clip: float = 0.0,
+        eps_floor: Optional[float] = None,
+        adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         bias_correction_beta3: bool = False,
@@ -925,7 +929,6 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
             'stable_weight_decay':stable_weight_decay,
             'r': r,
             'weight_lr_power': weight_lr_power,
-            'warmup_steps': warmup_steps,
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
@@ -1166,19 +1169,19 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
         weight_decay (float):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
-            the optimizer uses decoupled weight decay as in AdamW.
-        centralization (float):
-            Center model grad (default: 0.0).
+            the optimizer uses decoupled weight decay as in AdamW. (default: False)
+        stable_weight_decay (bool): 
+            Requires weight_decouple be True. Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
         adaptive_clip (float):
-            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+            Adaptive clip value to apply to the MARS corrected gradient - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
-            The type of clipping, can be unit or global. If done at the unit level can change
-            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
-            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
-            Valid values: global, unit (default: global).
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
         bias_correction_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
@@ -1186,6 +1189,8 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
         weight_lr_power (float): 
             during warmup, the weights in the average will be equal to lr raised to this power.
             set to 0 for no weighting. (Default: 2,0)
+        gamma (float):
+            Scaling value for the MARS style correction of the gradient (default: 0.05)
     """
 
     def __init__(
@@ -1198,15 +1203,14 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
         stable_weight_decay: bool = False,
         r: float = 0.0,
         weight_lr_power: float = 2.0,
-        warmup_steps: int = 0,
         eps: float = 1e-6,
         eps2: float = 1e-2,
-        eps_floor: float = None,
+        eps_floor: Optional[float] = None,
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         bias_correction_beta2: bool = False,
-        gamma: float = 0.025,
+        gamma: float = 0.05,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1226,7 +1230,6 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
             'stable_weight_decay':stable_weight_decay,
             'r': r,
             'weight_lr_power': weight_lr_power,
-            'warmup_steps': warmup_steps,
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
@@ -1456,19 +1459,19 @@ class FADOPTScheduleFree(BaseOptimizer):
         weight_decay (float):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
-            the optimizer uses decoupled weight decay as in AdamW.
-        centralization (float):
-            Center model grad (default: 0.0).
+            the optimizer uses decoupled weight decay as in AdamW. (default: False)
+        stable_weight_decay (bool): 
+            Requires weight_decouple be True. Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
         adaptive_clip (float):
-            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
-            The type of clipping, can be unit or global. If done at the unit level can change
-            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
-            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
-            Valid values: global, unit (default: global).
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
         bias_correction_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
@@ -1476,6 +1479,8 @@ class FADOPTScheduleFree(BaseOptimizer):
         weight_lr_power (float): 
             during warmup, the weights in the average will be equal to lr raised to this power.
             set to 0 for no weighting. (Default: 2,0)
+        fisher_clip (float):
+            Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
     """
 
     def __init__(
@@ -1488,11 +1493,10 @@ class FADOPTScheduleFree(BaseOptimizer):
         stable_weight_decay: bool = False,
         r: float = 0.0,
         weight_lr_power: float = 2.0,
-        warmup_steps: int = 0,
         eps: float = 1e-6,
         eps2: float = 1e-2,
-        eps_floor: float = None,
-        adaptive_clip: float = 0.0,
+        eps_floor: Optional[float] = None,
+        adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
@@ -1515,7 +1519,6 @@ class FADOPTScheduleFree(BaseOptimizer):
             'stable_weight_decay':stable_weight_decay,
             'r': r,
             'weight_lr_power': weight_lr_power,
-            'warmup_steps': warmup_steps,
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
@@ -1717,7 +1720,7 @@ class FADOPTScheduleFree(BaseOptimizer):
         return loss
 
 class FADOPTEMAMixScheduleFree(BaseOptimizer):
-    r"""Schedule-Free fisher ADOPT.
+    r"""Schedule-Free fisher ADOPT + AdEMAMix slow ema.
     Arguments:
         params (iterable):
             Iterable of parameters to optimize or dicts defining
@@ -1725,7 +1728,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
         lr (float):
             Learning rate parameter (default 2.5e-3).
         betas (float, float):
-            coefficients for momentum and exponential moving average squared (default: 0.9, 0.9999).
+            coefficients for momentum, exponential moving average squared, and slow ema/momentum (default: 0.9, 0.9999, 0.9999).
         eps (float):
             Term the denominator is minimally clamped to, to
             improve numerical stability. (default: 1e-6).
@@ -1736,19 +1739,19 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
         weight_decay (float):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
-            the optimizer uses decoupled weight decay as in AdamW.
-        centralization (float):
-            Center model grad (default: 0.0).
+            the optimizer uses decoupled weight decay as in AdamW. (default: False)
+        stable_weight_decay (bool): 
+            Requires weight_decouple be True. Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
         adaptive_clip (float):
-            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
-            The type of clipping, can be unit or global. If done at the unit level can change
-            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
-            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
-            Valid values: global, unit (default: global).
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
         bias_correction_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
@@ -1756,6 +1759,14 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
         weight_lr_power (float): 
             during warmup, the weights in the average will be equal to lr raised to this power.
             set to 0 for no weighting. (Default: 2,0)
+        alpha (float): 
+            usually between 2 and 5 would work well. (default: 2)
+        t_alpha_beta3 (Optional[float]): 
+            Steps to warmup alpha and beta 3. Total number of steps is recommended when needed. (Default: None)
+        cautious (bool):
+            Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: True)
+        fisher_clip (float):
+            Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
     """
 
     def __init__(
@@ -1768,11 +1779,10 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
         stable_weight_decay: bool = False,
         r: float = 0.0,
         weight_lr_power: float = 2.0,
-        warmup_steps: int = 0,
         eps: float = 1e-6,
         eps2: float = 1e-2,
-        eps_floor: float = None,
-        adaptive_clip: float = 0.0,
+        eps_floor: Optional[float] = None,
+        adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
@@ -1798,7 +1808,6 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
             'stable_weight_decay':stable_weight_decay,
             'r': r,
             'weight_lr_power': weight_lr_power,
-            'warmup_steps': warmup_steps,
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
@@ -2046,7 +2055,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
         lr (float):
             Learning rate parameter (default 2.5e-3).
         betas (float, float):
-            coefficients for momentum and exponential moving average squared (default: 0.9, 0.9999).
+            coefficients for momentum, grad diff ema, and exponential moving average squared (default: 0.9, 0.92, 0.9999).
         eps (float):
             Term the denominator is minimally clamped to, to
             improve numerical stability. (default: 1e-6).
@@ -2057,19 +2066,19 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
         weight_decay (float):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
-            the optimizer uses decoupled weight decay as in AdamW.
-        centralization (float):
-            Center model grad (default: 0.0).
+            the optimizer uses decoupled weight decay as in AdamW. (default: False)
+        stable_weight_decay (bool): 
+            Requires weight_decouple be True. Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
         adaptive_clip (float):
-            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
-            The type of clipping, can be unit or global. If done at the unit level can change
-            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
-            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
-            Valid values: global, unit (default: global).
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
         bias_correction_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
@@ -2077,6 +2086,8 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
         weight_lr_power (float): 
             during warmup, the weights in the average will be equal to lr raised to this power.
             set to 0 for no weighting. (Default: 2,0)
+        fisher_clip (float):
+            Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
     """
 
     def __init__(
@@ -2089,11 +2100,10 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
         stable_weight_decay: bool = False,
         r: float = 0.0,
         weight_lr_power: float = 2.0,
-        warmup_steps: int = 0,
         eps: float = 1e-6,
         eps2: float = 1e-2,
-        eps_floor: float = None,
-        adaptive_clip: float = 0.0,
+        eps_floor: Optional[float] = None,
+        adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
@@ -2117,7 +2127,6 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
             'stable_weight_decay':stable_weight_decay,
             'r': r,
             'weight_lr_power': weight_lr_power,
-            'warmup_steps': warmup_steps,
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
@@ -2341,7 +2350,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
         return loss
     
 class FADOPTMARSScheduleFree(BaseOptimizer):
-    r"""Schedule-Free fisher ADOPT.
+    r"""Schedule-Free fisher ADOPT + MARS Correction..
     Arguments:
         params (iterable):
             Iterable of parameters to optimize or dicts defining
@@ -2360,19 +2369,19 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         weight_decay (float):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
-            the optimizer uses decoupled weight decay as in AdamW.
-        centralization (float):
-            Center model grad (default: 0.0).
+            the optimizer uses decoupled weight decay as in AdamW. (default: False)
+        stable_weight_decay (bool): 
+            Requires weight_decouple be True. Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
         adaptive_clip (float):
-            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+            Adaptive clip value to apply to the MARS corrected gradient - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
             not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
-            The type of clipping, can be unit or global. If done at the unit level can change
-            the direction of the gradient, while global only scales down the magnitude of the entire gradient proportionally.
-            Traditional adaptive clipping uses unit-wise, while this implementation also supports global.
-            Valid values: global, unit (default: global).
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
         bias_correction_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
@@ -2380,6 +2389,10 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         weight_lr_power (float): 
             during warmup, the weights in the average will be equal to lr raised to this power.
             set to 0 for no weighting. (Default: 2,0)
+        gamma (float):
+            Scaling value for the MARS style correction of the gradient (default: 0.05)
+        fisher_clip (float):
+            Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
     """
 
     def __init__(
@@ -2392,15 +2405,14 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         stable_weight_decay: bool = False,
         r: float = 0.0,
         weight_lr_power: float = 2.0,
-        warmup_steps: int = 0,
         eps: float = 1e-6,
         eps2: float = 1e-2,
-        eps_floor: float = None,
+        eps_floor: Optional[float] = None,
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
-        gamma: float = 0.025,
+        gamma: float = 0.05,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -2420,7 +2432,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             'stable_weight_decay':stable_weight_decay,
             'r': r,
             'weight_lr_power': weight_lr_power,
-            'warmup_steps': warmup_steps,
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,

@@ -1273,9 +1273,7 @@ class CompassADOPT(BaseOptimizer):
         weight_decay (float):
             Weight decay at y, i.e. a L2 penalty (default: 0.0).
         weight_decouple (bool): 
-            the optimizer uses decoupled weight decay as in AdamW.
-        centralization (float):
-            Center model grad (default: 0.0).
+            the optimizer uses decoupled weight decay as in AdamW. (default: False)
         adaptive_clip (float):
             Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
         adaptive_clip_eps (float):
