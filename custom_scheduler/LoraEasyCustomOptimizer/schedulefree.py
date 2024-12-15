@@ -2595,7 +2595,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                     z, fim, grad_diff = z.to(torch.float32), fim.to(torch.float32), grad_diff.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
                     
-                if use_muon_pp and muon_location == 'first':
+                if use_muon_pp and muon_location == 'first' and p.ndim >= 2 and p.size(0) < 10000:
                     grad.copy_(newton_schulz_(grad))
 
                 grad_diff.add_(grad)
@@ -2605,14 +2605,14 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 correction = (gamma if gamma is not None else (0.475 * (1 - beta1) / beta1)) * beta1 / (1 - beta1) * grad_diff
                 c_t = grad + correction
 
-                if use_muon_pp and muon_location == 'after_c_t':
+                if use_muon_pp and muon_location == 'after_c_t' and p.ndim >= 2 and p.size(0) < 10000:
                     c_t.copy_(newton_schulz_(c_t))
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
 
-                if use_muon_pp and muon_location == 'after_c_t_clipping':
+                if use_muon_pp and muon_location == 'after_c_t_clipping' and p.ndim >= 2 and p.size(0) < 10000:
                     c_t.copy_(newton_schulz_(c_t))
 
                 if eps_floor is not None and eps_floor < eps:

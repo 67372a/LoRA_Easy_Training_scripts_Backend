@@ -206,7 +206,7 @@ def update_second_moment(second_moment, grad, beta2):
 
 # From: https://github.com/KellerJordan/Muon/blob/master/muon.py
 @torch.no_grad()
-def newton_schulz_(G, steps=6, eps=1e-7):
+def newton_schulz_(G, steps=6, eps=1e-28):
     # Inline reshaping step within the method itself.
     original_shape = None
     if len(G.shape) > 2:
@@ -214,13 +214,26 @@ def newton_schulz_(G, steps=6, eps=1e-7):
         G = G.view(G.size(0), -1)
     a, b, c = (3.4445, -4.7750,  2.0315)
     X = G.bfloat16()
-    X /= (X.norm() + eps) # ensure top singular value <= 1
     if G.size(0) > G.size(1):
         X = X.T
-    for _ in range(steps):
+
+    # Use the Frobenius norm of (X @ X.T)^2 computed during first NS iteration to ensure spectral norm
+    # is below 1, as suggested by Johan Sokrates Wind @johanwind
+    # https://github.com/KellerJordan/modded-nanogpt/discussions/23#discussioncomment-11293594
+    A = X @ X.T
+    A2 = A @ A
+    A2_norm = A2.norm() + eps
+    X /= A2_norm**0.25 # ensure top singular value <= 1
+    A /= A2_norm**0.5
+    A2 /= A2_norm
+    X = a * X + (b * A + c * A2) @ X
+
+    # Perform the remaining NS iterations
+    for _ in range(steps-1):
         A = X @ X.T
-        B = b * A + c * A @ A
+        B = b * A + c * A @ A # adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
         X = a * X + B @ X
+
     if G.size(0) > G.size(1):
         X = X.T
     if X is not G:
