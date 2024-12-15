@@ -334,7 +334,7 @@ class RMSPropADOPT(BaseOptimizer):
         self,
         params: PARAMETERS,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9999),
+        betas: float = 0.9999,
         amp_fac: float = 2.0,
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
@@ -351,7 +351,7 @@ class RMSPropADOPT(BaseOptimizer):
         **kwargs,
     ):
         self.validate_learning_rate(lr)
-        self.validate_betas(betas)
+        self.validate_non_negative(betas, 'betas')
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
