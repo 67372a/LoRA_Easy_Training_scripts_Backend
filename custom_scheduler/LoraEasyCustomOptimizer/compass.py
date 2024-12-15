@@ -1264,7 +1264,7 @@ class CompassADOPT(BaseOptimizer):
         lr (float):
             Learning rate parameter (default 2.5e-3).
         betas (float, float):
-            coefficients for momentum and exponential moving average squared (default: 0.9, 0.9999).
+            coefficients for momentum and exponential moving average squared (default: 0.95, 0.9999).
         eps (float):
             Term the denominator is minimally clamped to, to
             improve numerical stability. (default: 1e-6).
