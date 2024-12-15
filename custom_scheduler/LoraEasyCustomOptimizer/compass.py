@@ -1465,7 +1465,9 @@ class CompassADOPT(BaseOptimizer):
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
-                    exp_avg, exp_avg_sq = exp_avg.to(torch.float32), exp_avg_sq.to(torch.float32)
+                    exp_avg = exp_avg.to(torch.float32)
+                    if not group['factor_second_moment']:
+                        exp_avg_sq = exp_avg_sq.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
                 if use_muon_pp and muon_location == 'before_clip' and p.ndim >= 2 and p.size(0) < 10000:
