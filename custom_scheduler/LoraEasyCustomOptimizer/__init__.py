@@ -4,7 +4,6 @@ from LoraEasyCustomOptimizer.utils import OPTIMIZER
 
 from LoraEasyCustomOptimizer.ademamix import AdEMAMix
 from LoraEasyCustomOptimizer.came import CAME
-from LoraEasyCustomOptimizer.camefullsr import CAMEFullSR
 from LoraEasyCustomOptimizer.compass import Compass, Compass8BitBNB, CompassPlus
 from LoraEasyCustomOptimizer.farmscrop import FARMSCrop, FARMSCropV2
 from LoraEasyCustomOptimizer.fcompass import FCompass, FCompassPlus
@@ -30,7 +29,6 @@ from LoraEasyCustomOptimizer.laprop import LaProp
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdEMAMix,
     CAME,
-    CAMEFullSR,
     Compass,
     Compass8BitBNB,
     FARMSCrop,

@@ -198,6 +198,10 @@ class CAME(BaseOptimizer):
                 update.div_((self.get_rms(update) / self.clip_threshold).clamp_(min=1.0))
 
                 exp_avg = state['exp_avg']
+
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    exp_avg = exp_avg.to(torch.float32)
+
                 exp_avg.mul_(beta1).add_(update, alpha=1.0 - beta1)
 
                 res = update - exp_avg
@@ -235,6 +239,7 @@ class CAME(BaseOptimizer):
                 p_data_fp32.add_(-(update * mask))
 
                 if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state['exp_avg'], exp_avg)
                     copy_stochastic_(p, p_data_fp32)
 
         return loss

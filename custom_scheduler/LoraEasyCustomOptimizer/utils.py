@@ -203,3 +203,29 @@ def update_second_moment(second_moment, grad, beta2):
         second_moment.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
     return second_moment
+
+# From: https://github.com/KellerJordan/Muon/blob/master/muon.py
+@torch.no_grad()
+def newton_schulz_(G, steps=6, eps=1e-7):
+    # Inline reshaping step within the method itself.
+    original_shape = None
+    if len(G.shape) > 2:
+        original_shape = G.shape
+        G = G.view(G.size(0), -1)
+    a, b, c = (3.4445, -4.7750,  2.0315)
+    X = G.bfloat16()
+    X /= (X.norm() + eps) # ensure top singular value <= 1
+    if G.size(0) > G.size(1):
+        X = X.T
+    for _ in range(steps):
+        A = X @ X.T
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+    if G.size(0) > G.size(1):
+        X = X.T
+    if X is not G:
+        G.copy_(X)
+        del X
+    if original_shape is not None:
+        G = G.view(*original_shape)
+    return G
