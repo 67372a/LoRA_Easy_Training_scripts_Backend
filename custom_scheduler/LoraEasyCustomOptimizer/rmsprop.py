@@ -481,12 +481,11 @@ class RMSPropADOPT(BaseOptimizer):
                     else:
                         state['exp_avg_sq'] = torch.zeros_like(p)
 
-                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                exp_avg_sq = state['exp_avg_sq']
 
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
-                    exp_avg = exp_avg.to(torch.float32)
                     if not group['factor_second_moment']:
                         exp_avg_sq = exp_avg_sq.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
