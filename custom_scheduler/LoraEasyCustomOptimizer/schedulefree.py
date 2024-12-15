@@ -94,7 +94,7 @@ class ScheduleFreeWrapper(BaseOptimizer):
     @torch.no_grad()
     def eval(self):
         for group in self.param_groups:
-            if group['train_mode']:
+            if self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -112,12 +112,12 @@ class ScheduleFreeWrapper(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = False
+                self.train_mode = False
 
     @torch.no_grad()
     def train(self):
         for group in self.param_groups:
-            if not group['train_mode']:
+            if not self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -135,7 +135,7 @@ class ScheduleFreeWrapper(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = True
+                self.train_mode = True
 
     @staticmethod
     def swap(x: torch.Tensor, y: torch.Tensor):

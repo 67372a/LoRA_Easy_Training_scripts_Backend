@@ -335,7 +335,6 @@ class RMSPropADOPT(BaseOptimizer):
         params: PARAMETERS,
         lr: float = 2.5e-3,
         betas: float = 0.9999,
-        amp_fac: float = 2.0,
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         stable_weight_decay: bool = False,
@@ -362,7 +361,6 @@ class RMSPropADOPT(BaseOptimizer):
         defaults: DEFAULTS = {
             'lr': lr,
             'betas': betas,
-            'amp_fac': amp_fac,
             'weight_decay': weight_decay,
             'weight_decouple':weight_decouple,
             'stable_weight_decay':stable_weight_decay,
