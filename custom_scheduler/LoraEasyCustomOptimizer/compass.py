@@ -1296,7 +1296,7 @@ class CompassADOPT(BaseOptimizer):
             May not work well with small batch sizes or finetuning.
             (default: False)
         factor_second_moment (bool):
-            Calculates the second moment, i.e. ema_aq / epoential moving average aqurard, at the row/column level 
+            Stores the second moment, i.e. ema_sq / exponential moving average squared, at the row/column level 
             instead of per parameter saving vram at the cost of lower precision (Default: False)
         muon_location (string):
             'before_clip','after_clip'
