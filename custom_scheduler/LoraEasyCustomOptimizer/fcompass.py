@@ -10,6 +10,8 @@ from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMET
 from pytorch_optimizer.optimizer.gc import centralize_gradient
 from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
 
+from typing import Optional
+
 # Fisher optimizer (FAdam) from https://github.com/lessw2020/FAdam_PyTorch/blob/main/fadam.py by Less Wright (lessw2020), I may not know them, but I am aware of their expertise. Many thanks for your contributing work!
 # Original optimizer (Compass) from https://github.com/lodestone-rock/compass_optimizer/blob/main/compass.py by lodestone-rock, many thanks for their optim, help, and ideas!
 # FCompass from https://github.com/Clybius/Personalized-Optimizers/blob/main/FCompass.py by Clybius
@@ -235,15 +237,15 @@ class FCompassADOPT(BaseOptimizer):
         self,
         params: PARAMETERS,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9, 0.9999),
+        betas: BETAS = (0.95, 0.9999),
         amp_fac: float = 2.0,
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         stable_weight_decay: bool = False,
         eps: float = 1e-6,
         eps2: float = 1e-2,
-        eps_floor: float = None,
-        adaptive_clip: float = 0,
+        eps_floor: Optional[float] = None,
+        adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
