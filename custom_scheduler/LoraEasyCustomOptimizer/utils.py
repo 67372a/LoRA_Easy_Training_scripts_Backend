@@ -143,3 +143,63 @@ def schedule_beta(t_beta: Optional[float], step: int, beta_initial: float, beta_
         ),
         beta_final,
     )
+
+# Modified Adafactor factorisation implementation by Ross Wightman 
+# https://github.com/huggingface/pytorch-image-models/pull/2320
+@torch.no_grad()
+def factored_dims(
+    shape,
+    factored,
+    min_dim_size_to_factor):
+    r"""Whether to use a factored second moment estimator.
+    This function returns a tuple with the two largest axes to reduce over.
+    If all dimensions have size < min_dim_size_to_factor, return None.
+    Args:
+    shape: an input shape
+    factored: whether to use factored second-moment estimator for > 2d vars.
+    min_dim_size_to_factor: only factor accumulator if all array dimensions are greater than this size.
+    Returns:
+    None or a tuple of ints
+    """
+    if not factored or len(shape) < 2:
+        return None
+    if all(dim < min_dim_size_to_factor for dim in shape):
+        return None
+    sorted_dims = sorted(((x, i) for i, x in enumerate(shape)))
+    return int(sorted_dims[-2][1]), int(sorted_dims[-1][1])
+    
+# https://github.com/LoganBooker/prodigy-plus-schedule-free/blob/23f752a3901686d270dfdcb9b29823541ad1c3c7/prodigyplus/core_optimiser.py#L389
+@torch.no_grad()
+def get_denom(second_moment):
+    # Get denom
+    if isinstance(second_moment, list):
+        row_var, col_var, _, _, reduce_dc = second_moment
+
+        row_col_mean = row_var.mean(dim=reduce_dc, keepdim=True).add_(1e-30)
+        row_factor = row_var.div(row_col_mean).sqrt_()
+        col_factor = col_var.sqrt()
+        denom = row_factor * col_factor
+    else:
+        denom = second_moment.sqrt()
+
+    return denom
+    
+# https://github.com/LoganBooker/prodigy-plus-schedule-free/blob/23f752a3901686d270dfdcb9b29823541ad1c3c7/prodigyplus/core_optimiser.py#L411
+@torch.no_grad()
+def update_second_moment(second_moment, grad, beta2):
+    # EMA updates
+    if isinstance(second_moment, list):
+        row_var, col_var, dr, dc, _ = second_moment
+
+        row_var.lerp_(
+            grad.norm(dim=dr, keepdim=True).square_().div_(grad.shape[dr]),
+            weight=1 - beta2
+        )
+        col_var.lerp_(
+            grad.norm(dim=dc, keepdim=True).square_().div_(grad.shape[dc]),
+            weight=1 - beta2
+        )
+    else:
+        second_moment.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+    return second_moment
