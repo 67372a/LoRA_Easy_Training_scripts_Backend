@@ -333,7 +333,7 @@ class RMSPropADOPT(BaseOptimizer):
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float = 2.5e-3,
+        lr: float = 5e-4,
         betas: float = 0.9999,
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
