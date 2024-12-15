@@ -1292,7 +1292,7 @@ class CompassADOPT(BaseOptimizer):
         self,
         params: PARAMETERS,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9, 0.9999),
+        betas: BETAS = (0.95, 0.9999),
         amp_fac: float = 2.0,
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
