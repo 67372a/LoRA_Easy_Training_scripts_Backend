@@ -9,7 +9,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParamete
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 
-MOUN_LOC = Literal['before_clip','after_clip']
+MOUN_LOC = Literal['before_mars','before_clip','after_clip']
 
 CLIP_LOC = Literal['gradient', 'update', 'both']
 
@@ -617,6 +617,7 @@ class RMSPropADOPTMARS(BaseOptimizer):
         muon_location: MOUN_LOC = 'after_clip',
         factor_second_moment: bool = False,
         debias_beta: bool = True,
+        gamma: Optional[float] = None,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -644,6 +645,7 @@ class RMSPropADOPTMARS(BaseOptimizer):
             'muon_location': muon_location,
             'factor_second_moment':factor_second_moment,
             'debias_beta':debias_beta,
+            'gamma':gamma,
         }
         super().__init__(params, defaults)
 
@@ -658,6 +660,7 @@ class RMSPropADOPTMARS(BaseOptimizer):
             for p in group['params']:
                 state = self.state[p]
                 grad = p.grad
+                state['previous_grad'] = torch.zeros_like(p)
 
                 factored_dims = create_factored_dims(
                     grad.shape,
@@ -712,6 +715,7 @@ class RMSPropADOPTMARS(BaseOptimizer):
             eps_floor = group["eps_floor"]
             use_muon_pp = group["use_muon_pp"]
             muon_location = group['muon_location']
+            gamma = group["gamma"]
 
             if group["debias_beta"]:
                 bias_correction_sqrt: float = math.sqrt(self.debias(beta, group['step']))
@@ -733,6 +737,8 @@ class RMSPropADOPTMARS(BaseOptimizer):
                     param_size += p.numel()                
 
                 if len(state) == 0:
+                    state['previous_grad'] = -p.grad.to(dtype=p.dtype, copy=True).detach()
+
                     factored_dims = create_factored_dims(
                         grad.shape,
                         factored=group['factor_second_moment'],
@@ -755,38 +761,49 @@ class RMSPropADOPTMARS(BaseOptimizer):
                     else:
                         state['exp_avg_sq'] = torch.zeros_like(p)
 
-                exp_avg_sq = state['exp_avg_sq']
+                exp_avg_sq, grad_diff = state['exp_avg_sq'], state['previous_grad']
 
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
+                    grad_diff = grad_diff.to(torch.float32)
                     if not group['factor_second_moment']:
                         exp_avg_sq = exp_avg_sq.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
-                if use_muon_pp and muon_location == 'before_clip' and p.ndim >= 2 and p.size(0) < 10000:
+                grad_diff.add_(grad)
+
+                if use_muon_pp and muon_location == 'before_mars' and p.ndim >= 2 and p.size(0) < 10000:
                     grad.copy_(newton_schulz_(grad))
+                
+                # MARS Calculate cₜ (gradient with correction term)
+                # 0.475 is calcuated value when beta1 = 0.95 and gamma = 0.025
+                correction = (gamma if gamma is not None else 0.475) * grad_diff
+                c_t = grad + correction
+
+                if use_muon_pp and muon_location == 'before_clip' and p.ndim >= 2 and p.size(0) < 10000:
+                    c_t.copy_(newton_schulz_(c_t))
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                    c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
 
                 if use_muon_pp and muon_location == 'after_clip' and p.ndim >= 2 and p.size(0) < 10000:
-                    grad.copy_(newton_schulz_(grad))
+                    c_t.copy_(newton_schulz_(c_t))
 
                 if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
+                    rms_grad = c_t.pow(2).mean().sqrt_()
                     curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
                 else:
                     curr_eps = eps
 
                 if group['step'] == 1:
-                    exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta, True)
+                    exp_avg_sq = update_second_moment(exp_avg_sq, c_t, beta, True)
                 else:
                     de_nom = get_denom(exp_avg_sq).div_(bias_correction_sqrt).clamp_(curr_eps)
-                    exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta)
+                    exp_avg_sq = update_second_moment(exp_avg_sq, c_t, beta)
 
-                    normed_grad = grad.div(de_nom)
+                    normed_grad = c_t.div(de_nom)
                     normed_grad.clamp_(-adopt_clip, adopt_clip)
 
                     # Weight decay calculated at y
@@ -810,8 +827,11 @@ class RMSPropADOPTMARS(BaseOptimizer):
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state['previous_grad'], -grad)
                     if not group['factor_second_moment']:
                         copy_stochastic_(state['exp_avg_sq'], exp_avg_sq)
                     copy_stochastic_(p, p_fp32)
+                else:
+                    state['previous_grad'].copy_(-grad)
 
         return loss

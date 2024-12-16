@@ -9,7 +9,7 @@ from LoraEasyCustomOptimizer.farmscrop import FARMSCrop, FARMSCropV2
 from LoraEasyCustomOptimizer.fcompass import FCompass, FCompassPlus
 from LoraEasyCustomOptimizer.fishmonger import FishMonger, FishMonger8BitBNB
 from LoraEasyCustomOptimizer.lpfadamw import LPFAdamW
-from LoraEasyCustomOptimizer.rmsprop import RMSProp, RMSPropADOPT
+from LoraEasyCustomOptimizer.rmsprop import RMSProp, RMSPropADOPT, RMSPropADOPTMARS
 from LoraEasyCustomOptimizer.shampoo import ScalableShampoo
 from LoraEasyCustomOptimizer.soap import SOAP
 from LoraEasyCustomOptimizer.ranger21 import Ranger21
@@ -67,6 +67,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     CompassADOPT,
     RMSPropADOPT,
     CompassADOPTMARS,
+    RMSPropADOPTMARS,
 ]
 
 OPTIMIZERS: Dict[str, OPTIMIZER] = {str(f"{optimizer.__name__}".lower()): optimizer for optimizer in OPTIMIZER_LIST}
