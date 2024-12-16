@@ -1437,7 +1437,7 @@ class CompassADOPT(BaseOptimizer):
                 bias_correction2_sqrt = 1.0
 
             step_size = self.apply_adam_debias(
-                adam_debias=group["debias_beta1"],
+                adam_debias=not group["debias_beta1"],
                 step_size=lr,
                 bias_correction1=bias_correction1,
             )
@@ -1747,7 +1747,7 @@ class CompassADOPTMARS(BaseOptimizer):
                 bias_correction2_sqrt = 1.0
 
             step_size = self.apply_adam_debias(
-                adam_debias=group["debias_beta1"],
+                adam_debias=not group["debias_beta1"],
                 step_size=lr,
                 bias_correction1=bias_correction1,
             )
