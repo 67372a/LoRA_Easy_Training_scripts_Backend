@@ -283,13 +283,15 @@ class ADOPTScheduleFree(BaseOptimizer):
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
             Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
             Valid values: layer, unit (default: layer).
-        bias_correction_beta2 (bool):
-            Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
             use polynomial weighting in the average with power r.  (Default: 0.0)
         weight_lr_power (float): 
             during warmup, the weights in the average will be equal to lr raised to this power.
             set to 0 for no weighting. (Default: 2,0)
+        debias_beta1 (bool):
+            Apply bias correction to step size (LR). (Default: False)
+        debias_beta2 (bool):
+            Apply bias correction to denominator of updates (adaptive LR). (Default: False)
     """
 
     def __init__(
@@ -308,7 +310,8 @@ class ADOPTScheduleFree(BaseOptimizer):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        bias_correction_beta2: bool = False,
+        debias_beta1: bool = False,
+        debias_beta2: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -337,7 +340,8 @@ class ADOPTScheduleFree(BaseOptimizer):
             'adaptive_clip':adaptive_clip,
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
-            'bias_correction_beta2':bias_correction_beta2,
+            'debias_beta1':debias_beta1,
+            'debias_beta2':debias_beta2,
         }
         super().__init__(params, defaults)
 
@@ -422,13 +426,7 @@ class ADOPTScheduleFree(BaseOptimizer):
 
             beta1, beta2 = group['betas']
 
-            beta2_t = beta2**group['step']
-            bias_correction2 = 1 - beta2_t
-
             lr: float = group['lr']
-
-            if not group['bias_correction_beta2']:
-                bias_correction2 = 1.0
 
             lr_max = group['lr_max'] = max(lr, group['lr_max'])
 
@@ -556,8 +554,6 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
             Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
             Valid values: layer, unit (default: layer).
-        bias_correction_beta2 (bool):
-            Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
             use polynomial weighting in the average with power r.  (Default: 0.0)
         weight_lr_power (float): 
@@ -587,10 +583,11 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        bias_correction_beta2: bool = False,
         cautious: bool = True,
         alpha: float = 2.0,
         t_alpha_beta3: Optional[float] = None,
+        debias_beta1: bool = False,
+        debias_beta2: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -619,10 +616,11 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
             'adaptive_clip':adaptive_clip,
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
-            'bias_correction_beta2':bias_correction_beta2,
             'alpha': alpha,
             't_alpha_beta3': t_alpha_beta3,
             'cautious': cautious,
+            'debias_beta1':debias_beta1,
+            'debias_beta2':debias_beta2,
         }
         super().__init__(params, defaults)
 
@@ -729,13 +727,8 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
 
             beta1, beta2, beta3 = group['betas']
 
-            beta2_t = beta2**group['step']
-            bias_correction2 = 1 - beta2_t
-
             lr: float = group['lr']
 
-            if not group['bias_correction_beta2']:
-                bias_correction2 = 1.0
 
             lr_max = group['lr_max'] = max(lr, group['lr_max'])
 
@@ -881,8 +874,6 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
             Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
             Valid values: layer, unit (default: layer).
-        bias_correction_beta2 (bool):
-            Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
             use polynomial weighting in the average with power r.  (Default: 0.0)
         weight_lr_power (float): 
@@ -908,8 +899,10 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        bias_correction_beta3: bool = False,
         cautious: bool = True,
+        debias_beta1: bool = False,
+        debias_beta2: bool = False,
+        debias_beta3: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -938,7 +931,9 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
             'adaptive_clip':adaptive_clip,
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
-            'bias_correction_beta3':bias_correction_beta3,
+            'debias_beta1':debias_beta1,
+            'debias_beta2':debias_beta2,
+            'debias_beta3':debias_beta3,
             'cautious': cautious,
         }
         super().__init__(params, defaults)
@@ -1182,8 +1177,6 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
             Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
             Valid values: layer, unit (default: layer).
-        bias_correction_beta2 (bool):
-            Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
             use polynomial weighting in the average with power r.  (Default: 0.0)
         weight_lr_power (float): 
@@ -1210,8 +1203,9 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        bias_correction_beta2: bool = False,
         gamma: Optional[float] = None,
+        debias_beta1: bool = False,
+        debias_beta2: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1240,8 +1234,9 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
             'adaptive_clip':adaptive_clip,
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
-            'bias_correction_beta2':bias_correction_beta2,
             'gamma':gamma,
+            'debias_beta1':debias_beta1,
+            'debias_beta2':debias_beta2,
         }
         super().__init__(params, defaults)
 
@@ -1327,13 +1322,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
 
             beta1, beta2 = group['betas']
 
-            beta2_t = beta2**group['step']
-            bias_correction2 = 1 - beta2_t
-
             lr: float = group['lr']
-
-            if not group['bias_correction_beta2']:
-                bias_correction2 = 1.0
 
             lr_max = group['lr_max'] = max(lr, group['lr_max'])
 
@@ -1474,8 +1463,6 @@ class FADOPTScheduleFree(BaseOptimizer):
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
             Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
             Valid values: layer, unit (default: layer).
-        bias_correction_beta2 (bool):
-            Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
             use polynomial weighting in the average with power r.  (Default: 0.0)
         weight_lr_power (float): 
@@ -1483,6 +1470,7 @@ class FADOPTScheduleFree(BaseOptimizer):
             set to 0 for no weighting. (Default: 2,0)
         fisher_clip (float):
             Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
+            
     """
 
     def __init__(
@@ -1502,6 +1490,8 @@ class FADOPTScheduleFree(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
+        debias_beta1: bool = False,
+        debias_beta2: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1531,6 +1521,8 @@ class FADOPTScheduleFree(BaseOptimizer):
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
             'fisher_clip':fisher_clip,
+            'debias_beta1':debias_beta1,
+            'debias_beta2':debias_beta2,
         }
         super().__init__(params, defaults)
 
@@ -1754,8 +1746,6 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
             Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
             Valid values: layer, unit (default: layer).
-        bias_correction_beta2 (bool):
-            Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
             use polynomial weighting in the average with power r.  (Default: 0.0)
         weight_lr_power (float): 
@@ -1791,6 +1781,8 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
         cautious: bool = True,
         alpha: float = 2.0,
         t_alpha_beta3: Optional[float] = None,
+        debias_beta1: bool = False,
+        debias_beta2: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1823,6 +1815,8 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
             'cautious':cautious,
             'alpha':alpha,
             't_alpha_beta3':t_alpha_beta3,
+            'debias_beta1':debias_beta1,
+            'debias_beta2':debias_beta2,
         }
         super().__init__(params, defaults)
 
@@ -2081,8 +2075,6 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
             Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
             Valid values: layer, unit (default: layer).
-        bias_correction_beta2 (bool):
-            Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
             use polynomial weighting in the average with power r.  (Default: 0.0)
         weight_lr_power (float): 
@@ -2110,6 +2102,9 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
         cautious: bool = True,
+        debias_beta1: bool = False,
+        debias_beta2: bool = False,
+        debias_beta3: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -2140,6 +2135,9 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
             'adaptive_clip_type':adaptive_clip_type,
             'fisher_clip':fisher_clip,
             'cautious':cautious,
+            'debias_beta1':debias_beta1,
+            'debias_beta2':debias_beta2,
+            'debias_beta3':debias_beta3,
         }
         super().__init__(params, defaults)
 
@@ -2384,8 +2382,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
             Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
             Valid values: layer, unit (default: layer).
-        bias_correction_beta2 (bool):
-            Apply bias correction to denominator of updates (adaptive LR). i.e.  (Default: false)
         r (float): 
             use polynomial weighting in the average with power r.  (Default: 0.0)
         weight_lr_power (float): 
@@ -2396,6 +2392,10 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             When set to none, will calculate gamma value based on current beta1 to keep same resulting value as though gamma is 0.025 and beta1 is 0.95 (default: None)
         fisher_clip (float):
             Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
+        debias_beta1 (bool):
+            Apply bias correction to step size (LR). (Default: False)
+        debias_beta2 (bool):
+            Apply bias correction to denominator of updates (adaptive LR). (Default: False)
     """
 
     def __init__(
@@ -2416,6 +2416,8 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
         gamma: Optional[float] = None,
+        debias_beta1: bool = False,
+        debias_beta2: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -2446,7 +2448,8 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             'adaptive_clip_type':adaptive_clip_type,
             'fisher_clip':fisher_clip,
             'gamma': gamma,
-
+            'debias_beta1':debias_beta1,
+            'debias_beta2':debias_beta2,
         }
         super().__init__(params, defaults)
 
@@ -2532,16 +2535,34 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
 
             beta1, beta2 = group['betas']
 
+            bias_correction1: float = self.debias(beta1, group['step'])
+            if group["debias_beta2"]:
+                current_beta2: float = self.debias_beta(beta2, group['step'])
+            else:
+                current_beta2 = 1.0
+
             lr: float = group['lr']
 
             lr_max = group['lr_max'] = max(lr, group['lr_max'])
 
-            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
+            lr_step_size = self.apply_adam_debias(
+                adam_debias=not group["debias_beta1"],
+                step_size=lr,
+                bias_correction1=bias_correction1,
+            )
+
+            lr_max_step_size = self.apply_adam_debias(
+                adam_debias=not group["debias_beta1"],
+                step_size=lr_max,
+                bias_correction1=bias_correction1,
+            )
+
+            weight = (group['step'] ** group['r']) * (lr_max_step_size ** group['weight_lr_power'])
             weight_sum = group['weight_sum'] = group['weight_sum'] + weight
 
             checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
 
-            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
+            adaptive_y_lr: float = lr_step_size * (beta1 * (1.0 - checkpoint) - 1)
             adopt_clip: float = (group['step']-1)**0.25
 
             adaptive_clip = group["adaptive_clip"]
@@ -2602,7 +2623,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                     fim.addcmul_(c_t, c_t.conj()).clamp_(-adopt_clip, adopt_clip)
                 else:
                     fim_base = torch.clamp(fim.sqrt(), curr_eps)
-                    fim.mul_(beta2).addcmul_(c_t, c_t.conj(), value=1 - beta2).clamp_(-adopt_clip, adopt_clip)
+                    fim.mul_(current_beta2).addcmul_(c_t, c_t.conj(), value=1 - current_beta2).clamp_(-adopt_clip, adopt_clip)
 
                     grad_nat = c_t.div(fim_base)
                     rms = grad_nat.pow(2).mean().sqrt_()
@@ -2631,7 +2652,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(update, alpha=adaptive_y_lr)
 
-                    z.sub_(update, alpha=lr)
+                    z.sub_(update, alpha=lr_step_size)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         fim_sum += fim.sum()
