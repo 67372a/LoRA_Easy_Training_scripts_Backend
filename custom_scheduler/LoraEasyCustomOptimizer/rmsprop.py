@@ -328,6 +328,8 @@ class RMSPropADOPT(BaseOptimizer):
         muon_location (string):
             'before_clip','after_clip'
             (default: after_clip)
+        debias_beta (bool):
+            Apply bias correction to denominator of updates (adaptive LR). (Default: True) 
     """
 
     def __init__(
@@ -347,6 +349,7 @@ class RMSPropADOPT(BaseOptimizer):
         use_muon_pp: bool = False,
         muon_location: MOUN_LOC = 'after_clip',
         factor_second_moment: bool = False,
+        debias_beta: bool = True,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -373,6 +376,7 @@ class RMSPropADOPT(BaseOptimizer):
             'use_muon_pp': use_muon_pp,
             'muon_location': muon_location,
             'factor_second_moment':factor_second_moment,
+            'debias_beta':debias_beta,
         }
         super().__init__(params, defaults)
 
@@ -442,6 +446,11 @@ class RMSPropADOPT(BaseOptimizer):
             use_muon_pp = group["use_muon_pp"]
             muon_location = group['muon_location']
 
+            if group["debias_beta"]:
+                bias_correction_sqrt: float = math.sqrt(self.debias(beta, group['step']))
+            else:
+                bias_correction_sqrt = 1.0
+
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -505,13 +514,9 @@ class RMSPropADOPT(BaseOptimizer):
                     curr_eps = eps
 
                 if group['step'] == 1:
-                    if group['factor_second_moment']:
-                        exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta)
-                    else:
-                        #Special handling for ADOPT first step
-                        exp_avg_sq.addcmul_(grad, grad)
+                    exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta, True)
                 else:
-                    de_nom = get_denom(exp_avg_sq).clamp_(curr_eps)
+                    de_nom = get_denom(exp_avg_sq).div_(bias_correction_sqrt).clamp_(curr_eps)
                     exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta)
 
                     normed_grad = grad.div(de_nom)

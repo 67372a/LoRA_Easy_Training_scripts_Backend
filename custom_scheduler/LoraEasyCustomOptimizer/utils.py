@@ -186,21 +186,31 @@ def get_denom(second_moment, eps: float = 1e-30):
     
 # https://github.com/LoganBooker/prodigy-plus-schedule-free/blob/23f752a3901686d270dfdcb9b29823541ad1c3c7/prodigyplus/core_optimiser.py#L411
 @torch.no_grad()
-def update_second_moment(second_moment, grad, beta2):
+def update_second_moment(second_moment, grad, beta2, adopt_first: bool = False):
     # EMA updates
     if isinstance(second_moment, list):
         row_var, col_var, dr, dc, _ = second_moment
-
-        row_var.lerp_(
-            grad.norm(dim=dr, keepdim=True).square_().div_(grad.shape[dr]),
-            weight=1 - beta2
-        )
-        col_var.lerp_(
-            grad.norm(dim=dc, keepdim=True).square_().div_(grad.shape[dc]),
-            weight=1 - beta2
-        )
+        if adopt_first:
+            row_var.copy_(
+                grad.norm(dim=dr, keepdim=True).square_().div_(grad.shape[dr])
+            )
+            col_var.copy_(
+                grad.norm(dim=dc, keepdim=True).square_().div_(grad.shape[dc])
+            )
+        else:
+            row_var.lerp_(
+                grad.norm(dim=dr, keepdim=True).square_().div_(grad.shape[dr]),
+                weight=1 - beta2
+            )
+            col_var.lerp_(
+                grad.norm(dim=dc, keepdim=True).square_().div_(grad.shape[dc]),
+                weight=1 - beta2
+            )
     else:
-        second_moment.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+        if adopt_first:
+            second_moment.addcmul_(grad, grad)
+        else:
+            second_moment.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
     return second_moment
 

@@ -17,7 +17,7 @@ from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMET
 from pytorch_optimizer.optimizer.gc import centralize_gradient
 from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
 
-MOUN_LOC = Literal['before_clip','after_clip']
+MOUN_LOC = Literal['before_mars','before_clip','after_clip']
 
 class Compass(BaseOptimizer):
     r"""
@@ -1301,6 +1301,10 @@ class CompassADOPT(BaseOptimizer):
         muon_location (string):
             'before_clip','after_clip'
             (default: after_clip)
+        debias_beta1 (bool):
+            Apply bias correction to step size (LR). (Default: True)
+        debias_beta2 (bool):
+            Apply bias correction to denominator of updates (adaptive LR). (Default: True)
     """
 
     def __init__(
@@ -1322,6 +1326,8 @@ class CompassADOPT(BaseOptimizer):
         use_muon_pp: bool = False,
         muon_location: MOUN_LOC = 'after_clip',
         factor_second_moment: bool = False,
+        debias_beta1: bool = True,
+        debias_beta2: bool = True,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1350,6 +1356,8 @@ class CompassADOPT(BaseOptimizer):
             'use_muon_pp': use_muon_pp,
             'muon_location': muon_location,
             'factor_second_moment':factor_second_moment,
+            'debias_beta1': debias_beta1,
+            'debias_beta2': debias_beta2,
         }
         super().__init__(params, defaults)
 
@@ -1408,8 +1416,6 @@ class CompassADOPT(BaseOptimizer):
 
             beta1, beta2 = group['betas']
 
-            lr: float = group['lr']
-
             adopt_clip: float = (group['step']-1)**0.25
 
             adaptive_clip = group["adaptive_clip"]
@@ -1421,6 +1427,20 @@ class CompassADOPT(BaseOptimizer):
             amp_fac = group["amp_fac"]
             use_muon_pp = group["use_muon_pp"]
             muon_location = group['muon_location']
+
+            lr: float = group['lr']
+
+            bias_correction1: float = self.debias(beta1, group['step'])
+            if group["debias_beta2"]:
+                bias_correction2_sqrt: float = math.sqrt(self.debias(beta2, group['step']))
+            else:
+                bias_correction2_sqrt = 1.0
+
+            step_size = self.apply_adam_debias(
+                adam_debias=group["debias_beta1"],
+                step_size=lr,
+                bias_correction1=bias_correction1,
+            )
 
             for p in group['params']:
                 if p.grad is None:
@@ -1493,7 +1513,7 @@ class CompassADOPT(BaseOptimizer):
                         #Special handling for ADOPT first step
                         exp_avg_sq.addcmul_(grad, grad)
                 else:
-                    de_nom = get_denom(exp_avg_sq).clamp_(curr_eps)
+                    de_nom = get_denom(exp_avg_sq).div_(bias_correction2_sqrt).clamp_(curr_eps)
                     exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2)
 
                     normed_grad = grad.div(de_nom)
@@ -1521,7 +1541,7 @@ class CompassADOPT(BaseOptimizer):
                     else:
                         mask = 1.0
 
-                    p_fp32.add_(update * mask, alpha=-lr)
+                    p_fp32.add_(update * mask, alpha=-step_size)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         exp_avg_sq_sum += exp_avg_sq.sum()
@@ -1535,5 +1555,326 @@ class CompassADOPT(BaseOptimizer):
                     if not group['factor_second_moment']:
                         copy_stochastic_(state['exp_avg_sq'], exp_avg_sq)
                     copy_stochastic_(p, p_fp32)
+
+        return loss
+
+class CompassADOPTMARS(BaseOptimizer):
+    r"""ADOPT Style Compass + MARS correction.
+    Arguments:
+        params (iterable):
+            Iterable of parameters to optimize or dicts defining
+            parameter groups.
+        lr (float):
+            Learning rate parameter (default 2.5e-3).
+        betas (float, float):
+            coefficients for momentum and exponential moving average squared (default: 0.95, 0.9999).
+        eps (float):
+            Term the denominator is minimally clamped to, to
+            improve numerical stability. (default: 1e-6).
+        eps2 (float):
+            Term to multiple the RMS of the grad to calculate adaptive eps. (default: 1e-2).
+        eps_floor (float):
+            Term to set a floor for the eps, to prevent NaNs. (default: None, disabling adaptive eps).
+        weight_decay (float):
+            Weight decay at y, i.e. a L2 penalty (default: 0.0).
+        weight_decouple (bool): 
+            the optimizer uses decoupled weight decay as in AdamW. (default: False)
+        stable_weight_decay (bool): 
+            Requires weight_decouple be True. Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
+        adaptive_clip (float):
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+        adaptive_clip_eps (float):
+            The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
+            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+        adaptive_clip_type (string):
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
+        cautious (bool)
+            Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+        use_muon_pp (boolean):
+            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
+            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
+            May not work well with small batch sizes or finetuning.
+            (default: False)
+        factor_second_moment (bool):
+            Stores the second moment, i.e. ema_sq / exponential moving average squared, at the row/column level 
+            instead of per parameter saving vram at the cost of lower precision (Default: False)
+        gamma (float):
+            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are the recommended values by the authors when beta1 is 0.95.
+            When set to none, will calculate gamma value based on current beta1 to keep same resulting value as though gamma is 0.025 and beta1 is 0.95 (default: None)
+        muon_location (string):
+            'before_mars','before_clip','after_clip'
+            (default: after_clip)
+        debias_beta1 (bool):
+            Apply bias correction to step size (LR). (Default: True)
+        debias_beta2 (bool):
+            Apply bias correction to denominator of updates (adaptive LR). (Default: True)
+    """
+
+    def __init__(
+        self,
+        params: PARAMETERS,
+        lr: float = 5e-4,
+        betas: BETAS = (0.95, 0.9999),
+        amp_fac: float = 2.0,
+        weight_decay: float = 0.0,
+        weight_decouple: bool = False,
+        stable_weight_decay: bool = False,
+        eps: float = 1e-6,
+        eps2: float = 1e-2,
+        eps_floor: Optional[float] = None,
+        adaptive_clip: float = 1.0,
+        adaptive_clip_eps: float = 1e-3,
+        adaptive_clip_type: NORM_TYPE = 'layer',
+        cautious: bool = True,
+        use_muon_pp: bool = False,
+        muon_location: MOUN_LOC = 'after_clip',
+        factor_second_moment: bool = False,
+        gamma: Optional[float] = None,
+        debias_beta1: bool = True,
+        debias_beta2: bool = True,
+        **kwargs,
+    ):
+        self.validate_learning_rate(lr)
+        self.validate_betas(betas)
+        self.validate_non_negative(weight_decay, 'weight_decay')
+        self.validate_non_negative(eps, 'eps')
+
+        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = 1e-30
+
+        defaults: DEFAULTS = {
+            'lr': lr,
+            'betas': betas,
+            'amp_fac': amp_fac,
+            'weight_decay': weight_decay,
+            'weight_decouple':weight_decouple,
+            'stable_weight_decay':stable_weight_decay,
+            'eps': eps,
+            'eps2': eps2,
+            'eps_floor':eps_floor,
+            'adaptive_clip':adaptive_clip,
+            'adaptive_clip_eps':adaptive_clip_eps,
+            'adaptive_clip_type':adaptive_clip_type,
+            'cautious': cautious,
+            'use_muon_pp': use_muon_pp,
+            'muon_location': muon_location,
+            'factor_second_moment':factor_second_moment,
+            'gamma':gamma,
+            'debias_beta1': debias_beta1,
+            'debias_beta2': debias_beta2,
+        }
+        super().__init__(params, defaults)
+
+    def __str__(self) -> str:
+        return 'CompassADOPTMARS'
+
+    @torch.no_grad()
+    def reset(self):
+        for group in self.param_groups:
+            group['step'] = 0
+            group['exp_avg_sq_mean_sqrt'] = 0.0
+            for p in group['params']:
+                state = self.state[p]
+                grad = p.grad
+
+                state['exp_avg'] = torch.zeros_like(p)
+                state['previous_grad'] = torch.zeros_like(p)
+
+                factored_dims = create_factored_dims(
+                    grad.shape,
+                    factored=group['factor_second_moment'],
+                    min_dim_size_to_factor=32
+                )
+
+                if factored_dims is not None:
+                    dc, dr = factored_dims
+                    row_shape = list(p.grad.shape)
+                    row_shape[dr] = 1
+                    col_shape = list(p.grad.shape)
+                    col_shape[dc] = 1
+                    reduce_dc = dc - 1 if dc > dr else dc
+                    # Store reduction variables so we don't have to recalculate each step.
+                    # Always store second moment low ranks in fp32 to avoid precision issues. Memory difference 
+                    # between bf16/fp16 and fp32 is negligible here.
+                    state["exp_avg_sq"] = [torch.zeros(row_shape, dtype=torch.float32, device=p.device).detach(), 
+                                            torch.zeros(col_shape, dtype=torch.float32, device=p.device).detach(), 
+                                            dr, dc, reduce_dc]
+                else:
+                    state['exp_avg_sq'] = torch.zeros_like(p)
+
+    @torch.no_grad()
+    def step(self, closure: CLOSURE = None) -> LOSS:
+        loss: LOSS = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+                group['exp_avg_sq_mean_sqrt'] = 0.0
+
+            param_size: int = 0
+            exp_avg_sq_sum: float = 0.0
+
+            beta1, beta2 = group['betas']
+
+            adopt_clip: float = (group['step']-1)**0.25
+
+            adaptive_clip = group["adaptive_clip"]
+            adaptive_clip_type = group["adaptive_clip_type"]
+            adaptive_clip_eps = group["adaptive_clip_eps"]
+            eps = group["eps"]
+            eps2 = group["eps2"]
+            eps_floor = group["eps_floor"]
+            amp_fac = group["amp_fac"]
+            use_muon_pp = group["use_muon_pp"]
+            muon_location = group['muon_location']
+            gamma = group["gamma"]
+
+            lr: float = group['lr']
+
+            bias_correction1: float = self.debias(beta1, group['step'])
+            if group["debias_beta2"]:
+                bias_correction2_sqrt: float = math.sqrt(self.debias(beta2, group['step']))
+            else:
+                bias_correction2_sqrt = 1.0
+
+            step_size = self.apply_adam_debias(
+                adam_debias=group["debias_beta1"],
+                step_size=lr,
+                bias_correction1=bias_correction1,
+            )
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad
+                if grad.is_sparse:
+                    raise NoSparseGradientError(str(self))
+
+                p_fp32 = p
+                state = self.state[p]
+
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    param_size += p.numel()                
+
+                if len(state) == 0:
+                    state['exp_avg'] = torch.zeros_like(p)
+                    state['previous_grad'] = -p.grad.to(dtype=p.dtype, copy=True).detach()
+                    factored_dims = create_factored_dims(
+                        grad.shape,
+                        factored=group['factor_second_moment'],
+                        min_dim_size_to_factor=32
+                    )
+
+                    if factored_dims is not None:
+                        dc, dr = factored_dims
+                        row_shape = list(p.grad.shape)
+                        row_shape[dr] = 1
+                        col_shape = list(p.grad.shape)
+                        col_shape[dc] = 1
+                        reduce_dc = dc - 1 if dc > dr else dc
+                        # Store reduction variables so we don't have to recalculate each step.
+                        # Always store second moment low ranks in fp32 to avoid precision issues. Memory difference 
+                        # between bf16/fp16 and fp32 is negligible here.
+                        state["exp_avg_sq"] = [torch.zeros(row_shape, dtype=torch.float32, device=p.device).detach(), 
+                                                torch.zeros(col_shape, dtype=torch.float32, device=p.device).detach(), 
+                                                dr, dc, reduce_dc]
+                    else:
+                        state['exp_avg_sq'] = torch.zeros_like(p)
+
+                exp_avg, exp_avg_sq, grad_diff = state['exp_avg'], state['exp_avg_sq'], state['previous_grad']
+
+                # unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
+                    exp_avg = exp_avg.to(torch.float32)
+                    grad_diff = grad_diff.to(torch.float32)
+                    if not group['factor_second_moment']:
+                        exp_avg_sq = exp_avg_sq.to(torch.float32)
+                    p_fp32 = p.to(dtype=torch.float32, copy=True)
+
+                grad_diff.add_(grad)
+
+                if use_muon_pp and muon_location == 'before_mars' and p.ndim >= 2 and p.size(0) < 10000:
+                    grad.copy_(newton_schulz_(grad))
+                
+                # MARS Calculate cₜ (gradient with correction term)
+                # 0.475 is calcuated value when beta1 = 0.95 and gamma = 0.025
+                correction = (gamma if gamma is not None else (0.475 * (1 - beta1) / beta1)) * beta1 / (1 - beta1) * grad_diff
+                c_t = grad + correction
+
+                if use_muon_pp and muon_location == 'before_clip' and p.ndim >= 2 and p.size(0) < 10000:
+                    c_t.copy_(newton_schulz_(c_t))
+
+                if adaptive_clip > 0.0:
+                    # Apply Adaptive Gradient Clipping (AGC)
+                    c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+                if use_muon_pp and muon_location == 'after_clip' and p.ndim >= 2 and p.size(0) < 10000:
+                    c_t.copy_(newton_schulz_(c_t))
+
+                if eps_floor is not None and eps_floor < eps:
+                    rms_grad = c_t.pow(2).mean().sqrt_()
+                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
+                else:
+                    curr_eps = eps
+
+                if group['step'] == 1:
+                    exp_avg_sq = update_second_moment(exp_avg_sq, c_t, beta2, True)
+                else:
+                    de_nom = get_denom(exp_avg_sq).div_(bias_correction2_sqrt).clamp_(curr_eps)
+                    exp_avg_sq = update_second_moment(exp_avg_sq, c_t, beta2)
+
+                    normed_grad = c_t.div(de_nom)
+                    normed_grad.clamp_(-adopt_clip, adopt_clip)
+
+                    exp_avg.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
+
+                    update = normed_grad.add(exp_avg, alpha=amp_fac)
+
+                    # Weight decay calculated at y
+                    if group["weight_decay"] != 0 and group['weight_decouple']:
+                        if group['stable_weight_decay'] and group['exp_avg_sq_mean_sqrt'] > 0:
+                            swd_scaling = 1.0 / group['exp_avg_sq_mean_sqrt']
+                        else:
+                            swd_scaling = 1.0
+
+                        p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
+                    elif group["weight_decay"] != 0:
+                        update.add_(p_fp32, alpha=group["weight_decay"])
+
+                    if group["cautious"]:
+                        # compute norm gradient
+                        mask = (update * normed_grad > 0).to(normed_grad.dtype)
+                        mask.div_(mask.mean().clamp_(min=1e-3))
+                    else:
+                        mask = 1.0
+
+                    p_fp32.add_(update * mask, alpha=-step_size)
+
+                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                        exp_avg_sq_sum += exp_avg_sq.sum()
+
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    group['exp_avg_sq_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
+
+                # pack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    copy_stochastic_(state['exp_avg'], exp_avg)
+                    if not group['factor_second_moment']:
+                        copy_stochastic_(state['exp_avg_sq'], exp_avg_sq)
+                    copy_stochastic_(state['previous_grad'], -grad)
+                    copy_stochastic_(p, p_fp32)
+                else:
+                    state['previous_grad'].copy_(-grad)
 
         return loss
