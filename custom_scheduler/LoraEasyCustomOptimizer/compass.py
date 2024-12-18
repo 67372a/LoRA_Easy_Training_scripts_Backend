@@ -1515,7 +1515,7 @@ class CompassADOPT(BaseOptimizer):
                         muon_grad_norm = torch.linalg.norm(muon_grad)
                         normed_grad_norm = torch.linalg.norm(normed_grad_norm)
 
-                        muon_grad.mul_(normed_grad_norm / (muon_grad_norm + 1e-16))
+                        muon_grad.mul_(normed_grad_norm.div_(muon_grad_norm.clamp_(1e-16)))
 
                         update_grad = muon_grad
                     else:
@@ -1834,7 +1834,7 @@ class CompassADOPTMARS(BaseOptimizer):
                         muon_grad_norm = torch.linalg.norm(muon_grad)
                         normed_grad_norm = torch.linalg.norm(normed_grad_norm)
 
-                        muon_grad.mul_(normed_grad_norm / (muon_grad_norm + 1e-16))
+                        muon_grad.mul_(normed_grad_norm.div_(muon_grad_norm.clamp_(1e-16)))
 
                         update_grad = muon_grad
                     else:
