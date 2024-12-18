@@ -8,7 +8,7 @@ import math
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
-from .utils import copy_stochastic_, NORM_TYPE, agc
+from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz_
 
 class ScheduleFreeWrapper(BaseOptimizer):
     r"""
@@ -1235,8 +1235,8 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
             during warmup, the weights in the average will be equal to lr raised to this power.
             set to 0 for no weighting. (Default: 2,0)
         gamma (float):
-            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are the recommended values by the authors when beta1 is 0.95.
-            When set to none, will calculate gamma value based on current beta1 to keep same resulting value as though gamma is 0.025 and beta1 is 0.95 (default: None)
+            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
+            larger values apply more correction, and will require higher LRs to offset. (default: 0.025)
     """
 
     def __init__(
@@ -1255,7 +1255,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        gamma: Optional[float] = None,
+        gamma: float = 0.025,
         debias_beta1: bool = False,
         debias_beta2: bool = False,
         **kwargs,
@@ -1444,8 +1444,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                 grad_diff.add_(grad)
 
                 # MARS Calculate cₜ (gradient with correction term)
-                # 0.475 is calcuated value when beta1 = 0.95 and gamma = 0.025
-                correction = (gamma if gamma is not None else (0.475 * (1 - beta1) / beta1)) * beta1 / (1 - beta1) * grad_diff
+                correction = gamma * beta1 / (1 - beta1) * grad_diff
                 c_t = grad + correction
 
                 if adaptive_clip > 0.0:
@@ -2516,14 +2515,19 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             during warmup, the weights in the average will be equal to lr raised to this power.
             set to 0 for no weighting. (Default: 2,0)
         gamma (float):
-            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are the recommended values by the authors when beta1 is 0.95.
-            When set to none, will calculate gamma value based on current beta1 to keep same resulting value as though gamma is 0.025 and beta1 is 0.95 (default: None)
+            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
+            larger values apply more correction, and will require higher LRs to offset. (default: 0.025)
         fisher_clip (float):
             Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
         debias_beta1 (bool):
             Apply bias correction to step size (LR). (Default: False)
         debias_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: False)
+        use_muon_pp (boolean):
+            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
+            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
+            May not work well with small batch sizes or finetuning.
+            (default: False)
     """
 
     def __init__(
@@ -2543,9 +2547,10 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
-        gamma: Optional[float] = None,
+        gamma: float = 0.025,
         debias_beta1: bool = False,
         debias_beta2: bool = False,
+        use_muon_pp: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -2578,6 +2583,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             'gamma': gamma,
             'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
+            'use_muon_pp':use_muon_pp,
         }
         super().__init__(params, defaults)
 
@@ -2701,6 +2707,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             eps_floor = group["eps_floor"]
             fisher_clip = group["fisher_clip"]
             gamma = group["gamma"]
+            use_muon_pp = group["use_muon_pp"]
 
 
             for p in group['params']:
@@ -2733,13 +2740,19 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 grad_diff.add_(grad)
 
                 # MARS Calculate cₜ (gradient with correction term)
-                # 0.475 is calcuated value when beta1 = 0.95 and gamma = 0.025
-                correction = (gamma if gamma is not None else (0.475 * (1 - beta1) / beta1)) * beta1 / (1 - beta1) * grad_diff
+                correction = gamma * beta1 / (1 - beta1) * grad_diff
                 c_t = grad + correction
+
+                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                    muon_grad = newton_schulz_(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+                    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                        # Apply Adaptive Gradient Clipping (AGC)
+                        muon_grad.copy_(agc(p_fp32, muon_grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -2758,7 +2771,15 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                     divisor = max(fisher_clip, rms) / fisher_clip
                     grad_nat.div_(divisor)
 
-                    update = grad_nat
+                    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                        muon_grad_norm = torch.linalg.norm(muon_grad)
+                        grad_nat_norm = torch.linalg.norm(grad_nat)
+
+                        muon_grad.mul_(grad_nat_norm / (muon_grad_norm + 1e-16))
+
+                        update = muon_grad
+                    else:
+                        update = grad_nat
                     
                     # Perform weight decay
                     if group["weight_decay"] != 0 and group['weight_decouple']:

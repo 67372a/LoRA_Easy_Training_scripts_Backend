@@ -1,15 +1,11 @@
 import torch
-from torch.optim import Optimizer
 from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz_, create_factored_dims, get_denom, update_second_moment
 import math
 from typing import Optional, Literal
 
-from bitsandbytes.functional import quantize_blockwise, dequantize_blockwise
 from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-
-MOUN_LOC = Literal['before_mars','before_clip','after_clip']
+from pytorch_optimizer.base.types import CLOSURE, DEFAULTS, LOSS, PARAMETERS
 
 CLIP_LOC = Literal['gradient', 'update', 'both']
 
@@ -325,9 +321,6 @@ class RMSPropADOPT(BaseOptimizer):
         factor_second_moment (bool):
             Stores the second moment, i.e. ema_sq / exponential moving average squared, at the row/column level 
             instead of per parameter saving vram at the cost of lower precision (Default: False)
-        muon_location (string):
-            'before_clip','after_clip'
-            (default: after_clip)
         debias_beta (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: True) 
     """
@@ -347,7 +340,6 @@ class RMSPropADOPT(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         use_muon_pp: bool = False,
-        muon_location: MOUN_LOC = 'after_clip',
         factor_second_moment: bool = False,
         debias_beta: bool = True,
         **kwargs,
@@ -374,7 +366,7 @@ class RMSPropADOPT(BaseOptimizer):
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
             'use_muon_pp': use_muon_pp,
-            'muon_location': muon_location,
+
             'factor_second_moment':factor_second_moment,
             'debias_beta':debias_beta,
         }
@@ -444,7 +436,6 @@ class RMSPropADOPT(BaseOptimizer):
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
             use_muon_pp = group["use_muon_pp"]
-            muon_location = group['muon_location']
 
             if group["debias_beta"]:
                 bias_correction_sqrt: float = math.sqrt(self.debias(beta, group['step']))
@@ -497,15 +488,12 @@ class RMSPropADOPT(BaseOptimizer):
                         exp_avg_sq = exp_avg_sq.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
-                if use_muon_pp and muon_location == 'before_clip' and p.ndim >= 2 and p.size(0) < 10000:
+                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
                     grad.copy_(newton_schulz_(grad))
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
-
-                if use_muon_pp and muon_location == 'after_clip' and p.ndim >= 2 and p.size(0) < 10000:
-                    grad.copy_(newton_schulz_(grad))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -592,11 +580,11 @@ class RMSPropADOPTMARS(BaseOptimizer):
         factor_second_moment (bool):
             Stores the second moment, i.e. ema_sq / exponential moving average squared, at the row/column level 
             instead of per parameter saving vram at the cost of lower precision (Default: False)
-        muon_location (string):
-            'before_clip','after_clip'
-            (default: after_clip)
         debias_beta (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: True) 
+        gamma (float):
+            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
+            larger values apply more correction, and will require higher LRs to offset. (default: 0.025)
     """
 
     def __init__(
@@ -614,10 +602,9 @@ class RMSPropADOPTMARS(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         use_muon_pp: bool = False,
-        muon_location: MOUN_LOC = 'after_clip',
         factor_second_moment: bool = False,
         debias_beta: bool = True,
-        gamma: Optional[float] = None,
+        gamma: float = 0.025,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -642,7 +629,6 @@ class RMSPropADOPTMARS(BaseOptimizer):
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
             'use_muon_pp': use_muon_pp,
-            'muon_location': muon_location,
             'factor_second_moment':factor_second_moment,
             'debias_beta':debias_beta,
             'gamma':gamma,
@@ -714,7 +700,6 @@ class RMSPropADOPTMARS(BaseOptimizer):
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
             use_muon_pp = group["use_muon_pp"]
-            muon_location = group['muon_location']
             gamma = group["gamma"]
 
             if group["debias_beta"]:
@@ -772,24 +757,17 @@ class RMSPropADOPTMARS(BaseOptimizer):
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
                 grad_diff.add_(grad)
-
-                if use_muon_pp and muon_location == 'before_mars' and p.ndim >= 2 and p.size(0) < 10000:
-                    grad.copy_(newton_schulz_(grad))
                 
                 # MARS Calculate cₜ (gradient with correction term)
-                # 0.475 is calcuated value when beta1 = 0.95 and gamma = 0.025
-                correction = (gamma if gamma is not None else 0.475) * grad_diff
+                correction = gamma * grad_diff
                 c_t = grad + correction
 
-                if use_muon_pp and muon_location == 'before_clip' and p.ndim >= 2 and p.size(0) < 10000:
+                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
                     c_t.copy_(newton_schulz_(c_t))
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
-
-                if use_muon_pp and muon_location == 'after_clip' and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t.copy_(newton_schulz_(c_t))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()

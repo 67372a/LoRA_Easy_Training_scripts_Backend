@@ -17,8 +17,6 @@ from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMET
 from pytorch_optimizer.optimizer.gc import centralize_gradient
 from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
 
-MOUN_LOC = Literal['before_mars','before_clip','after_clip']
-
 class Compass(BaseOptimizer):
     r"""
     Arguments:
@@ -1324,7 +1322,6 @@ class CompassADOPT(BaseOptimizer):
         adaptive_clip_type: NORM_TYPE = 'layer',
         cautious: bool = False,
         use_muon_pp: bool = False,
-        muon_location: MOUN_LOC = 'after_clip',
         factor_second_moment: bool = False,
         debias_beta1: bool = True,
         debias_beta2: bool = True,
@@ -1354,7 +1351,6 @@ class CompassADOPT(BaseOptimizer):
             'adaptive_clip_type':adaptive_clip_type,
             'cautious': cautious,
             'use_muon_pp': use_muon_pp,
-            'muon_location': muon_location,
             'factor_second_moment':factor_second_moment,
             'debias_beta1': debias_beta1,
             'debias_beta2': debias_beta2,
@@ -1426,7 +1422,6 @@ class CompassADOPT(BaseOptimizer):
             eps_floor = group["eps_floor"]
             amp_fac = group["amp_fac"]
             use_muon_pp = group["use_muon_pp"]
-            muon_location = group['muon_location']
 
             lr: float = group['lr']
 
@@ -1490,15 +1485,12 @@ class CompassADOPT(BaseOptimizer):
                         exp_avg_sq = exp_avg_sq.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
-                if use_muon_pp and muon_location == 'before_clip' and p.ndim >= 2 and p.size(0) < 10000:
+                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
                     grad.copy_(newton_schulz_(grad))
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
-
-                if use_muon_pp and muon_location == 'after_clip' and p.ndim >= 2 and p.size(0) < 10000:
-                    grad.copy_(newton_schulz_(grad))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -1602,11 +1594,8 @@ class CompassADOPTMARS(BaseOptimizer):
             Stores the second moment, i.e. ema_sq / exponential moving average squared, at the row/column level 
             instead of per parameter saving vram at the cost of lower precision (Default: False)
         gamma (float):
-            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are the recommended values by the authors when beta1 is 0.95.
-            When set to none, will calculate gamma value based on current beta1 to keep same resulting value as though gamma is 0.025 and beta1 is 0.95 (default: None)
-        muon_location (string):
-            'before_mars','before_clip','after_clip'
-            (default: after_clip)
+            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
+            larger values apply more correction, and will require higher LRs to offset. (default: 0.025)
         debias_beta1 (bool):
             Apply bias correction to step size (LR). (Default: True)
         debias_beta2 (bool):
@@ -1630,9 +1619,8 @@ class CompassADOPTMARS(BaseOptimizer):
         adaptive_clip_type: NORM_TYPE = 'layer',
         cautious: bool = True,
         use_muon_pp: bool = False,
-        muon_location: MOUN_LOC = 'after_clip',
         factor_second_moment: bool = False,
-        gamma: Optional[float] = None,
+        gamma: float = 0.025,
         debias_beta1: bool = True,
         debias_beta2: bool = True,
         **kwargs,
@@ -1661,7 +1649,6 @@ class CompassADOPTMARS(BaseOptimizer):
             'adaptive_clip_type':adaptive_clip_type,
             'cautious': cautious,
             'use_muon_pp': use_muon_pp,
-            'muon_location': muon_location,
             'factor_second_moment':factor_second_moment,
             'gamma':gamma,
             'debias_beta1': debias_beta1,
@@ -1735,7 +1722,6 @@ class CompassADOPTMARS(BaseOptimizer):
             eps_floor = group["eps_floor"]
             amp_fac = group["amp_fac"]
             use_muon_pp = group["use_muon_pp"]
-            muon_location = group['muon_location']
             gamma = group["gamma"]
 
             lr: float = group['lr']
@@ -1803,24 +1789,17 @@ class CompassADOPTMARS(BaseOptimizer):
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
                 grad_diff.add_(grad)
-
-                if use_muon_pp and muon_location == 'before_mars' and p.ndim >= 2 and p.size(0) < 10000:
-                    grad.copy_(newton_schulz_(grad))
                 
                 # MARS Calculate cₜ (gradient with correction term)
-                # 0.475 is calcuated value when beta1 = 0.95 and gamma = 0.025
-                correction = (gamma if gamma is not None else (0.475 * (1 - beta1) / beta1)) * beta1 / (1 - beta1) * grad_diff
+                correction = gamma * beta1 / (1 - beta1) * grad_diff
                 c_t = grad + correction
 
-                if use_muon_pp and muon_location == 'before_clip' and p.ndim >= 2 and p.size(0) < 10000:
+                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
                     c_t.copy_(newton_schulz_(c_t))
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
-
-                if use_muon_pp and muon_location == 'after_clip' and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t.copy_(newton_schulz_(c_t))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()

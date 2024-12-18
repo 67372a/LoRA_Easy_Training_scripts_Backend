@@ -54,7 +54,8 @@ class FMARSCrop(BaseOptimizer):
             Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
             Valid values: layer, unit (default: layer).
         gamma (float):
-            Scaling value for the MARS style correction of the gradient (default: 0.0005)
+            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
+            larger values apply more correction, and will require higher LRs to offset. (default: 0.0005)
     """
 
     def __init__(

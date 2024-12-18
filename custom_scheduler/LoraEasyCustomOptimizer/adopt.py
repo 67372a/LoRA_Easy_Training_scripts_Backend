@@ -187,8 +187,8 @@ class ADOPTMARS(BaseOptimizer):
         cautious (bool)
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
         gamma (float):
-            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are the recommended values by the authors when beta1 is 0.95.
-            When set to none, will calculate gamma value based on current beta1 to keep same resulting value as though gamma is 0.025 and beta1 is 0.95 (default: None)
+            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
+            larger values apply more correction, and will require higher LRs to offset. (default: 0.025)
     """
 
     def __init__(
@@ -205,7 +205,7 @@ class ADOPTMARS(BaseOptimizer):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        gamma: Optional[float] = None,
+        gamma: float = 0.025,
         cautious: bool = True,
         **kwargs,
     ):
@@ -311,8 +311,7 @@ class ADOPTMARS(BaseOptimizer):
                 grad_diff.add_(grad)
 
                 # MARS Calculate cₜ (gradient with correction term)
-                # 0.475 is calcuated value when beta1 = 0.95 and gamma = 0.025
-                correction = (gamma if gamma is not None else (0.475 * (1 - beta1) / beta1)) * beta1 / (1 - beta1) * grad_diff
+                correction = gamma * beta1 / (1 - beta1) * grad_diff
                 c_t = grad + correction
 
                 if adaptive_clip > 0.0:
@@ -413,8 +412,8 @@ class FADOPTMARS(BaseOptimizer):
         fisher_clip (float):
             Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
         gamma (float):
-            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are the recommended values by the authors when beta1 is 0.95.
-            When set to none, will calculate gamma value based on current beta1 to keep same resulting value as though gamma is 0.025 and beta1 is 0.95 (default: None)
+            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
+            larger values apply more correction, and will require higher LRs to offset. (default: 0.025)
     """
 
     def __init__(
@@ -432,7 +431,7 @@ class FADOPTMARS(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
-        gamma: Optional[float] = None,
+        gamma: float = 0.025,
         cautious: bool = True,
         **kwargs,
     ):
@@ -540,8 +539,7 @@ class FADOPTMARS(BaseOptimizer):
                 grad_diff.add_(grad)
 
                 # MARS Calculate cₜ (gradient with correction term)
-                # 0.475 is calcuated value when beta1 = 0.95 and gamma = 0.025
-                correction = (gamma if gamma is not None else (0.475 * (1 - beta1) / beta1)) * beta1 / (1 - beta1) * grad_diff
+                correction = gamma * beta1 / (1 - beta1) * grad_diff
                 c_t = grad + correction
 
                 if adaptive_clip > 0.0:
