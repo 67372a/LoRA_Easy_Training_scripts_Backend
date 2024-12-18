@@ -245,7 +245,7 @@ class GrokFastAdamW(BaseOptimizer):
                 exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
-                de_nom = exp_avg_sq.sqrt().div_(bias_correction2_sq).clamp_(min=group['eps'])
+                de_nom = exp_avg_sq.sqrt().div_(bias_correction2_sq).add_(min=group['eps'])
 
                 update = exp_avg.div(bias_correction1).div_(de_nom)
 

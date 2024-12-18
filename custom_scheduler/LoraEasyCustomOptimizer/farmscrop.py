@@ -401,7 +401,7 @@ class FARMSCropV2(BaseOptimizer):
                     grad_diff.div_(divisor)
 
                     # Get natural gradient (squared ema, obtained sqrt of ema)
-                    diff_fim_base = torch.clamp(grad_diff_fim.sqrt(), curr_eps)
+                    diff_fim_base = grad_diff_fim.sqrt().add_(curr_eps)
 
                     grad_diff_fim.mul_(beta1).addcmul_(grad_diff, grad_diff, value=1 - beta1).clamp_(-clip_lambda, clip_lambda)
 
@@ -416,7 +416,7 @@ class FARMSCropV2(BaseOptimizer):
                 divisor = max(clip, rms) / clip
                 approx_grad_nat.div_(divisor)
 
-                fim_base = torch.clamp(fim.sqrt(), curr_eps)
+                fim_base = fim.sqrt().add_(curr_eps)
 
                 grad_nat = grad.div(fim_base).div_(diff_fim_base)
                 rms = grad_nat.pow(2).mean().sqrt_()

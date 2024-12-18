@@ -502,7 +502,7 @@ class ADOPTScheduleFree(BaseOptimizer):
                 if group['step'] == 1:
                     exp_avg_sq.addcmul_(grad, grad.conj())
                 else:
-                    de_nom = exp_avg_sq.div(bias_correction2).sqrt_().clamp_(curr_eps)
+                    de_nom = exp_avg_sq.div(bias_correction2).sqrt_().add_(curr_eps)
 
                     update = grad.div(de_nom)
                     update.clamp_(-adopt_clip, adopt_clip)
@@ -827,7 +827,7 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
                 if group['step'] == 1:
                     exp_avg_sq.addcmul_(grad, grad.conj())
                 else:
-                    de_nom = exp_avg_sq.div(bias_correction2).sqrt_().clamp_(curr_eps)
+                    de_nom = exp_avg_sq.div(bias_correction2).sqrt_().add_(curr_eps)
                     exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
                     exp_avg_slow.mul_(beta3_t).add_(grad, alpha=1.0 - beta3_t)
@@ -1142,7 +1142,7 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
                     grad_diff.mul_(beta2).add_(grad)
                     exp_avg_sq.addcmul_(grad_diff, grad_diff.conj())
                 else:
-                    de_nom = exp_avg_sq.div(bias_correction3).sqrt_().clamp_(curr_eps)
+                    de_nom = exp_avg_sq.div(bias_correction3).sqrt_().add_(curr_eps)
                     exp_avg_diff.mul_(beta2).add_(grad_diff, alpha=1.0 - beta2)
 
                     grad_diff.mul_(beta2).add_(grad)
@@ -1460,7 +1460,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                 if group['step'] == 1:
                     exp_avg_sq.addcmul_(c_t, c_t.conj())
                 else:
-                    de_nom = exp_avg_sq.div(bias_correction2).sqrt_().clamp_(curr_eps)
+                    de_nom = exp_avg_sq.div(bias_correction2).sqrt_().add_(curr_eps)
                     exp_avg_sq.mul_(beta2).addcmul_(c_t, c_t.conj(), value=1.0 - beta2)
 
                     grad_update = c_t.div(de_nom)
@@ -1753,8 +1753,8 @@ class FADOPTScheduleFree(BaseOptimizer):
                 if group['step'] == 1:
                     fim.addcmul_(grad, grad.conj()).clamp_(-adopt_clip, adopt_clip)
                 else:
-                    fim_base = torch.clamp(fim.sqrt(), curr_eps).clamp_(-adopt_clip, adopt_clip)
-                    fim.mul_(current_beta2).addcmul_(grad, grad.conj(), value=1 - current_beta2)
+                    fim_base = fim.sqrt().add_(curr_eps)
+                    fim.mul_(current_beta2).addcmul_(grad, grad.conj(), value=1 - current_beta2).clamp_(-adopt_clip, adopt_clip)
 
                     grad_nat = grad.div(fim_base)
                     rms = grad_nat.pow(2).mean().sqrt_()
@@ -2090,7 +2090,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
                 if group['step'] == 1:
                     fim.addcmul_(grad, grad.conj()).clamp_(-adopt_clip, adopt_clip)
                 else:
-                    fim_base = torch.clamp(fim.sqrt(), curr_eps)
+                    fim_base = fim.sqrt().add_(curr_eps)
                     fim.mul_(current_beta2).addcmul_(grad, grad.conj(), value=1 - current_beta2).clamp_(-adopt_clip, adopt_clip)
 
                     grad_nat = grad.div(fim_base)
@@ -2415,7 +2415,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
                     grad_diff.mul_(current_beta2).add_(grad)
                     fim.addcmul_(grad_diff, grad_diff.conj()).clamp_(-adopt_clip, adopt_clip)
                 else:
-                    fim_base = torch.clamp(fim.sqrt(), curr_eps)
+                    fim_base = fim.sqrt().add_(curr_eps)
                     exp_avg_diff.mul_(current_beta2).add_(grad_diff, alpha=1.0 - current_beta2)
 
                     grad_diff.mul_(current_beta2).add_(grad)
@@ -2773,7 +2773,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 if group['step'] == 1:
                     fim.addcmul_(c_t, c_t.conj()).clamp_(-adopt_clip, adopt_clip)
                 else:
-                    fim_base = torch.clamp(fim.sqrt(), curr_eps)
+                    fim_base = fim.sqrt().add_(curr_eps)
                     fim.mul_(current_beta2).addcmul_(c_t, c_t.conj(), value=1 - current_beta2).clamp_(-adopt_clip, adopt_clip)
 
                     grad_nat = c_t.div(fim_base)
@@ -2785,7 +2785,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                         muon_grad_norm = torch.linalg.norm(muon_grad)
                         grad_nat_norm = torch.linalg.norm(grad_nat)
 
-                        muon_grad.mul_(grad_nat_norm.div_(muon_grad_norm.clamp_(1e-16)))
+                        muon_grad.mul_(grad_nat_norm.div_(muon_grad_norm.add_(1e-16)))
 
                         update = muon_grad
                     else:

@@ -370,7 +370,7 @@ class FCompassADOPT(BaseOptimizer):
                 if group['step'] == 1:
                     fim.addcmul_(grad, grad.conj()).clamp_(-adopt_clip, adopt_clip)
                 else:
-                    fim_base = torch.clamp(fim.sqrt(), curr_eps)
+                    fim_base = fim.sqrt().add_(curr_eps)
                     fim.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2).clamp_(-adopt_clip, adopt_clip)
 
                     grad_nat = grad.div(fim_base)

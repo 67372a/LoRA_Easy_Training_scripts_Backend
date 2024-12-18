@@ -508,7 +508,7 @@ class RMSPropADOPT(BaseOptimizer):
                 if group['step'] == 1:
                     exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta, True)
                 else:
-                    de_nom = get_denom(exp_avg_sq).div_(bias_correction_sqrt).clamp_(curr_eps)
+                    de_nom = get_denom(exp_avg_sq).div_(bias_correction_sqrt).add_(curr_eps)
                     exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta)
 
                     normed_grad = grad.div(de_nom)
@@ -786,7 +786,7 @@ class RMSPropADOPTMARS(BaseOptimizer):
                 if group['step'] == 1:
                     exp_avg_sq = update_second_moment(exp_avg_sq, c_t, beta, True)
                 else:
-                    de_nom = get_denom(exp_avg_sq).div_(bias_correction_sqrt).clamp_(curr_eps)
+                    de_nom = get_denom(exp_avg_sq).div_(bias_correction_sqrt).add_(curr_eps)
                     exp_avg_sq = update_second_moment(exp_avg_sq, c_t, beta)
 
                     normed_grad = c_t.div(de_nom)
@@ -796,7 +796,7 @@ class RMSPropADOPTMARS(BaseOptimizer):
                         muon_grad_norm = torch.linalg.norm(muon_grad)
                         normed_grad_norm = torch.linalg.norm(normed_grad_norm)
 
-                        muon_grad.mul_(normed_grad_norm.div_(muon_grad_norm.clamp_(1e-16)))
+                        muon_grad.mul_(normed_grad_norm.div_(muon_grad_norm.add_(1e-16)))
 
                         update = muon_grad
                     else:

@@ -234,7 +234,7 @@ class FMARSCrop(BaseOptimizer):
                         grad_diff_fim = state["grad_diff_fim"].to(torch.float32)
 
                     # Get natural gradient (squared ema, obtained sqrt of ema)
-                    diff_fim_base = torch.clamp(grad_diff_fim.sqrt(), curr_eps)
+                    diff_fim_base = grad_diff_fim.sqrt().add_(curr_eps)
 
                     grad_diff_fim.mul_(beta1).addcmul_(grad_diff, grad_diff, value=1.0 - beta1).clamp_(-clip_lambda, clip_lambda)
 
@@ -252,7 +252,7 @@ class FMARSCrop(BaseOptimizer):
                 if group['step'] == 1:
                     fim.addcmul_(approx_grad_nat, approx_grad_nat)
                 else:
-                    fim_base = torch.clamp(fim.sqrt(), curr_eps)
+                    fim_base = fim.sqrt().add_(curr_eps)
 
                     grad_nat = approx_grad_nat.div(fim_base).div_(diff_fim_base)
                     rms = grad_nat.pow(2).mean().sqrt_()

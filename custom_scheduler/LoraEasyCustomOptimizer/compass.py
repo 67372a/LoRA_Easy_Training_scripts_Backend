@@ -1505,7 +1505,7 @@ class CompassADOPT(BaseOptimizer):
                 if group['step'] == 1:
                     exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2, True)
                 else:
-                    de_nom = get_denom(exp_avg_sq).div_(bias_correction2_sqrt).clamp_(curr_eps)
+                    de_nom = get_denom(exp_avg_sq).div_(bias_correction2_sqrt).add_(curr_eps)
                     exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2)
 
                     normed_grad = grad.div(de_nom)
@@ -1824,7 +1824,7 @@ class CompassADOPTMARS(BaseOptimizer):
                 if group['step'] == 1:
                     exp_avg_sq = update_second_moment(exp_avg_sq, c_t, beta2, True)
                 else:
-                    de_nom = get_denom(exp_avg_sq).div_(bias_correction2_sqrt).clamp_(curr_eps)
+                    de_nom = get_denom(exp_avg_sq).div_(bias_correction2_sqrt).add_(curr_eps)
                     exp_avg_sq = update_second_moment(exp_avg_sq, c_t, beta2)
 
                     normed_grad = c_t.div(de_nom)

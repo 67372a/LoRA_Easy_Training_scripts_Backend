@@ -125,7 +125,7 @@ class ADOPT(BaseOptimizer):
                 if group['weight_decay'] != 0 and group['weight_decouple']:
                     p_fp32.add_(p_fp32, alpha=-group['lr'] * group['weight_decay'])
 
-                denom = torch.clamp(exp_avg_sq.sqrt(), group['eps'])
+                denom = exp_avg_sq.sqrt().add_(group['eps'])
                 normed_grad = grad.div(denom)
                 if group['clip'] is not None:
                     clip = (group['step']-1)**group['clip']
@@ -327,7 +327,7 @@ class ADOPTMARS(BaseOptimizer):
                 if group['step'] == 1:
                     exp_avg_sq.addcmul_(c_t, c_t.conj())
                 else:
-                    de_nom = exp_avg_sq.sqrt_().clamp_(curr_eps)
+                    de_nom = exp_avg_sq.sqrt_().add_(curr_eps)
                     exp_avg_sq.mul_(beta2).addcmul_(c_t, c_t.conj(), value=1 - beta2)
 
                     normed_grad = grad.div(de_nom)
@@ -555,7 +555,7 @@ class FADOPTMARS(BaseOptimizer):
                 if group['step'] == 1:
                     fim.addcmul_(c_t, c_t.conj()).clamp_(-adopt_clip, adopt_clip)
                 else:
-                    fim_base = torch.clamp(fim.sqrt(), curr_eps)
+                    fim_base = fim.sqrt().add_(curr_eps)
                     fim.mul_(beta2).addcmul_(c_t, c_t.conj(), value=1 - beta2).clamp_(-adopt_clip, adopt_clip)
 
                     grad_nat = c_t.div(fim_base)
