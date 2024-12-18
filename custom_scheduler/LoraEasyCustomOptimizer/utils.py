@@ -149,8 +149,8 @@ def schedule_beta(t_beta: Optional[float], step: int, beta_initial: float, beta_
 @torch.no_grad()
 def create_factored_dims(
     shape,
-    factored,
-    min_dim_size_to_factor):
+    factored: bool,
+    min_dim_size_to_factor: int):
     r"""Whether to use a factored second moment estimator.
     This function returns a tuple with the two largest axes to reduce over.
     If all dimensions have size < min_dim_size_to_factor, return None.
@@ -170,7 +170,7 @@ def create_factored_dims(
     
 # https://github.com/LoganBooker/prodigy-plus-schedule-free/blob/23f752a3901686d270dfdcb9b29823541ad1c3c7/prodigyplus/core_optimiser.py#L389
 @torch.no_grad()
-def get_denom(second_moment, eps: float = 1e-30):
+def get_denom(second_moment: torch.tensor, eps: float = 1e-30):
     # Get denom
     if isinstance(second_moment, list):
         row_var, col_var, _, _, reduce_dc = second_moment
@@ -186,7 +186,7 @@ def get_denom(second_moment, eps: float = 1e-30):
     
 # https://github.com/LoganBooker/prodigy-plus-schedule-free/blob/23f752a3901686d270dfdcb9b29823541ad1c3c7/prodigyplus/core_optimiser.py#L411
 @torch.no_grad()
-def update_second_moment(second_moment, grad, beta2, adopt_first: bool = False):
+def update_second_moment(second_moment: torch.tensor, grad: torch.tensor, beta2: float, adopt_first: bool = False) -> torch.tensor:
     # EMA updates
     if isinstance(second_moment, list):
         row_var, col_var, dr, dc, _ = second_moment
@@ -216,7 +216,7 @@ def update_second_moment(second_moment, grad, beta2, adopt_first: bool = False):
 
 # From: https://github.com/KellerJordan/Muon/blob/master/muon.py
 @torch.no_grad()
-def newton_schulz_(grad, steps=6, eps=1e-7):
+def newton_schulz_(grad: torch.tensor, steps: int = 6, eps: float = 1e-7) -> torch.tensor:
     # Inline reshaping step within the method itself.
     original_shape = None
     original_type = grad.dtype
@@ -225,6 +225,8 @@ def newton_schulz_(grad, steps=6, eps=1e-7):
         grad = grad.view(grad.size(0), -1)
     a, b, c = (3.4445, -4.7750,  2.0315)
     X = grad.bfloat16()
+    if original_type in {torch.float32}:
+        copy_stochastic_(X, grad)
     if grad.size(0) > grad.size(1):
         X = X.T
 
@@ -243,4 +245,5 @@ def newton_schulz_(grad, steps=6, eps=1e-7):
         del X
     if original_shape is not None:
         grad = grad.view(*original_shape)
+
     return grad.to(dtype=original_type)

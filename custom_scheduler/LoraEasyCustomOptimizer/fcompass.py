@@ -261,9 +261,9 @@ class FCompassADOPT(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
-        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-30
+            eps_floor = 1e-37
 
         defaults: DEFAULTS = {
             'lr': lr,

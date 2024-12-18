@@ -319,9 +319,9 @@ class ADOPTScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
-        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-30
+            eps_floor = 1e-37
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -613,9 +613,9 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
-        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-30
+            eps_floor = 1e-37
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -945,9 +945,9 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
-        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-30
+            eps_floor = 1e-37
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -1265,9 +1265,9 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
-        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-30
+            eps_floor = 1e-37
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -1568,9 +1568,9 @@ class FADOPTScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
-        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-30
+            eps_floor = 1e-37
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -1876,9 +1876,9 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
-        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-30
+            eps_floor = 1e-37
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -2216,9 +2216,9 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
-        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-30
+            eps_floor = 1e-37
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -2537,6 +2537,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         betas: BETAS = (0.9, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
+        weight_decay_lr_decouple: bool = False,
         stable_weight_decay: bool = False,
         r: float = 0.0,
         weight_lr_power: float = 2.0,
@@ -2551,6 +2552,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         debias_beta1: bool = False,
         debias_beta2: bool = False,
         use_muon_pp: bool = False,
+        weight_decay_lr_max: Optional[float] = None,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -2558,9 +2560,12 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
-        # Override zero to 1e-30, as zero and float32.tiny NaNs
+        if weight_decay_lr_decouple:
+            self.validate_non_negative(weight_decay_lr_max, 'weight_decay_lr_max')
+
+        # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-30
+            eps_floor = 1e-37
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -2584,6 +2589,8 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
             'use_muon_pp':use_muon_pp,
+            'weight_decay_lr_decouple':weight_decay_lr_decouple,
+            'weight_decay_lr_max':weight_decay_lr_max,
         }
         super().__init__(params, defaults)
 
@@ -2708,7 +2715,10 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             fisher_clip = group["fisher_clip"]
             gamma = group["gamma"]
             use_muon_pp = group["use_muon_pp"]
-
+            weight_decay_lr_decouple = group["weight_decay_lr_decouple"]
+            weight_decay_lr_max = group["weight_decay_lr_max"]
+            weight_decay = group["weight_decay"]
+            weight_decouple = group['weight_decouple']
 
             for p in group['params']:
                 if p.grad is None:
@@ -2721,7 +2731,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 p_fp32 = p
                 state = self.state[p]
 
-                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                if weight_decay != 0 and weight_decouple and group['stable_weight_decay']:
                     param_size += p.numel()                
 
                 if len(state) == 0:
@@ -2775,38 +2785,38 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                         muon_grad_norm = torch.linalg.norm(muon_grad)
                         grad_nat_norm = torch.linalg.norm(grad_nat)
 
-                        muon_grad.mul_(grad_nat_norm / (muon_grad_norm + 1e-16))
+                        muon_grad.mul_(grad_nat_norm.div_(muon_grad_norm.clamp_(1e-16)))
 
                         update = muon_grad
                     else:
                         update = grad_nat
                     
                     # Perform weight decay
-                    if group["weight_decay"] != 0 and group['weight_decouple']:
+                    if weight_decay != 0 and weight_decouple:
                         if group['stable_weight_decay'] and group['fim_mean_sqrt'] > 0:
                             swd_scaling = 1.0 / group['fim_mean_sqrt']
                         else:
                             swd_scaling = 1.0
 
-                        p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
-                    elif group["weight_decay"] != 0:
+                        p_fp32.mul_(1.0 - weight_decay * (lr if not weight_decay_lr_decouple else lr / weight_decay_lr_max) * swd_scaling)
+                    elif weight_decay != 0:
                         grad_weights = p_fp32.div(fim_base)
 
                         rms = grad_weights.pow(2).mean().sqrt_()
                         divisor = max(fisher_clip, rms) / fisher_clip
                         grad_weights.div_(divisor)
 
-                        update.add_(grad_weights, alpha=group["weight_decay"])
+                        update.add_(grad_weights, alpha=weight_decay)
 
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(update, alpha=adaptive_y_lr)
 
                     z.sub_(update, alpha=lr_step_size)
 
-                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    if weight_decay != 0 and weight_decouple and group['stable_weight_decay']:
                         fim_sum += fim.sum()
 
-                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                if weight_decay != 0 and weight_decouple and group['stable_weight_decay']:
                     group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
 
                 # pack
