@@ -97,9 +97,7 @@ def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float
     if norm_type in {'global','layer'}:
         # Compute the global norm of the parameters and gradients
         p_norm = torch.norm(p).clamp_(min=agc_eps)
-        print("p_norm" + str(p_norm))
         g_norm = torch.norm(grad)
-        print("g_norm" + str(g_norm))
 
         # Compute the maximum allowed norm for the gradients
         max_norm = p_norm * agc_clip_val
