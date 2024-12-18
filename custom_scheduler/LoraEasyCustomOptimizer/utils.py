@@ -219,6 +219,7 @@ def update_second_moment(second_moment, grad, beta2, adopt_first: bool = False):
 def newton_schulz_(grad, steps=6, eps=1e-7):
     # Inline reshaping step within the method itself.
     original_shape = None
+    original_type = grad.dtype
     if len(grad.shape) > 2:
         original_shape = grad.shape
         grad = grad.view(grad.size(0), -1)
@@ -242,4 +243,4 @@ def newton_schulz_(grad, steps=6, eps=1e-7):
         del X
     if original_shape is not None:
         grad = grad.view(*original_shape)
-    return grad
+    return grad.to(dtype=original_type)

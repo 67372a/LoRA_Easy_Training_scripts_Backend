@@ -1486,11 +1486,15 @@ class CompassADOPT(BaseOptimizer):
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    grad.copy_(newton_schulz_(grad))
+                    muon_grad = newton_schulz_(grad)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+                    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                        # Apply Adaptive Gradient Clipping (AGC)
+                        muon_grad.copy_(agc(p_fp32, muon_grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -1499,11 +1503,7 @@ class CompassADOPT(BaseOptimizer):
                     curr_eps = eps
 
                 if group['step'] == 1:
-                    if group['factor_second_moment']:
-                        exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2)
-                    else:
-                        #Special handling for ADOPT first step
-                        exp_avg_sq.addcmul_(grad, grad)
+                    exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2, True)
                 else:
                     de_nom = get_denom(exp_avg_sq).div_(bias_correction2_sqrt).clamp_(curr_eps)
                     exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2)
@@ -1511,9 +1511,19 @@ class CompassADOPT(BaseOptimizer):
                     normed_grad = grad.div(de_nom)
                     normed_grad.clamp_(-adopt_clip, adopt_clip)
 
-                    exp_avg.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
+                    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                        muon_grad_norm = torch.linalg.norm(muon_grad)
+                        normed_grad_norm = torch.linalg.norm(normed_grad_norm)
 
-                    update = normed_grad.add(exp_avg, alpha=amp_fac)
+                        muon_grad.mul_(normed_grad_norm / (muon_grad_norm + 1e-16))
+
+                        update_grad = muon_grad
+                    else:
+                        update_grad = normed_grad
+
+                    exp_avg.mul_(beta1).add_(update_grad, alpha=1.0 - beta1)
+
+                    update = update_grad.add(exp_avg, alpha=amp_fac)
 
                     # Weight decay calculated at y
                     if group["weight_decay"] != 0 and group['weight_decouple']:
@@ -1528,7 +1538,7 @@ class CompassADOPT(BaseOptimizer):
 
                     if group["cautious"]:
                         # compute norm gradient
-                        mask = (update * normed_grad > 0).to(normed_grad.dtype)
+                        mask = (update * update_grad > 0).to(update_grad.dtype)
                         mask.div_(mask.mean().clamp_(min=1e-3))
                     else:
                         mask = 1.0
@@ -1791,15 +1801,19 @@ class CompassADOPTMARS(BaseOptimizer):
                 grad_diff.add_(grad)
                 
                 # MARS Calculate cₜ (gradient with correction term)
-                correction = gamma * beta1 / (1 - beta1) * grad_diff
+                correction = (gamma * (beta1 / (1.0 - beta1))) * grad_diff
                 c_t = grad + correction
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t.copy_(newton_schulz_(c_t))
+                    muon_grad = newton_schulz_(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+                    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                        # Apply Adaptive Gradient Clipping (AGC)
+                        muon_grad.copy_(agc(p_fp32, muon_grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -1816,9 +1830,19 @@ class CompassADOPTMARS(BaseOptimizer):
                     normed_grad = c_t.div(de_nom)
                     normed_grad.clamp_(-adopt_clip, adopt_clip)
 
-                    exp_avg.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
+                    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                        muon_grad_norm = torch.linalg.norm(muon_grad)
+                        normed_grad_norm = torch.linalg.norm(normed_grad_norm)
 
-                    update = normed_grad.add(exp_avg, alpha=amp_fac)
+                        muon_grad.mul_(normed_grad_norm / (muon_grad_norm + 1e-16))
+
+                        update_grad = muon_grad
+                    else:
+                        update_grad = normed_grad
+
+                    exp_avg.mul_(beta1).add_(update_grad, alpha=1.0 - beta1)
+
+                    update = update_grad.add(exp_avg, alpha=amp_fac)
 
                     # Weight decay calculated at y
                     if group["weight_decay"] != 0 and group['weight_decouple']:
@@ -1833,7 +1857,7 @@ class CompassADOPTMARS(BaseOptimizer):
 
                     if group["cautious"]:
                         # compute norm gradient
-                        mask = (update * normed_grad > 0).to(normed_grad.dtype)
+                        mask = (update * update_grad > 0).to(update_grad.dtype)
                         mask.div_(mask.mean().clamp_(min=1e-3))
                     else:
                         mask = 1.0

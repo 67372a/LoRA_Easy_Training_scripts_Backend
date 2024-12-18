@@ -489,11 +489,15 @@ class RMSPropADOPT(BaseOptimizer):
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    grad.copy_(newton_schulz_(grad))
+                    muon_grad = newton_schulz_(grad)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+                    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                        # Apply Adaptive Gradient Clipping (AGC)
+                        muon_grad.copy_(agc(p_fp32, muon_grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -763,11 +767,15 @@ class RMSPropADOPTMARS(BaseOptimizer):
                 c_t = grad + correction
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t.copy_(newton_schulz_(c_t))
+                    muon_grad = newton_schulz_(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+                    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                        # Apply Adaptive Gradient Clipping (AGC)
+                        muon_grad.copy_(agc(p_fp32, muon_grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -784,6 +792,16 @@ class RMSPropADOPTMARS(BaseOptimizer):
                     normed_grad = c_t.div(de_nom)
                     normed_grad.clamp_(-adopt_clip, adopt_clip)
 
+                    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                        muon_grad_norm = torch.linalg.norm(muon_grad)
+                        normed_grad_norm = torch.linalg.norm(normed_grad_norm)
+
+                        muon_grad.mul_(normed_grad_norm / (muon_grad_norm + 1e-16))
+
+                        update = muon_grad
+                    else:
+                        update = normed_grad
+
                     # Weight decay calculated at y
                     if group["weight_decay"] != 0 and group['weight_decouple']:
                         if group['stable_weight_decay'] and group['exp_avg_sq_mean_sqrt'] > 0:
@@ -793,9 +811,9 @@ class RMSPropADOPTMARS(BaseOptimizer):
 
                         p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
                     elif group["weight_decay"] != 0:
-                        normed_grad.add_(p_fp32, alpha=group["weight_decay"])
+                        update.add_(p_fp32, alpha=group["weight_decay"])
 
-                    p_fp32.add_(normed_grad, alpha=-lr)
+                    p_fp32.add_(update, alpha=-lr)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         exp_avg_sq_sum += exp_avg_sq.sum()

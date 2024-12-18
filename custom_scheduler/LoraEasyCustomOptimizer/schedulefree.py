@@ -1444,7 +1444,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                 grad_diff.add_(grad)
 
                 # MARS Calculate cₜ (gradient with correction term)
-                correction = gamma * beta1 / (1 - beta1) * grad_diff
+                correction = (gamma * (beta1 / (1.0 - beta1))) * grad_diff
                 c_t = grad + correction
 
                 if adaptive_clip > 0.0:
@@ -2740,7 +2740,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 grad_diff.add_(grad)
 
                 # MARS Calculate cₜ (gradient with correction term)
-                correction = gamma * beta1 / (1 - beta1) * grad_diff
+                correction = (gamma * (beta1 / (1.0 - beta1))) * grad_diff
                 c_t = grad + correction
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:

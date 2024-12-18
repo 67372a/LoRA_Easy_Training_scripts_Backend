@@ -204,9 +204,8 @@ class FMARSCrop(BaseOptimizer):
                     p_fp32 = p.clone().to(torch.float32)
 
                 prev_grad = prev_grad.add(grad)
-
                 # Calculate cₜ (gradient with correction term)
-                correction = (((1 - beta1) / 2) if gamma is None else gamma) * beta1 / (1 - beta1) * prev_grad
+                correction = ((((1.0 - beta1) / 2) if gamma is None else gamma) * (beta1 / (1.0 - beta1))) * prev_grad
                 c_t = grad + correction
 
                 if adaptive_clip > 0.0:
