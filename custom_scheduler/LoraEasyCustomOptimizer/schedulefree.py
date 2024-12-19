@@ -2798,7 +2798,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                         else:
                             swd_scaling = 1.0
 
-                        p_fp32.mul_(1.0 - weight_decay * (lr if not weight_decay_lr_decouple else lr / weight_decay_lr_max) * swd_scaling)
+                        p_fp32.mul_(1.0 - weight_decay * (lr if not weight_decay_lr_decouple else (lr / weight_decay_lr_max)) * swd_scaling)
                     elif weight_decay != 0:
                         grad_weights = p_fp32.div(fim_base)
 
