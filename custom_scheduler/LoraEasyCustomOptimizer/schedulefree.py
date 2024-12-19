@@ -409,6 +409,10 @@ class ADOPTScheduleFree(BaseOptimizer):
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
+        if not group['train_mode']:
+            raise Exception("Optimizer was not in train mode when step is called. "
+                            "Please insert .train() and .eval() calls on the "
+                            "optimizer. See documentation for details.")
         loss: LOSS = None
         if closure is not None:
             with torch.enable_grad():
@@ -728,6 +732,10 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
+        if not group['train_mode']:
+            raise Exception("Optimizer was not in train mode when step is called. "
+                            "Please insert .train() and .eval() calls on the "
+                            "optimizer. See documentation for details.")
         loss: LOSS = None
         if closure is not None:
             with torch.enable_grad():
@@ -1039,6 +1047,10 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
+        if not group['train_mode']:
+            raise Exception("Optimizer was not in train mode when step is called. "
+                            "Please insert .train() and .eval() calls on the "
+                            "optimizer. See documentation for details.")
         loss: LOSS = None
         if closure is not None:
             with torch.enable_grad():
@@ -1992,6 +2004,10 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
+        if not group['train_mode']:
+            raise Exception("Optimizer was not in train mode when step is called. "
+                            "Please insert .train() and .eval() calls on the "
+                            "optimizer. See documentation for details.")
         loss: LOSS = None
         if closure is not None:
             with torch.enable_grad():
@@ -2311,6 +2327,10 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
+        if not group['train_mode']:
+            raise Exception("Optimizer was not in train mode when step is called. "
+                            "Please insert .train() and .eval() calls on the "
+                            "optimizer. See documentation for details.")
         loss: LOSS = None
         if closure is not None:
             with torch.enable_grad():
@@ -2659,6 +2679,10 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
+        if not group['train_mode']:
+            raise Exception("Optimizer was not in train mode when step is called. "
+                            "Please insert .train() and .eval() calls on the "
+                            "optimizer. See documentation for details.")
         loss: LOSS = None
         if closure is not None:
             with torch.enable_grad():
