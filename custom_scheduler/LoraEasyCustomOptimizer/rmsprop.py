@@ -252,9 +252,9 @@ class RMSProp(BaseOptimizer):
                     # lr scaler + eps to prevent zero division
                     # de_nom = exp_avg_sq.sqrt() + group['eps']
                     if group["rectify_variance"]:
-                        de_nom = exp_avg_sq.sqrt().clamp_(curr_eps)
+                        de_nom = exp_avg_sq.sqrt().add_(curr_eps)
                     else:
-                        de_nom = (exp_avg_sq.sqrt() / bias_correction_sqrt).clamp_(curr_eps)
+                        de_nom = (exp_avg_sq.sqrt() / bias_correction_sqrt).add_(curr_eps)
 
                     # p = p - lr * grad / denom
                     update = grad.div(de_nom)
