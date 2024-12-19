@@ -319,6 +319,8 @@ class ADOPTScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
+        self.train_mode = False
+
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
@@ -334,7 +336,6 @@ class ADOPTScheduleFree(BaseOptimizer):
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
-            'train_mode': True,
             'weight_sum': 0.0,
             'lr_max': -1.0,
             'adaptive_clip':adaptive_clip,
@@ -352,7 +353,7 @@ class ADOPTScheduleFree(BaseOptimizer):
     def eval(self):
         for group in self.param_groups:
             beta1, _ = group['betas']
-            if group['train_mode']:
+            if self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -370,13 +371,13 @@ class ADOPTScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = False
+                self.train_mode = False
 
     @torch.no_grad()
     def train(self):
         for group in self.param_groups:
             beta1, _ = group['betas']
-            if not group['train_mode']:
+            if not self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -394,7 +395,7 @@ class ADOPTScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = True
+                self.train_mode = True
 
     @torch.no_grad()
     def reset(self):
@@ -409,7 +410,7 @@ class ADOPTScheduleFree(BaseOptimizer):
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
-        if not group['train_mode']:
+        if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")
@@ -617,6 +618,8 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
+        self.train_mode = False
+
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
@@ -632,7 +635,6 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
-            'train_mode': True,
             'weight_sum': 0.0,
             'lr_max': -1.0,
             'adaptive_clip':adaptive_clip,
@@ -653,7 +655,7 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
     def eval(self):
         for group in self.param_groups:
             beta1, _, _ = group['betas']
-            if group['train_mode']:
+            if self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -671,13 +673,13 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = False
+                self.train_mode = False
 
     @torch.no_grad()
     def train(self):
         for group in self.param_groups:
             beta1, _, _ = group['betas']
-            if not group['train_mode']:
+            if not self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -695,7 +697,7 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = True
+                self.train_mode = True
 
     @torch.no_grad()
     def reset(self):
@@ -732,7 +734,7 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
-        if not group['train_mode']:
+        if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")
@@ -953,6 +955,8 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
+        self.train_mode = False
+
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
@@ -968,7 +972,6 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
-            'train_mode': True,
             'weight_sum': 0.0,
             'lr_max': -1.0,
             'adaptive_clip':adaptive_clip,
@@ -988,7 +991,7 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
     def eval(self):
         for group in self.param_groups:
             beta1, _, _ = group['betas']
-            if group['train_mode']:
+            if self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -1006,13 +1009,13 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = False
+                self.train_mode = False
 
     @torch.no_grad()
     def train(self):
         for group in self.param_groups:
             beta1, _, _ = group['betas']
-            if not group['train_mode']:
+            if not self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -1030,7 +1033,7 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = True
+                self.train_mode = True
 
     @torch.no_grad()
     def reset(self):
@@ -1047,7 +1050,7 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
-        if not group['train_mode']:
+        if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")
@@ -1277,6 +1280,8 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
+        self.train_mode = False
+
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
@@ -1292,7 +1297,6 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
-            'train_mode': True,
             'weight_sum': 0.0,
             'lr_max': -1.0,
             'adaptive_clip':adaptive_clip,
@@ -1311,7 +1315,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
     def eval(self):
         for group in self.param_groups:
             beta1, _ = group['betas']
-            if group['train_mode']:
+            if self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -1329,13 +1333,13 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = False
+                self.train_mode = False
 
     @torch.no_grad()
     def train(self):
         for group in self.param_groups:
             beta1, _ = group['betas']
-            if not group['train_mode']:
+            if not self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -1353,7 +1357,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = True
+                self.train_mode = True
 
     @torch.no_grad()
     def reset(self):
@@ -1580,6 +1584,8 @@ class FADOPTScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
+        self.train_mode = False
+
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
@@ -1614,7 +1620,7 @@ class FADOPTScheduleFree(BaseOptimizer):
     def eval(self):
         for group in self.param_groups:
             beta1, _ = group['betas']
-            if group['train_mode']:
+            if self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -1632,13 +1638,13 @@ class FADOPTScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = False
+                self.train_mode = False
 
     @torch.no_grad()
     def train(self):
         for group in self.param_groups:
             beta1, _ = group['betas']
-            if not group['train_mode']:
+            if not self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -1656,7 +1662,7 @@ class FADOPTScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = True
+                self.train_mode = True
 
     @torch.no_grad()
     def reset(self):
@@ -1888,6 +1894,8 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
+        self.train_mode = False
+
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
@@ -1925,7 +1933,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
     def eval(self):
         for group in self.param_groups:
             beta1, _, _ = group['betas']
-            if group['train_mode']:
+            if self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -1943,13 +1951,13 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = False
+                self.train_mode = False
 
     @torch.no_grad()
     def train(self):
         for group in self.param_groups:
             beta1, _, _ = group['betas']
-            if not group['train_mode']:
+            if not self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -1967,7 +1975,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = True
+                self.train_mode = True
 
     @torch.no_grad()
     def reset(self):
@@ -2004,7 +2012,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
-        if not group['train_mode']:
+        if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")
@@ -2232,6 +2240,8 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
+        self.train_mode = False
+
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
@@ -2247,7 +2257,6 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
-            'train_mode': True,
             'weight_sum': 0.0,
             'lr_max': -1.0,
             'adaptive_clip':adaptive_clip,
@@ -2268,7 +2277,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
     def eval(self):
         for group in self.param_groups:
             beta1, _, _ = group['betas']
-            if group['train_mode']:
+            if self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -2286,13 +2295,13 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = False
+                self.train_mode = False
 
     @torch.no_grad()
     def train(self):
         for group in self.param_groups:
             beta1, _, _ = group['betas']
-            if not group['train_mode']:
+            if not self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -2310,7 +2319,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = True
+                self.train_mode = True
 
     @torch.no_grad()
     def reset(self):
@@ -2327,7 +2336,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
-        if not group['train_mode']:
+        if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")
@@ -2580,6 +2589,8 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
+        self.train_mode = False
+
         if weight_decay_lr_decouple:
             self.validate_non_negative(weight_decay_lr_max, 'weight_decay_lr_max')
 
@@ -2598,7 +2609,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             'eps': eps,
             'eps2': eps2,
             'eps_floor':eps_floor,
-            'train_mode': True,
             'weight_sum': 0.0,
             'lr_max': -1.0,
             'adaptive_clip':adaptive_clip,
@@ -2621,7 +2631,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
     def eval(self):
         for group in self.param_groups:
             beta1, _ = group['betas']
-            if group['train_mode']:
+            if self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -2639,13 +2649,13 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = False
+                self.train_mode = False
 
     @torch.no_grad()
     def train(self):
         for group in self.param_groups:
             beta1, _ = group['betas']
-            if not group['train_mode']:
+            if not self.train_mode:
                 for p in group['params']:
                     state = self.state[p]
                     if 'z' in state:
@@ -2663,7 +2673,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                         # pack
                         if p.dtype in {torch.float16, torch.bfloat16}:
                             copy_stochastic_(p, p_fp32)
-                group['train_mode'] = True
+                self.train_mode = True
 
     @torch.no_grad()
     def reset(self):
@@ -2679,7 +2689,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
-        if not group['train_mode']:
+        if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")

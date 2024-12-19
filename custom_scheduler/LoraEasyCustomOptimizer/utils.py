@@ -1,14 +1,30 @@
 import torch
-from typing import Any, Dict, List, Tuple, Union, Type, Literal, Optional
+from typing import Tuple, Union, Type, Literal, Optional
 import torch.nn.functional as F
 from torch.optim import Optimizer
 from einops import rearrange
-from pytorch_optimizer.optimizer.utils import unit_norm
 import math
 
 OPTIMIZER = Type[Optimizer]
 
 NORM_TYPE = Literal['unit','global','layer']
+
+def unit_norm(x: torch.Tensor, norm: float = 2.0) -> torch.Tensor:
+    r"""Get norm of unit."""
+    keep_dim: bool = True
+    dim: Optional[Union[int, Tuple[int, ...]]] = None
+
+    x_len: int = len(x.shape)
+    if x_len <= 1:
+        keep_dim = False
+    elif x_len in (2, 3):
+        dim = 1
+    elif x_len == 4:
+        dim = (1, 2, 3)
+    else:
+        dim = tuple(range(1, x_len))
+
+    return x.norm(p=norm, dim=dim, keepdim=keep_dim)
 
 def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     # thanks to Nerogar for fast stochastic pytorch implementation
@@ -112,12 +128,12 @@ def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float
 
         return grad
     elif norm_type == 'unit':
-        p_norm = unit_norm(p).clamp_(agc_eps)
+        p_norm = unit_norm(p).clamp_(min=agc_eps)
         g_norm = unit_norm(grad)
 
         max_norm = p_norm * agc_clip_val
 
-        clipped_grad = grad * (max_norm / g_norm.clamp_min_(eps))
+        clipped_grad = grad * (max_norm / g_norm.clamp_(min=eps))
 
         return torch.where(g_norm > max_norm, clipped_grad, grad)
     else:
