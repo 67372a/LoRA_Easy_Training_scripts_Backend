@@ -2788,15 +2788,11 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 c_t = grad + correction
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    muon_grad = newton_schulz(c_t)
+                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
-
-                    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                        # Apply Adaptive Gradient Clipping (AGC)
-                        muon_grad.copy_(agc(p_fp32, muon_grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -2814,16 +2810,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                     rms = grad_nat.pow(2).mean().sqrt_()
                     divisor = max(fisher_clip, rms) / fisher_clip
                     grad_nat.div_(divisor)
-
-                    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                        muon_grad_norm = torch.linalg.norm(muon_grad)
-                        grad_nat_norm = torch.linalg.norm(grad_nat)
-
-                        muon_grad.mul_(grad_nat_norm.div_(muon_grad_norm.add_(1e-16)))
-
-                        update = muon_grad
-                    else:
-                        update = grad_nat
                     
                     # Perform weight decay
                     if weight_decay != 0 and weight_decouple:
@@ -2840,12 +2826,12 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                         divisor = max(fisher_clip, rms) / fisher_clip
                         grad_weights.div_(divisor)
 
-                        update.add_(grad_weights, alpha=weight_decay)
+                        grad_nat.add_(grad_weights, alpha=weight_decay)
 
                     p_fp32.lerp_(z, weight=checkpoint)
-                    p_fp32.add_(update, alpha=adaptive_y_lr)
+                    p_fp32.add_(grad_nat, alpha=adaptive_y_lr)
 
-                    z.sub_(update, alpha=lr_step_size)
+                    z.sub_(grad_nat, alpha=lr_step_size)
 
                     if weight_decay != 0 and weight_decouple and group['stable_weight_decay']:
                         fim_sum += fim.sum()
