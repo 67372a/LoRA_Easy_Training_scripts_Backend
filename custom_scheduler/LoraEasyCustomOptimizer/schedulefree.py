@@ -8,7 +8,7 @@ import math
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
-from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz_
+from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz
 
 class ScheduleFreeWrapper(BaseOptimizer):
     r"""
@@ -2788,7 +2788,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 c_t = grad + correction
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    muon_grad = newton_schulz_(c_t)
+                    muon_grad = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
