@@ -514,6 +514,16 @@ class RMSPropADOPT(BaseOptimizer):
                     normed_grad = grad.div(de_nom)
                     normed_grad.clamp_(-adopt_clip, adopt_clip)
 
+                    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                        muon_grad_norm = torch.linalg.norm(muon_grad)
+                        normed_grad_norm = torch.linalg.norm(normed_grad_norm)
+
+                        muon_grad.mul_(normed_grad_norm.div_(muon_grad_norm.add_(1e-16)))
+
+                        update = muon_grad
+                    else:
+                        update = normed_grad
+
                     # Weight decay calculated at y
                     if group["weight_decay"] != 0 and group['weight_decouple']:
                         if group['stable_weight_decay'] and group['exp_avg_sq_mean_sqrt'] > 0:
@@ -523,9 +533,9 @@ class RMSPropADOPT(BaseOptimizer):
 
                         p_fp32.mul_(1.0 - group['weight_decay'] * lr * swd_scaling)
                     elif group["weight_decay"] != 0:
-                        normed_grad.add_(p_fp32, alpha=group["weight_decay"])
+                        update.add_(p_fp32, alpha=group["weight_decay"])
 
-                    p_fp32.add_(normed_grad, alpha=-lr)
+                    p_fp32.add_(update, alpha=-lr)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         exp_avg_sq_sum += exp_avg_sq.sum()
