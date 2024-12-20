@@ -232,18 +232,19 @@ def update_second_moment(second_moment: torch.tensor, grad: torch.tensor, beta2:
 
 # From: https://github.com/KellerJordan/Muon/blob/master/muon.py
 @torch.no_grad()
-def newton_schulz_(grad: torch.tensor, steps: int = 6, eps: float = 1e-7) -> torch.tensor:
+def newton_schulz(grad: torch.tensor, steps: int = 6, eps: float = 1e-7) -> torch.tensor:
     # Inline reshaping step within the method itself.
     original_shape = None
     original_type = grad.dtype
-    if len(grad.shape) > 2:
-        original_shape = grad.shape
-        grad = grad.view(grad.size(0), -1)
+    working_grad = grad.clone()
+    if len(working_grad.shape) > 2:
+        original_shape = working_grad.shape
+        working_grad = working_grad.view(working_grad.size(0), -1)
     a, b, c = (3.4445, -4.7750,  2.0315)
-    X = grad.bfloat16()
+    X = working_grad.bfloat16()
     if original_type in {torch.float32}:
-        copy_stochastic_(X, grad)
-    if grad.size(0) > grad.size(1):
+        copy_stochastic_(X, working_grad)
+    if working_grad.size(0) > working_grad.size(1):
         X = X.T
 
     # Ensure spectral norm is at most 1
@@ -254,12 +255,12 @@ def newton_schulz_(grad: torch.tensor, steps: int = 6, eps: float = 1e-7) -> tor
         B = b * A + c * A @ A # adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
         X = a * X + B @ X
 
-    if grad.size(0) > grad.size(1):
+    if working_grad.size(0) > working_grad.size(1):
         X = X.T
-    if X is not grad:
-        grad.copy_(X)
+    if X is not working_grad:
+        working_grad = working_grad.copy_(X)
         del X
     if original_shape is not None:
-        grad = grad.view(*original_shape)
+        working_grad = working_grad.view(*original_shape)
 
-    return grad.to(dtype=original_type)
+    return working_grad.to(dtype=original_type)

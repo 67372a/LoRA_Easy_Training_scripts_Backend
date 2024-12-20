@@ -5,7 +5,7 @@
 
 import torch
 from torch.optim import Optimizer
-from .utils import copy_stochastic_, quantize, dequantize, agc, NORM_TYPE, newton_schulz_, create_factored_dims, get_denom, update_second_moment
+from .utils import copy_stochastic_, quantize, dequantize, agc, NORM_TYPE, newton_schulz, create_factored_dims, get_denom, update_second_moment
 import math
 from torch.nn.functional import softplus
 from typing import Optional, Literal
@@ -1486,7 +1486,7 @@ class CompassADOPT(BaseOptimizer):
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    muon_grad = newton_schulz_(grad)
+                    muon_grad = newton_schulz(grad)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -1805,7 +1805,7 @@ class CompassADOPTMARS(BaseOptimizer):
                 c_t = grad + correction
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    muon_grad = newton_schulz_(c_t)
+                    muon_grad = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
