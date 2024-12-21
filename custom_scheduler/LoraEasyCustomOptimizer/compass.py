@@ -1296,9 +1296,6 @@ class CompassADOPT(BaseOptimizer):
         factor_second_moment (bool):
             Stores the second moment, i.e. ema_sq / exponential moving average squared, at the row/column level 
             instead of per parameter saving vram at the cost of lower precision (Default: False)
-        muon_location (string):
-            'before_clip','after_clip'
-            (default: after_clip)
         debias_beta1 (bool):
             Apply bias correction to step size (LR). (Default: True)
         debias_beta2 (bool):
