@@ -311,7 +311,6 @@ class FCompassADOPT(BaseOptimizer):
 
                 state['momentum'] = torch.zeros_like(p)
                 state['fim'] = torch.ones_like(p)
-                state['previous_grad'] = torch.zeros_like(p)
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
