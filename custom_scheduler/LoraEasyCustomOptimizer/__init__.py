@@ -23,7 +23,7 @@ from LoraEasyCustomOptimizer.adai import Adai
 from LoraEasyCustomOptimizer.adabelief import AdaBelief
 from LoraEasyCustomOptimizer.galore import GaLore
 from LoraEasyCustomOptimizer.schedulefree import ScheduleFreeWrapper, ADOPTScheduleFree, ADOPTEMAMixScheduleFree, ADOPTNesterovScheduleFree, FADOPTScheduleFree, ADOPTMARSScheduleFree, FADOPTMARSScheduleFree
-from LoraEasyCustomOptimizer.fmarscrop import FMARSCrop, FMARSCropV2
+from LoraEasyCustomOptimizer.fmarscrop import FMARSCrop, FMARSCropV2, FMARSCropV2ExMachina
 from LoraEasyCustomOptimizer.laprop import LaProp
 from LoraEasyCustomOptimizer.sgd import SGDSaI
 
@@ -73,6 +73,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     SGDSaI,
     FCompassADOPT,
     FCompassADOPTMARS,
+    FMARSCropV2ExMachina,
 ]
 
 OPTIMIZERS: Dict[str, OPTIMIZER] = {str(f"{optimizer.__name__}".lower()): optimizer for optimizer in OPTIMIZER_LIST}
