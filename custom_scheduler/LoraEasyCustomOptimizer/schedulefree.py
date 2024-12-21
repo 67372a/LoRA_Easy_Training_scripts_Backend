@@ -2771,21 +2771,18 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 if len(state) == 0:
                     state['z'] = p.clone()
                     state['fim'] = torch.ones_like(p)
-                    state['previous_grad'] = -p.grad.to(dtype=p.dtype, copy=True).detach()
+                    state['previous_grad'] = p.grad.to(dtype=p.dtype, copy=True).detach()
 
-                z, fim, grad_diff = state['z'], state['fim'], state['previous_grad']
+                z, fim, previous_grad = state['z'], state['fim'], state['previous_grad']
 
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
-                    z, fim, grad_diff = z.to(torch.float32), fim.to(torch.float32), grad_diff.to(torch.float32)
+                    z, fim, previous_grad = z.to(torch.float32), fim.to(torch.float32), previous_grad.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
-                
-                grad_diff.add_(grad)
-
+            
                 # MARS Calculate cₜ (gradient with correction term)
-                correction = (gamma * (beta1 / (1.0 - beta1))) * grad_diff
-                c_t = grad + correction
+                c_t = (grad - previous_grad).mul_(gamma * (beta1 / (1.0 - beta1))).add_(grad)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
                     c_t = newton_schulz(c_t)
@@ -2843,9 +2840,9 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     copy_stochastic_(state['z'], z)
                     copy_stochastic_(state['fim'], fim)
-                    copy_stochastic_(state['previous_grad'], -grad)
+                    copy_stochastic_(state['previous_grad'], grad)
                     copy_stochastic_(p, p_fp32)
                 else:
-                    state['previous_grad'].copy_(-grad)
+                    state['previous_grad'].copy_(grad)
 
         return loss
