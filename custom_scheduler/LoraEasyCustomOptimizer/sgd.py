@@ -72,12 +72,15 @@ class SGDSaI(BaseOptimizer):
                 grad = p.grad
                 if grad.is_sparse:
                     raise NoSparseGradientError(str(self))
+                
+                # Unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
 
                 sigma = grad.std().nan_to_num_()
                 grad_norm = grad.norm()
 
                 g_snr = grad_norm.div_(sigma.add_(group['eps'])) if sigma != 0.0 else grad_norm
-                print("g_snr=" + str(g_snr))
 
                 self.state[p]['gsnr'] = g_snr
 
@@ -110,7 +113,7 @@ class SGDSaI(BaseOptimizer):
                 # Unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
-                    p_fp32 = p.clone().to(torch.float32)
+                    p_fp32 = p.to(dtype=torch.float32,copy=True)
 
                 if momentum > 0.0:
                     if 'momentum_buffer' not in state:
@@ -120,7 +123,7 @@ class SGDSaI(BaseOptimizer):
 
                     # Unpack
                     if p.dtype in {torch.float16, torch.bfloat16}:
-                        momentum_buffer = state["momentum_buffer"].to(torch.float32)
+                        momentum_buffer = momentum_buffer.to(torch.float32)
 
                     momentum_buffer.mul_(momentum).add_(grad, alpha=1.0 - momentum)
 
