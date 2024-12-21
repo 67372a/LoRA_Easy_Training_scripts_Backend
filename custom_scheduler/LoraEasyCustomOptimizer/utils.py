@@ -96,7 +96,7 @@ def dequantize(tensor, details, dtype=torch.float32):
 
     return tensor
     
-def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float, eps: float = 1e-6, norm_type: NORM_TYPE = 'unit') -> torch.Tensor:
+def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float, eps: float = 1e-37, norm_type: NORM_TYPE = 'unit') -> torch.Tensor:
     r"""Clip gradient values in excess of the norm.
         Clip updates to be at most clipping * parameter_norm.
 
@@ -106,9 +106,12 @@ def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float
         
     :param p: torch.Tensor. parameter.
     :param grad: torch.Tensor, gradient.
-    :param agc_eps: float. agc epsilon to clip the norm of parameter.
-    :param agc_clip_val: float. norm clip.
-    :param eps: float. simple stop from div by zero and no relation to standard optimizer eps.
+    :param agc_eps: float. Effectively sets a floor for the p_norm, as such, any gradients smaller than this will be clipped
+        as though their parameter is at least agc_eps. This helps prevent vanishing gradients and excessive clipping early in training
+        for small parameters.
+    :param agc_clip_val: float. The desired clipping ratio, e.x. 0.5 would mean any gradient would be clipped to be no greater than half it's
+        associated parameter.
+    :param eps: float. simple stop from div by zero, as such should be as small as possible to avoid skewing clipping.
     """
     if norm_type in {'global','layer'}:
         # Compute the global norm of the parameters and gradients
@@ -119,7 +122,7 @@ def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float
         max_norm = p_norm * agc_clip_val
 
         # Compute the clipping coefficient
-        clip_coef = max_norm / g_norm.clamp(min=eps)
+        clip_coef = max(1, max_norm / g_norm.clamp(min=eps))
 
         # If the gradient norm exceeds the maximum allowed norm, scale the gradients
         if g_norm > max_norm:
@@ -133,7 +136,7 @@ def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float
 
         max_norm = p_norm * agc_clip_val
 
-        clipped_grad = grad * (max_norm / g_norm.clamp_(min=eps))
+        clipped_grad = grad * max(1, max_norm / g_norm.clamp_(min=eps))
 
         return torch.where(g_norm > max_norm, clipped_grad, grad)
     else:
@@ -186,7 +189,7 @@ def create_factored_dims(
     
 # https://github.com/LoganBooker/prodigy-plus-schedule-free/blob/23f752a3901686d270dfdcb9b29823541ad1c3c7/prodigyplus/core_optimiser.py#L389
 @torch.no_grad()
-def get_denom(second_moment: torch.tensor, eps: float = 1e-30):
+def get_denom(second_moment: torch.tensor, eps: float = 1e-37):
     # Get denom
     if isinstance(second_moment, list):
         row_var, col_var, _, _, reduce_dc = second_moment
