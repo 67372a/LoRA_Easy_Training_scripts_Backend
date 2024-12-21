@@ -277,7 +277,7 @@ class ADOPTScheduleFree(BaseOptimizer):
             Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
-            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
             The type of clipping, can be unit or layer. If done at the unit level can change
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
@@ -571,7 +571,7 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
             Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
-            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
             The type of clipping, can be unit or layer. If done at the unit level can change
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
@@ -913,7 +913,7 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
             Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
-            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
             The type of clipping, can be unit or layer. If done at the unit level can change
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
@@ -1238,7 +1238,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
             Adaptive clip value to apply to the MARS corrected gradient - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
-            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
             The type of clipping, can be unit or layer. If done at the unit level can change
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
@@ -1542,7 +1542,7 @@ class FADOPTScheduleFree(BaseOptimizer):
             Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
-            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
             The type of clipping, can be unit or layer. If done at the unit level can change
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
@@ -1844,7 +1844,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
             Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
-            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
             The type of clipping, can be unit or layer. If done at the unit level can change
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
@@ -2197,7 +2197,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
             Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
-            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
             The type of clipping, can be unit or layer. If done at the unit level can change
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
@@ -2532,7 +2532,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             Adaptive clip value to apply to the MARS corrected gradient - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
-            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
             The type of clipping, can be unit or layer. If done at the unit level can change
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.

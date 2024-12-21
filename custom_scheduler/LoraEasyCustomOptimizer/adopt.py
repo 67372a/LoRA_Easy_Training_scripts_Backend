@@ -178,7 +178,7 @@ class ADOPTMARS(BaseOptimizer):
             Adaptive clip value to apply to the MARS corrected gradient - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
-            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
             The type of clipping, can be unit or layer. If done at the unit level can change
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
@@ -401,7 +401,7 @@ class FADOPTMARS(BaseOptimizer):
             Adaptive clip value to apply to the MARS corrected gradient - https://arxiv.org/abs/2102.06171 (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
-            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
             The type of clipping, can be unit or layer. If done at the unit level can change
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
@@ -526,21 +526,18 @@ class FADOPTMARS(BaseOptimizer):
                 if len(state) == 0:
                     state['momentum'] = torch.zeros_like(p)
                     state['fim'] = torch.ones_like(p)
-                    state['previous_grad'] = -p.grad.to(dtype=p.dtype, copy=True).detach()
+                    state['previous_grad'] = p.grad.to(dtype=p.dtype, copy=True).detach()
 
-                momentum, fim, grad_diff = state['momentum'], state['fim'], state['previous_grad']
+                momentum, fim, previous_grad = state['momentum'], state['fim'], state['previous_grad']
 
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
-                    momentum, fim, grad_diff = momentum.to(torch.float32), fim.to(torch.float32), grad_diff.to(torch.float32)
+                    momentum, fim, previous_grad = momentum.to(torch.float32), fim.to(torch.float32), previous_grad.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
-                grad_diff.add_(grad)
-
                 # MARS Calculate cₜ (gradient with correction term)
-                correction = (gamma * (beta1 / (1.0 - beta1))) * grad_diff
-                c_t = grad + correction
+                c_t = (grad - previous_grad).mul_(gamma * (beta1 / (1.0 - beta1))).add_(grad)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -603,10 +600,10 @@ class FADOPTMARS(BaseOptimizer):
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     copy_stochastic_(state['momentum'], momentum)
                     copy_stochastic_(state['fim'], fim)
-                    copy_stochastic_(state['previous_grad'], -grad)
+                    copy_stochastic_(state['previous_grad'], grad)
                     copy_stochastic_(p, p_fp32)
                 else:
-                    state['previous_grad'].copy_(-grad)
+                    state['previous_grad'].copy_(grad)
 
         return loss
     

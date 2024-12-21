@@ -47,7 +47,7 @@ class FMARSCrop(BaseOptimizer):
             Adaptive clip value to applied to the MARS corrected gradient. (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
-            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         adaptive_clip_type (string):
             The type of clipping, can be unit or layer. If done at the unit level can change
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
@@ -385,7 +385,7 @@ class FMARSCropV2(BaseOptimizer):
             Adaptive clip value to apply to the corrected gradient, before further use by the optimizer. (default: 1.0).
         adaptive_clip_eps (float):
             The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
-            not getting updating due to very small gradients being clipped excessively. (default: 1e-3).
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         cautious (bool):
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: True).
     """
