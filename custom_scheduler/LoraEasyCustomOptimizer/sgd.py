@@ -24,7 +24,6 @@ class SGDSaI(BaseOptimizer):
         weight_decay: float = 1e-2,
         weight_decouple: bool = True,
         eps: float = 1e-8,
-        cautious: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -39,7 +38,6 @@ class SGDSaI(BaseOptimizer):
             'momentum': momentum,
             'weight_decay': weight_decay,
             'weight_decouple': weight_decouple,
-            'cautious': cautious,
             'eps': eps,
         }
         super().__init__(params, defaults)
@@ -72,13 +70,16 @@ class SGDSaI(BaseOptimizer):
                 grad = p.grad
                 if grad.is_sparse:
                     raise NoSparseGradientError(str(self))
+                
+                # Unpack
+                if p.dtype in {torch.float16, torch.bfloat16}:
+                    grad = grad.to(torch.float32)
 
                 sigma = grad.std().nan_to_num_()
                 grad_norm = grad.norm()
 
                 g_snr = grad_norm.div_(sigma.add_(group['eps'])) if sigma != 0.0 else grad_norm
-                print("g_snr=" + str(g_snr))
-
+                
                 self.state[p]['gsnr'] = g_snr
 
         self.has_warmup = True
@@ -96,7 +97,13 @@ class SGDSaI(BaseOptimizer):
                 loss = closure()
 
         for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+
             momentum: float = group['momentum']
+
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -114,7 +121,11 @@ class SGDSaI(BaseOptimizer):
 
                 if momentum > 0.0:
                     if 'momentum_buffer' not in state:
-                        state['momentum_buffer'] = grad.clone()
+                        state['momentum_buffer'] = grad.to(dtype=p.dtype, copy=True).detach()
+
+                        # Stochastic copy the original grad into the state
+                        if p.dtype in {torch.float16, torch.bfloat16}:
+                            copy_stochastic_(state['momentum_buffer'], grad)
 
                     momentum_buffer = state['momentum_buffer']
 
@@ -139,13 +150,7 @@ class SGDSaI(BaseOptimizer):
                     False,
                 )
 
-                if group["cautious"] and momentum > 0.0:
-                    mask = (momentum_buffer * grad > 0).to(grad.dtype)
-                    mask.div_(mask.mean().clamp_(min=1e-3))
-                else:
-                    mask = 1.0
-
-                p_fp32.add_(momentum_buffer * mask, alpha=-group['lr'] * state['gsnr'])
+                p_fp32.add_(momentum_buffer, alpha=-group['lr'] * state['gsnr'])
 
                 # Pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
