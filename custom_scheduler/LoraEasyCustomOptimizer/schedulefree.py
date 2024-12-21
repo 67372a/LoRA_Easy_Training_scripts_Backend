@@ -139,10 +139,19 @@ class ScheduleFreeWrapper(BaseOptimizer):
 
     @staticmethod
     def swap(x: torch.Tensor, y: torch.Tensor):
+        # Convert to uint8 while preserving dimensions by viewing as bytes
+        x_bytes = x.view(-1).view(torch.uint8)
+        y_bytes = y.view(-1).view(torch.uint8)
+        
+        # Perform bitwise XOR operations
+        x_bytes.bitwise_xor_(y_bytes)
+        y_bytes.bitwise_xor_(x_bytes)
+        x_bytes.bitwise_xor_(y_bytes)
+
         # If this crashes use ScheduleFreeWrapperReference instead
-        x.view(torch.uint8).bitwise_xor_(y.view(torch.uint8))
-        y.view(torch.uint8).bitwise_xor_(x.view(torch.uint8))
-        x.view(torch.uint8).bitwise_xor_(y.view(torch.uint8))
+        #x.view(torch.uint8).bitwise_xor_(y.view(torch.uint8))
+        #y.view(torch.uint8).bitwise_xor_(x.view(torch.uint8))
+        #x.view(torch.uint8).bitwise_xor_(y.view(torch.uint8))
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:

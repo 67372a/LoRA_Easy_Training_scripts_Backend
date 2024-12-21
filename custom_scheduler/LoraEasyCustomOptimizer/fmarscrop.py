@@ -1,7 +1,6 @@
 # FMARSCrop from https://github.com/Clybius/Personalized-Optimizers by Clybius
 import torch
-from .utils import copy_stochastic_, agc, NORM_TYPE, schedule_beta, schedule_alpha
-from typing import Literal, Optional
+from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz
 import math
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
@@ -56,6 +55,13 @@ class FMARSCrop(BaseOptimizer):
         gamma (float):
             Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
             larger values apply more correction, and will require higher LRs to offset. (default: 0.0005)
+        debias_beta2 (bool):
+            Apply bias correction to denominator of updates (adaptive LR). (Default: True)
+        use_muon_pp (boolean):
+            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
+            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
+            May not work well with small batch sizes or finetuning.
+            (default: False)
     """
 
     def __init__(
@@ -80,7 +86,8 @@ class FMARSCrop(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'global',
         stable_weight_decay: bool = False,
-        debias_beta2: bool = False,
+        debias_beta2: bool = True,
+        use_muon_pp: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -89,7 +96,6 @@ class FMARSCrop(BaseOptimizer):
         self.validate_non_negative(eps, 'eps')
 
         # Override zero to 1e-37, as zero and float32.tiny NaNs
-        # Using 1e-37 as 1e-38 NaNs for Flux loras
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
@@ -114,6 +120,7 @@ class FMARSCrop(BaseOptimizer):
             'stable_weight_decay': stable_weight_decay,
             'debias_beta2':debias_beta2,
             'weight_decouple':weight_decouple,
+            'use_muon_pp': use_muon_pp,
         }
 
         super().__init__(params, defaults)
@@ -173,6 +180,7 @@ class FMARSCrop(BaseOptimizer):
             adaptive_clip_eps = group["adaptive_clip_eps"]
             stable_weight_decay = group["stable_weight_decay"]
             weight_decouple = group['weight_decouple']
+            use_muon_pp = group['use_muon_pp']
 
             clip_lambda = (step - 1)**0.25
 
@@ -208,15 +216,18 @@ class FMARSCrop(BaseOptimizer):
                 # Unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
-                    fim = state["fim"].to(torch.float32)
-                    momentum = state["momentum"].to(torch.float32)
-                    prev_grad = state["prev_grad"].to(torch.float32)
-                    p_fp32 = p.clone().to(torch.float32)
+                    fim = fim.to(torch.float32)
+                    momentum = momentum.to(torch.float32)
+                    prev_grad = prev_grad.to(torch.float32)
+                    p_fp32 = p.to(dtype=torch.float32,copy=True)
 
                 prev_grad = prev_grad.add(grad)
                 # Calculate cₜ (gradient with correction term)
-                correction = ((((1.0 - beta1) / 2) if gamma is None else gamma) * (beta1 / (1.0 - beta1))) * prev_grad
+                correction = (gamma * (beta1 / (1.0 - beta1))) * prev_grad
                 c_t = grad + correction
+
+                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -388,6 +399,13 @@ class FMARSCropV2(BaseOptimizer):
             not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
         cautious (bool):
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: True).
+        debias_beta2 (bool):
+            Apply bias correction to denominator of updates (adaptive LR). (Default: True)
+        use_muon_pp (boolean):
+            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
+            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
+            May not work well with small batch sizes or finetuning.
+            (default: False)
     """
 
     def __init__(
@@ -409,6 +427,8 @@ class FMARSCropV2(BaseOptimizer):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         cautious: bool = True,
+        debias_beta2: bool = True,
+        use_muon_pp: bool = False,
     ):
 
         # Override zero to 1e-36, as zero and float32.tiny NaNs
@@ -432,6 +452,8 @@ class FMARSCropV2(BaseOptimizer):
             adaptive_clip = adaptive_clip,
             adaptive_clip_eps = adaptive_clip_eps,
             cautious = cautious,
+            debias_beta2 = debias_beta2,
+            use_muon_pp = use_muon_pp,
         )
 
         super(FMARSCropV2, self).__init__(params, defaults)
@@ -478,6 +500,8 @@ class FMARSCropV2(BaseOptimizer):
             eps = group["eps"]
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
+            debias_beta2 = group["debias_beta2"]
+            use_muon_pp = group["use_muon_pp"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -516,13 +540,19 @@ class FMARSCropV2(BaseOptimizer):
                 correction = (gamma * (beta1 / (1 - beta1))) * prev_grad
                 c_t = grad + correction
 
+                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                    c_t = newton_schulz(c_t)
+
                 # Gradient clipping (if necessary)
                 if group["adaptive_clip"] > 0.0:
                     c_t.copy_(agc(p_fp32, c_t, group["adaptive_clip_eps"], group["adaptive_clip"]))
 
                 clip_lambda = step**0.25
 
-                fim_slow_beta = ((beta2**step - beta2) / (beta2**step - 1.0)) ** (1/2)
+                if debias_beta2:
+                    fim_slow_beta = ((beta2**step - beta2) / (beta2**step - 1.0)) ** (1/2)
+                else:
+                    fim_slow_beta = beta2
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -578,7 +608,7 @@ class FMARSCropV2(BaseOptimizer):
                 # Apply full step
                 if group['cautious']:
                     # Apply caution as per 'Cautious Optimizers' - https://arxiv.org/abs/2411.16085
-                    mask = (momentum_cent * grad_nat < 0).to(momentum_cent.dtype) # Unsure if disagreement masking is more useful than agreement masking, or not masking at all.
+                    mask = (momentum_cent * grad_nat < 0).to(grad_nat.dtype) # Unsure if disagreement masking is more useful than agreement masking, or not masking at all.
                     mask.div_(mask.mean().clamp_(min=1e-3)) #                       It should theoretically help prevent poor updates?
                     momentum_cent = momentum_cent * mask
                 full_step = grad_nat.add(momentum_cent, alpha=step**momentum_lambda)
@@ -604,7 +634,7 @@ class FMARSCropV2(BaseOptimizer):
                 # Apply full step
                 if group['cautious']:
                     # Apply caution as per 'Cautious Optimizers' - https://arxiv.org/abs/2411.16085
-                    mask = (full_step * grad_nat > 0).to(full_step.dtype)
+                    mask = (full_step * grad_nat > 0).to(grad_nat.dtype)
                     mask.div_(mask.mean().clamp_(min=1e-3))
                     full_step = full_step * mask
                 p_fp32.data.add_(full_step, alpha=-lr)
