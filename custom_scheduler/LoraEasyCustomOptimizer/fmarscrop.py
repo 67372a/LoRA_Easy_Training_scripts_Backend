@@ -67,6 +67,7 @@ class FMARSCrop(BaseOptimizer):
         eps2: float = 1e-2,
         eps_floor: float = None,
         weight_decay: float = 0.0,
+        weight_decouple: bool = False,
         centralization: float = 0.0,
         moment_centralization: float = 0.0,
         diff_mult: float = 1.0,
@@ -79,6 +80,7 @@ class FMARSCrop(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'global',
         stable_weight_decay: bool = False,
+        debias_beta2: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -110,6 +112,8 @@ class FMARSCrop(BaseOptimizer):
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
             'stable_weight_decay': stable_weight_decay,
+            'debias_beta2':debias_beta2,
+            'weight_decouple':weight_decouple,
         }
 
         super().__init__(params, defaults)
@@ -168,8 +172,14 @@ class FMARSCrop(BaseOptimizer):
             adaptive_clip_type = group["adaptive_clip_type"]
             adaptive_clip_eps = group["adaptive_clip_eps"]
             stable_weight_decay = group["stable_weight_decay"]
+            weight_decouple = group['weight_decouple']
 
             clip_lambda = (step - 1)**0.25
+
+            if group["debias_beta2"]:
+                current_beta2: float = self.debias_beta(beta2, group['step'])
+            else:
+                current_beta2 = 1.0
 
             for p in group["params"]:
                 if p.grad is None:
@@ -282,8 +292,15 @@ class FMARSCrop(BaseOptimizer):
                             )
                         )
 
-                    if weight_decay != 0:
-                        # Perform weight decay
+                    # Perform weight decay
+                    if weight_decay != 0 and weight_decouple:
+                        if stable_weight_decay and group['fim_mean_sqrt'] > 0:
+                            swd_scaling = 1.0 / group['fim_mean_sqrt']
+                        else:
+                            swd_scaling = 1.0
+
+                        p_fp32.mul_(1.0 - weight_decay * lr * swd_scaling)
+                    elif weight_decay != 0:
                         grad_weights = p_fp32.data.div(fim_base).div_(diff_fim_base)
 
                         rms = grad_weights.pow(2).mean().sqrt_()
@@ -306,7 +323,7 @@ class FMARSCrop(BaseOptimizer):
                     # Apply full step
                     p_fp32.data.add_(full_step * mask, alpha=-lr)
 
-                    fim.mul_(beta2).addcmul_(approx_grad_nat, approx_grad_nat, value=1.0 - beta2).clamp_(-clip_lambda, clip_lambda)
+                    fim.mul_(current_beta2).addcmul_(approx_grad_nat, approx_grad_nat, value=1.0 - current_beta2).clamp_(-clip_lambda, clip_lambda)
 
                 if stable_weight_decay:
                     fim_sum += fim.sum()
