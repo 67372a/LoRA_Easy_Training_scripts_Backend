@@ -510,7 +510,6 @@ class FMARSCropV2ExMachina(BaseOptimizer):
             centralization = group["centralization"]
             moment_centralization = group["moment_centralization"]
             diff_mult = group["diff_mult"]
-            momentum_beta = group["momentum_beta"]
             momentum_lambda = group["momentum_lambda"]
             clip = group["clip"]
             step = group["step"]
@@ -622,7 +621,7 @@ class FMARSCropV2ExMachina(BaseOptimizer):
                     divisor = max(clip, rms) / clip
                     grad_nat.div_(divisor)
 
-                    momentum.mul_(momentum_beta).add_(grad_nat, alpha=1.0 - momentum_beta)
+                    momentum.mul_(beta1).add_(grad_nat, alpha=1.0 - beta1)
 
                     if moment_centralization != 0:
                         momentum_cent = momentum.sub(torch.mean(momentum).mul_(moment_centralization))
