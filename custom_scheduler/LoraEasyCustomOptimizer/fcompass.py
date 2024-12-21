@@ -1,6 +1,6 @@
 import torch
 from torch.optim import Optimizer
-from .utils import copy_stochastic_, NORM_TYPE, agc
+from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz
 import math
 from torch.nn.functional import softplus
 
@@ -239,6 +239,11 @@ class FCompassADOPT(BaseOptimizer):
             Apply bias correction to step size (LR). (Default: True)
         debias_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: True)
+        use_muon_pp (boolean):
+            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
+            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
+            May not work well with small batch sizes or finetuning.
+            (default: False)
     """
 
     def __init__(
@@ -260,6 +265,7 @@ class FCompassADOPT(BaseOptimizer):
         cautious: bool = True,
         debias_beta1: bool = True,
         debias_beta2: bool = True,
+        use_muon_pp: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -288,6 +294,7 @@ class FCompassADOPT(BaseOptimizer):
             'cautious': cautious,
             'debias_beta1': debias_beta1,
             'debias_beta2': debias_beta2,
+            'use_muon_pp': use_muon_pp,
         }
         super().__init__(params, defaults)
 
@@ -349,6 +356,7 @@ class FCompassADOPT(BaseOptimizer):
             eps_floor = group["eps_floor"]
             fisher_clip = group["fisher_clip"]
             amp_fac = group["amp_fac"]
+            use_muon_pp = group["use_muon_pp"]
 
             for p in group['params']:
                 if p.grad is None:
@@ -379,6 +387,9 @@ class FCompassADOPT(BaseOptimizer):
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                    c_t = newton_schulz(c_t)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -485,6 +496,11 @@ class FCompassADOPTMARS(BaseOptimizer):
             Apply bias correction to step size (LR). (Default: True)
         debias_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: True)
+        use_muon_pp (boolean):
+            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
+            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
+            May not work well with small batch sizes or finetuning.
+            (default: False)
     """
 
     def __init__(
@@ -507,6 +523,7 @@ class FCompassADOPTMARS(BaseOptimizer):
         cautious: bool = True,
         debias_beta1: bool = True,
         debias_beta2: bool = True,
+        use_muon_pp: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -536,6 +553,7 @@ class FCompassADOPTMARS(BaseOptimizer):
             'cautious': cautious,
             'debias_beta1': debias_beta1,
             'debias_beta2': debias_beta2,
+            'use_muon_pp': use_muon_pp,
         }
         super().__init__(params, defaults)
 
@@ -598,6 +616,7 @@ class FCompassADOPTMARS(BaseOptimizer):
             fisher_clip = group["fisher_clip"]
             amp_fac = group["amp_fac"]
             gamma = group["gamma"]
+            use_muon_pp = group["use_muon_pp"]
 
             for p in group['params']:
                 if p.grad is None:
@@ -628,6 +647,9 @@ class FCompassADOPTMARS(BaseOptimizer):
 
                 # MARS Calculate cₜ (gradient with correction term)
                 c_t = (grad - previous_grad).mul_(gamma * (beta1 / (1.0 - beta1))).add_(grad)
+
+                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
