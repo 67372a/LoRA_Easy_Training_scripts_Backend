@@ -187,7 +187,7 @@ class FMARSCrop(BaseOptimizer):
             if group["debias_beta2"]:
                 current_beta2: float = self.debias_beta(beta2, group['step'])
             else:
-                current_beta2 = 1.0
+                current_beta2 = beta2
 
             for p in group["params"]:
                 if p.grad is None:
@@ -400,8 +400,12 @@ class FMARSCropV2ExMachina(BaseOptimizer):
         gamma (float):
             Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
             larger values apply more correction, and will require higher LRs to offset. (default: 0.0005)
+        debias_beta1 (bool):
+            Apply bias correction to step size (LR). (Default: False)
         debias_beta2 (bool):
-            Apply bias correction to denominator of updates (adaptive LR). (Default: True)
+            Apply bias correction to fim. (Default: True)
+        debias_beta3 (bool):
+            Apply bias correction to diff fim. (Default: False)
         use_muon_pp (boolean):
             Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
             (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
@@ -430,7 +434,9 @@ class FMARSCropV2ExMachina(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'global',
         stable_weight_decay: bool = False,
+        debias_beta1: bool = False,
         debias_beta2: bool = True,
+        debias_beta3: bool = False,
         use_muon_pp: bool = False,
         **kwargs,
     ):
@@ -461,7 +467,9 @@ class FMARSCropV2ExMachina(BaseOptimizer):
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
             'stable_weight_decay': stable_weight_decay,
+            'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
+            'debias_beta3':debias_beta3,
             'weight_decouple':weight_decouple,
             'use_muon_pp': use_muon_pp,
         }
@@ -526,10 +534,23 @@ class FMARSCropV2ExMachina(BaseOptimizer):
 
             clip_lambda = (step - 1)**0.25
 
+            bias_correction1: float = self.debias(beta1, group['step'])
+
+            step_size: float = self.apply_adam_debias(
+                adam_debias=not group["debias_beta1"],
+                step_size=lr,
+                bias_correction1=bias_correction1,
+            )
+
             if group["debias_beta2"]:
                 current_beta2: float = self.debias_beta(beta2, group['step'])
             else:
-                current_beta2 = 1.0
+                current_beta2 = beta2
+
+            if group["debias_beta3"]:
+                current_beta3: float = self.debias_beta(beta3, group['step'])
+            else:
+                current_beta3 = beta3
 
             for p in group["params"]:
                 if p.grad is None:
@@ -598,7 +619,7 @@ class FMARSCropV2ExMachina(BaseOptimizer):
                     # Get natural gradient (squared ema, obtained sqrt of ema)
                     diff_fim_base = grad_diff_fim.sqrt().add_(curr_eps)
 
-                    grad_diff_fim.mul_(beta3).addcmul_(grad_diff, grad_diff, value=1.0 - beta3).clamp_(-clip_lambda, clip_lambda)
+                    grad_diff_fim.mul_(current_beta3).addcmul_(grad_diff, grad_diff, value=1.0 - current_beta3).clamp_(-clip_lambda, clip_lambda)
 
                     # pack
                     if p.dtype in {torch.float16, torch.bfloat16}:
@@ -673,7 +694,7 @@ class FMARSCropV2ExMachina(BaseOptimizer):
                         mask = 1.0
 
                     # Apply full step
-                    p_fp32.data.add_(full_step * mask, alpha=-lr)
+                    p_fp32.data.add_(full_step * mask, alpha=-step_size)
 
                     fim.mul_(current_beta2).addcmul_(approx_grad_nat, approx_grad_nat, value=1.0 - current_beta2).clamp_(-clip_lambda, clip_lambda)
 

@@ -335,7 +335,7 @@ class FCompassADOPT(BaseOptimizer):
             if group["debias_beta2"]:
                 current_beta2: float = self.debias_beta(beta2, group['step'])
             else:
-                current_beta2 = 1.0
+                current_beta2 = beta2
 
             lr: float = group['lr']
 
@@ -594,7 +594,7 @@ class FCompassADOPTMARS(BaseOptimizer):
             if group["debias_beta2"]:
                 current_beta2: float = self.debias_beta(beta2, group['step'])
             else:
-                current_beta2 = 1.0
+                current_beta2 = beta2
 
             lr: float = group['lr']
 

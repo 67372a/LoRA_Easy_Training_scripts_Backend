@@ -1707,7 +1707,7 @@ class FADOPTScheduleFree(BaseOptimizer):
             if group["debias_beta2"]:
                 current_beta2: float = self.debias_beta(beta2, group['step'])
             else:
-                current_beta2 = 1.0
+                current_beta2 = beta2
 
             lr: float = group['lr']
 
@@ -2046,7 +2046,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
             if group["debias_beta2"]:
                 current_beta2: float = self.debias_beta(beta2, group['step'])
             else:
-                current_beta2 = 1.0
+                current_beta2 = beta2
 
             lr: float = group['lr']
 
@@ -2370,12 +2370,12 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
             if group["debias_beta2"]:
                 current_beta2: float = self.debias_beta(beta2, group['step'])
             else:
-                current_beta2 = 1.0
+                current_beta2 = beta2
 
             if group["debias_beta3"]:
                 current_beta3: float = self.debias_beta(beta3, group['step'])
             else:
-                current_beta3 = 1.0
+                current_beta3 = beta3
 
             lr: float = group['lr']
 
@@ -2723,7 +2723,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             if group["debias_beta2"]:
                 current_beta2: float = self.debias_beta(beta2, group['step'])
             else:
-                current_beta2 = 1.0
+                current_beta2 = beta2
 
             lr: float = group['lr']
 
