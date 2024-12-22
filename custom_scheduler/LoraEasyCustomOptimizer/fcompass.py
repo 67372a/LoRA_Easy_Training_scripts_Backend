@@ -263,7 +263,7 @@ class FCompassADOPT(BaseOptimizer):
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
         cautious: bool = True,
-        debias_beta1: bool = True,
+        debias_beta1: bool = False,
         debias_beta2: bool = True,
         use_muon_pp: bool = False,
         **kwargs,
@@ -492,7 +492,7 @@ class FCompassADOPTMARS(BaseOptimizer):
             Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
             larger values apply more correction, and will require higher LRs to offset. (default: 0.025)
         debias_beta1 (bool):
-            Apply bias correction to step size (LR). (Default: True)
+            Apply bias correction to step size (LR). (Default: False)
         debias_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: True)
         use_muon_pp (boolean):
@@ -520,7 +520,7 @@ class FCompassADOPTMARS(BaseOptimizer):
         fisher_clip: float = 1.0,
         gamma: float = 0.025,
         cautious: bool = True,
-        debias_beta1: bool = True,
+        debias_beta1: bool = False,
         debias_beta2: bool = True,
         use_muon_pp: bool = False,
         **kwargs,
