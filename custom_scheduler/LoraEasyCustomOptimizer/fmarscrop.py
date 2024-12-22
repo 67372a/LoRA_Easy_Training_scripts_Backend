@@ -425,7 +425,7 @@ class FMARSCropV2ExMachina(BaseOptimizer):
         momentum_lambda: float = 0.1,
         clip: float = 1.0,
         cautious: bool = True,
-        gamma: float = 0.025,
+        gamma: float = 0.005,
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'global',
