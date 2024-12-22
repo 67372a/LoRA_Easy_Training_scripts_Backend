@@ -616,11 +616,14 @@ class FMARSCropV2ExMachina(BaseOptimizer):
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         grad_diff_fim = grad_diff_fim.to(torch.float32)
 
-                    # Get natural gradient (squared ema, obtained sqrt of ema)
-                    diff_fim_base = grad_diff_fim.sqrt().add_(curr_eps)
+                    if group['step'] == 1:
+                        grad_diff_fim.addcmul_(grad_diff, grad_diff).clamp_(-clip_lambda, clip_lambda)
+                        diff_fim_base = 1.0
+                    else:
+                        # Get natural gradient (squared ema, obtained sqrt of ema)
+                        diff_fim_base = grad_diff_fim.sqrt().add_(curr_eps)
 
-                    grad_diff_fim.mul_(current_beta3).addcmul_(grad_diff, grad_diff, value=1.0 - current_beta3).clamp_(-clip_lambda, clip_lambda)
-
+                        grad_diff_fim.mul_(current_beta3).addcmul_(grad_diff, grad_diff, value=1.0 - current_beta3).clamp_(-clip_lambda, clip_lambda)
                     # pack
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         copy_stochastic_(state["grad_diff_fim"], grad_diff_fim)
