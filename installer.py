@@ -89,6 +89,10 @@ def setup_venv(venv_pip):
         f"{venv_pip} install -U --no-deps xformers==0.0.28.post3 --index-url https://download.pytorch.org/whl/cu124",
         shell=PLATFORM == "linux",
     )
+    subprocess.check_call(
+        f"{venv_pip} install -U --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu124",
+        shell=PLATFORM == "linux",
+    )
     subprocess.check_call(f"{venv_pip} install -U -r requirements.txt", shell=PLATFORM == "linux")
     subprocess.check_call(f"{venv_pip} install -U ../custom_scheduler/.", shell=PLATFORM == "linux")
     subprocess.check_call(f"{venv_pip} install -U -r ../requirements.txt", shell=PLATFORM == "linux")
