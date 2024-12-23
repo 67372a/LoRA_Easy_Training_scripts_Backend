@@ -1568,7 +1568,7 @@ class CompassADOPTMARS(BaseOptimizer):
 
                 if len(state) == 0:
                     state['exp_avg'] = torch.zeros_like(p)
-                    state['previous_grad'] = -p.grad.to(dtype=p.dtype, copy=True).detach()
+                    state['previous_grad'] = p.grad.to(dtype=p.dtype, copy=True).detach()
                     factored_dims = create_factored_dims(
                         grad.shape,
                         factored=group['factor_second_moment'],
@@ -1591,22 +1591,19 @@ class CompassADOPTMARS(BaseOptimizer):
                     else:
                         state['exp_avg_sq'] = torch.zeros_like(p)
 
-                exp_avg, exp_avg_sq, grad_diff = state['exp_avg'], state['exp_avg_sq'], state['previous_grad']
+                exp_avg, exp_avg_sq, previous_grad = state['exp_avg'], state['exp_avg_sq'], state['previous_grad']
 
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
                     exp_avg = exp_avg.to(torch.float32)
-                    grad_diff = grad_diff.to(torch.float32)
+                    previous_grad = previous_grad.to(torch.float32)
                     if not group['factor_second_moment']:
                         exp_avg_sq = exp_avg_sq.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
-
-                grad_diff.add_(grad)
                 
                 # MARS Calculate cₜ (gradient with correction term)
-                correction = (gamma * (beta1 / (1.0 - beta1))) * grad_diff
-                c_t = grad + correction
+                c_t = (grad - previous_grad).mul_(gamma * (beta1 / (1.0 - beta1))).add_(grad)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
                     c_t = newton_schulz(c_t)
@@ -1665,10 +1662,10 @@ class CompassADOPTMARS(BaseOptimizer):
                     copy_stochastic_(state['exp_avg'], exp_avg)
                     if not group['factor_second_moment']:
                         copy_stochastic_(state['exp_avg_sq'], exp_avg_sq)
-                    copy_stochastic_(state['previous_grad'], -grad)
+                    copy_stochastic_(state['previous_grad'], grad)
                     copy_stochastic_(p, p_fp32)
                 else:
-                    state['previous_grad'].copy_(-grad)
+                    state['previous_grad'].copy_(grad)
 
         return loss
 
@@ -1759,7 +1756,7 @@ class _CompassBase(Optimizer):
     def _new_buffer(self, p: torch.Tensor, signed: bool):
         local_p = p.to_local() if isinstance(p, DTensor) else p
 
-        # follow bitsandbytes, only quantize tensors >= 4096 values
+        # only quantize tensors >= min_quant_size values, 4096 original default here and in bitsandbytes
         if local_p.numel() >= self.min_quant_size and local_p.numel() % self.block_size == 0:
             out = self._subclass_zeros(local_p, signed, self.block_size)
         else:
