@@ -160,3 +160,6 @@ wandb/*/files/config.yaml
 wandb/*/files/requirements.txt
 wandb/*/files/wandb-metadata.json
 wandb/*/files/wandb-summary.json
+main.exp
+main.lib
+main.obj
