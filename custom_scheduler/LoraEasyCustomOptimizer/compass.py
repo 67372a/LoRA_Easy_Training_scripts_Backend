@@ -5,10 +5,10 @@
 
 import torch
 from torch.optim import Optimizer
-from .utils import copy_stochastic_, quantize, dequantize, agc, NORM_TYPE, newton_schulz, create_factored_dims, get_denom, update_second_moment
+from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz, create_factored_dims, get_denom, update_second_moment
 import math
 from torch.nn.functional import softplus
-from typing import Optional, Literal
+from typing import Optional
 
 from bitsandbytes.functional import quantize_blockwise, dequantize_blockwise
 from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
@@ -16,6 +16,10 @@ from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 from pytorch_optimizer.optimizer.gc import centralize_gradient
 from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
+from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
+from .low_bit_optim.subclass_8bit import OptimState8bit
+from .low_bit_optim.subclass_4bit import OptimState4bit
+from torch.distributed._tensor import DTensor
 
 class Compass(BaseOptimizer):
     r"""
@@ -889,189 +893,6 @@ class CompassPlus(BaseOptimizer):
 
                     state['lookahead_params'].copy_(p)
 
-class Compass8Bit(Optimizer):
-    r"""
-    Arguments:
-        params (iterable):
-            Iterable of parameters to optimize or dicts defining
-            parameter groups.
-        lr (float):
-            Learning rate parameter (default 7e-5)
-        betas (Tuple[float, float], optional):
-            coefficients used for computing running averages of
-            gradient and its square (default: (0.98, 0.999)).
-        weight_decay (float):
-            Weight decay, i.e. a L2 penalty (default: 0.001).
-        weight_decouple (bool): 
-            the optimizer uses decoupled weight decay as in AdamW. (default: true)
-        fixed_decay (bool): 
-            fix weight decay (default: false).
-        clip (float):
-            Clip gradient to this value (default: 0.0).
-        amp_fac (float):
-            amplification factor for the first moment filter (default: 2).
-        eps (float):
-            Term added to the denominator outside of the root operation to
-            improve numerical stability. (default: 1e-8).
-        centralization (float):
-            center model grad (default: 0.0).
-        quantization_group_size (int):
-            number of quant group (default: 8).
-        quantization_factor (float):
-            non linear quantization using x^f (default: 3.2)
-    """
-
-    def __init__(
-        self,
-        params,
-        lr=1e-4, #Original default 1e-3
-        betas=(0.975, 0.999), #Original default 0.99, 0.999
-        weight_decay=0.001, #Original default 0
-        weight_decouple=True,
-        fixed_decay=False,
-        clip=0.0,
-        amp_fac=2,
-        eps=1e-8,
-        centralization=1.0,
-        quantization_group_size=8,
-        quantization_factor=3.2,
-    ):
-        defaults = dict(
-            lr=lr,
-            betas=betas,
-            amp_fac=amp_fac,
-            eps=eps,
-            weight_decay = weight_decay,
-            weight_decouple = weight_decouple,
-            fixed_decay = fixed_decay,
-            clip=clip,
-            centralization=centralization,
-            group_size=quantization_group_size,
-            factor=quantization_factor,
-        )
-        super(Compass8Bit, self).__init__(params, defaults)
-
-    def __str__(self) -> str:
-        return 'Compass8Bit'
-    
-    @staticmethod
-    def get_rms(x: torch.Tensor) -> float:
-        r"""Get RMS."""
-        return x.norm(2) / math.sqrt(x.numel())
-
-    def step(self, closure=None):
-        loss = None
-        if closure is not None:
-            loss = closure()
-
-        for group in self.param_groups:
-            if 'step' in group:
-                group['step'] += 1
-            else:
-                group['step'] = 1
-
-            beta1, beta2 = group["betas"]
-            amplification_factor = group["amp_fac"]
-            lr = group["lr"]
-            weight_decay = group["weight_decay"]
-            weight_decouple = group["weight_decouple"],
-            fixed_decay = group["fixed_decay"]
-            centralization = group["centralization"]
-            eps = group["eps"]
-            clip = group["clip"]
-
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                grad = p.grad
-                if grad.is_sparse:
-                    raise RuntimeError("Compass8Bit does not support sparse gradients")
-
-                state = self.state[p]
-
-                # State initialization
-                if len(state) == 0:
-                    # Exponential moving average of gradient values
-                    state["ema"] = quantize(
-                        torch.zeros_like(p.data),
-                        group_size=group["group_size"],
-                        factor=group["factor"],
-                    )
-                    # Exponential moving average of squared gradient values
-                    state["ema_squared"] = quantize(
-                        torch.zeros_like(p.data),
-                        group_size=group["group_size"],
-                        factor=group["factor"],
-                    )
-
-                p_fp32 = p
-
-                # unpack
-                if p.dtype in {torch.float16, torch.bfloat16}:
-                    grad = grad.to(torch.float32)
-                    p_fp32 = p.clone().to(torch.float32)
-
-                beta1, beta2 = group["betas"]
-                amplification_factor = group["amp_fac"]
-                lr = group["lr"]
-                weight_decay = group["weight_decay"]
-                weight_decouple = group["weight_decouple"],
-                fixed_decay = group["fixed_decay"]
-                centralization = group["centralization"]
-                eps = group["eps"]
-                clip = group["clip"]
-
-                # center the gradient vector
-                if centralization != 0 and grad.dim() > 1:
-                    grad.sub_(
-                        grad.mean(dim=tuple(range(1, grad.dim())), keepdim=True).mul_(centralization)
-                    )
-
-                # bias correction step size
-                # soft warmup
-                bias_correction = 1 - beta1 ** group['step']
-                bias_correction_sqrt = (1 - beta2 ** group['step']) ** (1 / 2)
-                debiased_lr = lr / bias_correction
-
-                # Clip the gradient 
-                if clip > 0.0:
-                    grad.div_((self.get_rms(grad).add_(eps) / clip).clamp_(min=1.0))
-
-                # Decay the first and second moment running average coefficient
-                ema = dequantize(*state["ema"]) + (1 - beta1) * grad
-                # ema.mul_(beta1).add_(grad, alpha=1 - beta1)
-                # grad = grad + ema * amplification_factor
-                grad.add_(ema, alpha=amplification_factor)
-
-                ema_squared = dequantize(*state["ema_squared"]) + (1 - beta2) * grad**2
-                state["ema"] = quantize(
-                    ema, group_size=group["group_size"], factor=group["factor"]
-                )
-
-                # ema_squared.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-
-                # lr scaler + eps to prevent zero division
-                # denom = exp_avg_sq.sqrt() + group['eps']
-                denom = (ema_squared.sqrt() / bias_correction_sqrt).add_(group["eps"])
-                state["ema_squared"] = quantize(
-                    ema_squared, group_size=group["group_size"], factor=group["factor"]
-                )
-
-                if weight_decouple:
-                    # Perform stepweight decay
-                    p_fp32.data.mul_(1.0 - (1.0 if fixed_decay else debiased_lr) * weight_decay)
-                elif weight_decay > 0.0 and grad is not None:
-                    grad.add_(p_fp32, alpha=weight_decay)
-
-                # p = p - lr * grad / denom
-                p_fp32.data.addcdiv_(grad, denom, value=-debiased_lr)
-
-                # pack
-                if p.dtype in {torch.float16, torch.bfloat16}:
-                    copy_stochastic_(p, p_fp32)
-
-        return loss
-
 class Compass8BitBNB(Optimizer):
     r"""
     Arguments:
@@ -1850,3 +1671,401 @@ class CompassADOPTMARS(BaseOptimizer):
                     state['previous_grad'].copy_(-grad)
 
         return loss
+
+class _CompassBase(Optimizer):
+    def __init__(
+        self,
+        params,
+        lr,
+        betas,
+        eps,
+        eps2,
+        eps_floor,
+        weight_decay,
+        stable_weight_decay,
+        amp_fac,
+        cautious,
+        adaptive_clip,
+        adaptive_clip_eps,
+        adaptive_clip_type,
+        debias_beta1,
+        debias_beta2,
+        adopt,
+        mars_gamma,
+        use_muon_pp,
+        *,
+        block_size,
+        min_quant_size,
+    ) -> None:
+        if not 0.0 <= lr:
+            raise ValueError("Invalid learning rate: {}".format(lr))
+        if not 0.0 <= eps:
+            raise ValueError("Invalid epsilon value: {}".format(eps))
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
+        
+        # Override zero to 1e-37, as zero and float32.tiny NaNs
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = 1e-37
+
+        defaults = dict(
+            lr=torch.tensor(lr),
+            betas=betas,
+            eps=eps,
+            eps2=eps2,
+            eps_floor=eps_floor,
+            weight_decay=weight_decay,
+            stable_weight_decay=stable_weight_decay,
+            amp_fac=amp_fac,
+            cautious=cautious,
+            adaptive_clip=adaptive_clip,
+            adaptive_clip_eps=adaptive_clip_eps,
+            adaptive_clip_type=adaptive_clip_type,
+            debias_beta1=debias_beta1,
+            debias_beta2=debias_beta2,
+            adopt=adopt,
+            mars_gamma=mars_gamma,
+            use_muon_pp=use_muon_pp,
+        )
+        super().__init__(params, defaults)
+        self.block_size = block_size
+        self.min_quant_size = min_quant_size
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        for group in self.param_groups:
+            group.setdefault("amp_fac", 2.0)
+            group.setdefault("cautious", False)
+            group.setdefault("adaptive_clip", 1.0)
+            group.setdefault("adaptive_clip_eps", 1e-3)
+            group.setdefault("adaptive_clip_type", 'layer')
+            group.setdefault("debias_beta1", True)
+            group.setdefault("debias_beta2", True)
+            group.setdefault("adopt", False)
+            group.setdefault("mars_gamma", 0.0)
+            group.setdefault("eps2", 1e-3)
+            group.setdefault("eps_floor", None)
+            group.setdefault("use_muon_pp", False)
+            group.setdefault("stable_weight_decay", False)
+
+
+    # bring your own function to create zero-filled subclass
+    @staticmethod
+    def _subclass_zeros(p: torch.Tensor, signed: bool, block_size: int):
+        raise NotImplementedError
+
+    def _new_buffer(self, p: torch.Tensor, signed: bool):
+        local_p = p.to_local() if isinstance(p, DTensor) else p
+
+        # follow bitsandbytes, only quantize tensors >= 4096 values
+        if local_p.numel() >= self.min_quant_size and local_p.numel() % self.block_size == 0:
+            out = self._subclass_zeros(local_p, signed, self.block_size)
+        else:
+            out = torch.zeros_like(local_p)
+
+        # wrap subclass in DTensor as needed
+        # NOTE: local tensor may have different shapes across ranks.
+        # this happens when the 1st dim is not divisible by WORLD_SIZE.
+        # thus, we must supply shape (and stride) to DTensor.from_local()
+        if isinstance(p, DTensor):
+            out = DTensor.from_local(
+                local_tensor=out,
+                device_mesh=p.device_mesh,
+                placements=p.placements,
+                run_check=False,
+                shape=p.shape,
+                stride=p.stride(),
+            )
+
+        return out
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        # for a given model, the number of different argument combinations to single_param_adam() is fixed.
+        # thus, it is safe to disable cache limit without the risk of always re-compiling.
+        with torch._dynamo.utils.disable_cache_limit():
+            for group in self.param_groups:
+                adaptive_clip = group["adaptive_clip"]
+                adaptive_clip_eps = group["adaptive_clip_eps"]
+                adaptive_clip_type = group["adaptive_clip_type"]
+                mars_gamma = group["mars_gamma"]
+
+                for p in group["params"]:
+                    if p.grad is None:
+                        continue
+
+                    grad = p.grad
+                    if grad.is_sparse:
+                        raise RuntimeError("Sparse gradient is not supported")
+
+                    state = self.state[p]
+
+                    # State initialization
+                    if len(state) == 0:
+                        state["step"] = torch.tensor(0.0)
+                        state["exp_avg"] = self._new_buffer(p, True)
+                        state["exp_avg_sq"] = self._new_buffer(p, False)
+                        if mars_gamma > 0:
+                            state["previous_grad"] = self._new_buffer(p, True)
+
+                    state["step"] += 1
+
+                    if not isinstance(group["lr"], torch.Tensor):
+                        raise RuntimeError(
+                            "lr was changed to a non-Tensor object. If you want to update lr, please use "
+                            "optim.param_groups[0]['lr'].fill_(new_lr)"
+                        )
+                        
+
+
+                    if group["adopt"] and state["step"] == 1:         
+                        if adaptive_clip > 0:
+                            grad_f32 = grad.float()
+                            grad_f32.copy_(agc(p.float(), grad_f32, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                        state["exp_avg_sq"].copy_(state["exp_avg_sq"].float().lerp(grad_f32.float().square(), 1))
+                    else:
+                        # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
+                        # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
+                        # thus, by calling p.detach(), DTensor won't have .grad anymore, which is ok since we
+                        # are passing grad separately anyway.
+                        torch.compile(single_param_compass, fullgraph=True, dynamic=False)(
+                            p.detach(),
+                            grad,
+                            state["step"],
+                            state["exp_avg"],
+                            state["exp_avg_sq"],
+                            state.get("previous_grad", None),
+                            group["lr"],
+                            group["betas"][0],
+                            group["betas"][1],
+                            group["weight_decay"],
+                            group["stable_weight_decay"],
+                            group["eps"],
+                            group["eps2"],
+                            group["eps_floor"],
+                            group["amp_fac"],
+                            group["cautious"],
+                            group["adaptive_clip"],
+                            group["adaptive_clip_eps"],
+                            group["adaptive_clip_type"],
+                            group["debias_beta1"],
+                            group["debias_beta2"],
+                            group["adopt"],
+                            group["mars_gamma"],
+                            group["use_muon_pp"],
+                        )
+
+        return loss
+
+
+# this will work with any optim state tensor subclass that implements aten.lerp.Scalar and aten.copy_.default
+# and param tensor subclass that implements aten.add_.Tensor, and aten.addcdiv_.default
+def single_param_compass(
+    p: torch.Tensor,
+    grad: torch.Tensor,
+    step: torch.Tensor,
+    exp_avg: torch.Tensor,
+    exp_avg_sq: torch.Tensor,
+    previous_grad: Optional[torch.Tensor],
+    lr: torch.Tensor,
+    beta1: float,
+    beta2: float,
+    weight_decay: float,
+    stable_weight_decay: bool,
+    eps: float,
+    eps2: float,
+    eps_floor: Optional[float],
+    amp_fac: float,
+    cautious: bool,
+    adaptive_clip: float,
+    adaptive_clip_eps: float,
+    adaptive_clip_type: NORM_TYPE,
+    debias_beta1: bool,
+    debias_beta2: bool,
+    adopt: bool,
+    mars_gamma: float,
+    use_muon_pp: bool,
+):
+    # compute in FP32 for accurate calculations
+    p_f32 = p.float()
+    grad_f32 = grad.float()
+
+    bias_correction1: float = 1.0
+    if debias_beta1:
+        bias_correction1 = 1 - beta1**step
+
+    bias_correction2: float = 1.0
+    if debias_beta2:
+        bias_correction2 = 1 - beta2**step
+
+    #This lerp is intentional, else it doesn't actually create a new exp_avg_sq_f32 tensor
+    exp_avg_sq_f32 = exp_avg_sq.float().lerp(grad_f32, 0)
+
+    if mars_gamma > 0:
+        # MARS Calculate cₜ (gradient with correction term)
+        temp_grad_f32 = grad_f32.clone().detach()
+        grad_f32.copy_((grad_f32 - previous_grad.float()).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32))
+        previous_grad.copy_(temp_grad_f32)
+
+    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+        grad_f32.copy_(newton_schulz(grad_f32))
+
+    if adaptive_clip > 0:
+        grad_f32.copy_(agc(p_f32, grad_f32, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+    if eps_floor is not None and eps_floor < eps:
+        rms_grad = grad_f32.pow(2).mean().sqrt_()
+        curr_eps = max(min(eps, eps2 * rms_grad), eps_floor) # Set a floor for eps to avoid NaN
+    else:
+        curr_eps = eps
+
+    # keep high precision copy for param update
+    if adopt:
+        adopt_denom = (exp_avg_sq_f32.sqrt() / bias_correction2.sqrt()) + curr_eps
+        adopt_clip: float = (step-1)**0.25
+        update_grad = grad_f32.div(adopt_denom).clamp_(-adopt_clip, adopt_clip)
+    else:
+        update_grad = grad_f32
+
+    exp_avg_f32 = exp_avg.float().lerp(update_grad, 1 - beta1)
+    update = update_grad.add(exp_avg_f32, alpha=amp_fac)
+    exp_avg.copy_(exp_avg_f32)
+
+    if adopt:
+        exp_avg_sq_f32.lerp_(update.mul(adopt_denom).square(), 1 - beta2)
+        denom = 1
+    else:
+        exp_avg_sq_f32.lerp_(update.square(), 1 - beta2)
+        denom = (exp_avg_sq_f32.sqrt() / bias_correction2.sqrt()) + curr_eps
+
+    exp_avg_sq.copy_(exp_avg_sq_f32)
+
+    if cautious:
+        # compute norm gradient
+        mask = (update * update_grad > 0).to(update_grad.dtype)
+        mask.div_(mask.mean().clamp_(min=1e-3))
+    else:
+        mask = 1.0
+
+    # Weight decay
+    p_f32 = p_f32 - lr * weight_decay * p_f32
+
+    p_f32 = p_f32 - (((lr / bias_correction1) * (update * mask)) / denom)
+
+    if p.dtype in {torch.float16, torch.bfloat16}:
+        p.copy_(_fp32_to_bf16_sr(p_f32))
+    else:
+        p.copy_(p_f32)
+
+class Compass8bitAO(_CompassBase):
+    def __init__(
+        self,
+        params,
+        lr = 1e-4,
+        betas=(0.97, 0.999),
+        eps: float = 1e-6,
+        eps2: float = 1e-2,
+        eps_floor: Optional[float] = None,
+        weight_decay: float = 0.0,
+        stable_weight_decay: bool = False,
+        amp_fac: float = 2.0,
+        cautious: bool = False,
+        adaptive_clip: float = 1.0,
+        adaptive_clip_eps: float = 1e-3,
+        adaptive_clip_type: NORM_TYPE = 'layer',
+        debias_beta1: bool = True,
+        debias_beta2: bool = True,
+        adopt: bool = False,
+        mars_gamma: float = 0.0,
+        use_muon_pp: bool = False,
+        *,
+        block_size: int = 256,
+        min_quant_size: int = 4096,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            params,
+            lr,
+            betas,
+            eps,
+            eps2,
+            eps_floor,
+            weight_decay,
+            stable_weight_decay,
+            amp_fac,
+            cautious,
+            adaptive_clip,
+            adaptive_clip_eps,
+            adaptive_clip_type,
+            debias_beta1,
+            debias_beta2,
+            adopt,
+            mars_gamma,
+            use_muon_pp,
+            block_size=block_size,
+            min_quant_size=min_quant_size,
+        )
+
+    @staticmethod
+    def _subclass_zeros(p: torch.Tensor, signed: bool, block_size: int):
+        return OptimState8bit.zeros(p.shape, signed, block_size, p.device)
+    
+class Compass4bitAO(_CompassBase):
+    def __init__(
+        self,
+        params,
+        lr = 1e-4,
+        betas=(0.97, 0.999),
+        eps: float = 1e-6,
+        eps2: float = 1e-2,
+        eps_floor: Optional[float] = None,
+        weight_decay: float = 0.0,
+        stable_weight_decay: bool = False,
+        amp_fac: float = 2.0,
+        cautious: bool = False,
+        adaptive_clip: float = 1.0,
+        adaptive_clip_eps: float = 1e-3,
+        adaptive_clip_type: NORM_TYPE = 'layer',
+        debias_beta1: bool = True,
+        debias_beta2: bool = True,
+        adopt: bool = False,
+        mars_gamma: float = 0.0,
+        use_muon_pp: bool = False,
+        *,
+        block_size: int = 128,
+        min_quant_size: int = 4096,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            params,
+            lr,
+            betas,
+            eps,
+            eps2,
+            eps_floor,
+            weight_decay,
+            stable_weight_decay,
+            amp_fac,
+            cautious,
+            adaptive_clip,
+            adaptive_clip_eps,
+            adaptive_clip_type,
+            debias_beta1,
+            debias_beta2,
+            adopt,
+            mars_gamma,
+            use_muon_pp,
+            block_size=block_size,
+            min_quant_size=min_quant_size,
+        )
+
+    @staticmethod
+    def _subclass_zeros(p: torch.Tensor, signed: bool, block_size: int):
+        return OptimState4bit.zeros(p.shape, signed, block_size, p.device)

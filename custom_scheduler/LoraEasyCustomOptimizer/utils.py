@@ -46,55 +46,6 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
 
         # copy the higher 16 bit into the target tensor
         target.copy_(result.view(dtype=torch.float32))
-
-# @torch.compile
-def quantize(tensor, group_size=8, eps=1e-8, factor=3.2):
-    shape = tensor.shape
-    numel = tensor.numel()
-
-    # just in case it's not divisible by group size
-    padding = numel % group_size
-
-    if padding != 0:
-        tensor = rearrange(
-            F.pad(tensor.flatten(), (0, padding), "constant", 0), "(r g) -> r g", g=2
-        )
-    else:
-        tensor = rearrange(tensor.flatten(), "(r g) -> r g", g=group_size)
-    scale = tensor.abs().max(dim=-1).values.unsqueeze(dim=-1)
-    tensor /= scale + eps
-    sign = tensor.sign()
-
-    tensor = (
-        ((torch.pow(tensor.abs(), 1 / factor) * sign + 1) * 127.5)
-        .round()
-        .to(dtype=torch.uint8)
-    )
-    if padding != 0:
-        tensor = tensor.flatten()[:-padding]
-    tensor = tensor.view(shape)
-    return tensor, (scale, group_size, eps, factor, padding)
-
-
-# @torch.compile
-def dequantize(tensor, details, dtype=torch.float32):
-    scale, group_size, eps, factor, padding = details
-    shape = tensor.shape
-
-    if padding != 0:
-        tensor = rearrange(
-            F.pad(tensor.flatten(), (0, padding), "constant", 0), "(r g) -> r g", g=2
-        )
-    else:
-        tensor = rearrange(tensor.flatten(), "(r g) -> r g", g=group_size)
-    tensor = tensor.to(dtype=dtype) / 127.5 - 1
-    sign = tensor.sign()
-    tensor = torch.pow(tensor.abs(), factor) * sign * scale
-    if padding != 0:
-        tensor = tensor.flatten()[:-padding]
-    tensor = tensor.view(shape)
-
-    return tensor
     
 def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float, eps: float = 1e-37, norm_type: NORM_TYPE = 'unit') -> torch.Tensor:
     r"""Clip gradient values in excess of the norm.
@@ -124,10 +75,8 @@ def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float
         # Compute the clipping coefficient
         clip_coef = max(1, max_norm / g_norm.clamp(min=eps))
 
-        # If the gradient norm exceeds the maximum allowed norm, scale the gradients
-        if g_norm > max_norm:
-            # Scale the gradients holistically
-            grad = grad * clip_coef
+        # Scale the gradients holistically
+        grad = grad * clip_coef
 
         return grad
     elif norm_type == 'unit':

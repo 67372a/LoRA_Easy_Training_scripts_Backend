@@ -22,6 +22,7 @@ from LoraEasyCustomOptimizer.rmsprop import RMSProp, RMSPropADOPT, RMSPropADOPTM
 from LoraEasyCustomOptimizer.schedulefree import ScheduleFreeWrapper, ADOPTScheduleFree, ADOPTEMAMixScheduleFree, ADOPTNesterovScheduleFree, FADOPTScheduleFree, ADOPTMARSScheduleFree, FADOPTMARSScheduleFree
 from LoraEasyCustomOptimizer.sgd import SGDSaI
 from LoraEasyCustomOptimizer.shampoo import ScalableShampoo
+from LoraEasyCustomOptimizer.adam import AdamW8bitAO, AdamW4bitAO
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ADOPT,
@@ -33,6 +34,8 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdaBelief,
     AdamMini,
     Adan,
+    AdamW4bitAO,
+    AdamW8bitAO,
     CAME,
     Compass,
     Compass8BitBNB,
