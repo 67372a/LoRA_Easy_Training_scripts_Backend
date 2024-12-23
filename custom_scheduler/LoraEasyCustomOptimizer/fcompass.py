@@ -388,7 +388,7 @@ class FCompassADOPT(BaseOptimizer):
                     grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t = newton_schulz(c_t)
+                    grad.copy_(newton_schulz(grad))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -648,7 +648,7 @@ class FCompassADOPTMARS(BaseOptimizer):
                 c_t = (grad - previous_grad).mul_(gamma * (beta1 / (1.0 - beta1))).add_(grad)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t = newton_schulz(c_t)
+                    c_t.copy_(newton_schulz(c_t))
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
