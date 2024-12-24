@@ -1,8 +1,14 @@
 from functools import wraps
 import math
-import weakref
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
+from functools import wraps
+from weakref import ref
+from torch import Tensor
+from typing import (
+    List,
+)
+
 
 
 # optimizer, cycle multiplier, and gamma are constant so they should be passed in no matter what
@@ -34,11 +40,14 @@ class CosineAnnealingWarmRestarts(LRScheduler):
                 )
             self.setup_optimizer(warmup_steps, first_cycle_max_steps, min_lr)
         self.validate_optimizer()
+        self.base_lrs: List[float] = [
+            group["initial_lr"] for group in optimizer.param_groups
+        ]
 
         def with_counter(method):
             if getattr(method, "_with_counter", False):
                 return method
-            instance_ref = weakref.ref(method.__self__)
+            instance_ref = ref(method.__self__)
             func = method.__func__
             cls = instance_ref().__class__
             del method
@@ -55,6 +64,31 @@ class CosineAnnealingWarmRestarts(LRScheduler):
 
         self.optimizer.step = with_counter(self.optimizer.step)
 
+        # Following https://github.com/pytorch/pytorch/issues/20124
+        # We would like to ensure that `lr_scheduler.step()` is called after
+        # `optimizer.step()`
+        def patch_track_step_called(opt: Optimizer):
+            if hasattr(opt.step, "_wrapped_by_lr_sched"):
+                # we've already patched
+                return opt.step
+
+            def wrap_step(step_fn):
+                opt_ref = ref(self.optimizer)
+                func = step_fn.__func__
+
+                @wraps(func)
+                def wrapper(*args, **kwargs):
+                    opt = opt_ref()
+                    opt._opt_called = True  # type: ignore[union-attr]
+                    return func.__get__(opt, opt.__class__)(*args, **kwargs)
+
+                wrapper._wrapped_by_lr_sched = True  # type: ignore[attr-defined]
+                return wrapper
+
+            opt.step = wrap_step(opt.step)  # type: ignore[method-assign]
+
+        patch_track_step_called(self.optimizer)
+
         self._initial_step()
 
     def setup_optimizer(
@@ -64,6 +98,10 @@ class CosineAnnealingWarmRestarts(LRScheduler):
         min_lr: float,
     ) -> Optimizer:
         for group in self.optimizer.param_groups:
+            lr = group["lr"]
+            if isinstance(lr, Tensor):
+                lr = lr.clone()
+
             if "warmup_steps" not in group:
                 group.setdefault("warmup_steps", warmup_steps)
             if "current_cycle_max_steps" not in group:
@@ -72,8 +110,8 @@ class CosineAnnealingWarmRestarts(LRScheduler):
                 group.setdefault("min_lr", min_lr)
             group.setdefault("current_cycle", 0)
             group.setdefault("current_cycle_step", -1)
-            group.setdefault("initial_lr", group["lr"])
-            group.setdefault("current_max_lr", group["lr"])
+            group.setdefault("initial_lr", lr)
+            group.setdefault("current_max_lr", lr)
 
     def validate_optimizer(self):
         for i, group in enumerate(self.optimizer.param_groups):
