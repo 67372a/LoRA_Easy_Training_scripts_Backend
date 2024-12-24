@@ -2222,7 +2222,7 @@ class Compassfp8AO(_CompassBase):
     def _subclass_zeros(p: torch.Tensor, signed: bool, block_size: int):
         return OptimStateFp8.zeros(p.shape, block_size, p.device)
     
-class _CompassAO(_CompassBase):
+class CompassAO(_CompassBase):
     def __init__(
         self,
         params,
