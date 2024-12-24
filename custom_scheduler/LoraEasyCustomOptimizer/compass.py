@@ -1767,6 +1767,7 @@ class _CompassBase(Optimizer):
             adopt=adopt,
             mars_gamma=mars_gamma,
             use_muon_pp=use_muon_pp,
+            compass_second_moment_smoothing=compass_second_moment_smoothing,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -1988,9 +1989,8 @@ def single_param_compass(
     else:
         curr_eps = eps
 
-
     if adopt:
-        adopt_denom = (exp_avg_sq_f32.sqrt() / bias_correction2.sqrt()) + curr_eps
+        adopt_denom = exp_avg_sq_f32.sqrt().div_(bias_correction2.sqrt()).add_(curr_eps)
         adopt_clip: float = (step-1)**0.25
         if compass_second_moment_smoothing:
             scaled_adopt_clip = adopt_clip * adopt_denom
@@ -2023,7 +2023,7 @@ def single_param_compass(
         else:
             exp_avg_sq_f32.lerp_(grad_f32.square(), 1.0 - beta2)
 
-        de_nom = exp_avg_sq_f32.sqrt().div_(bias_correction2.sqrt()).add_(eps)
+        de_nom = exp_avg_sq_f32.sqrt().div_(bias_correction2.sqrt()).add_(curr_eps)
 
     if weight_decay > 0 and stable_weight_decay:
         swd_second_moment_parameter_sum.copy_(exp_avg_sq_f32.sum())
