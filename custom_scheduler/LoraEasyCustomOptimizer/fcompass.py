@@ -244,13 +244,15 @@ class FCompassADOPT(BaseOptimizer):
             (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
             May not work well with small batch sizes or finetuning.
             (default: False)
+        compass_second_moment_smoothing (bool):
+            Updates the second moment (i.e. ema / fim) with the Compass smoothed gradient. (Default: True)
     """
 
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float = 2.5e-3,
-        betas: BETAS = (0.95, 0.9999),
+        lr: float = 1e-4,
+        betas: BETAS = (0.97, 0.9999),
         amp_fac: float = 2.0,
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
@@ -266,6 +268,7 @@ class FCompassADOPT(BaseOptimizer):
         debias_beta1: bool = False,
         debias_beta2: bool = True,
         use_muon_pp: bool = False,
+        compass_second_moment_smoothing: bool = True,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -295,6 +298,7 @@ class FCompassADOPT(BaseOptimizer):
             'debias_beta1': debias_beta1,
             'debias_beta2': debias_beta2,
             'use_muon_pp': use_muon_pp,
+            'compass_second_moment_smoothing': compass_second_moment_smoothing,
         }
         super().__init__(params, defaults)
 
@@ -356,6 +360,7 @@ class FCompassADOPT(BaseOptimizer):
             fisher_clip = group["fisher_clip"]
             amp_fac = group["amp_fac"]
             use_muon_pp = group["use_muon_pp"]
+            compass_second_moment_smoothing = group["compass_second_moment_smoothing"]
 
             for p in group['params']:
                 if p.grad is None:
@@ -400,7 +405,6 @@ class FCompassADOPT(BaseOptimizer):
                     fim.addcmul_(grad, grad.conj()).clamp_(-adopt_clip, adopt_clip)
                 else:
                     fim_base = fim.sqrt().add_(curr_eps)
-                    fim.mul_(current_beta2).addcmul_(grad, grad.conj(), value=1 - current_beta2).clamp_(-adopt_clip, adopt_clip)
 
                     grad_nat = grad.div(fim_base)
                     rms = grad_nat.pow(2).mean().sqrt_()
@@ -410,6 +414,11 @@ class FCompassADOPT(BaseOptimizer):
                     momentum.mul_(beta1).add_(grad_nat, alpha=1.0 - beta1)
 
                     update = grad_nat.add(momentum, alpha=amp_fac)
+
+                    if compass_second_moment_smoothing:
+                        fim.mul_(current_beta2).addcmul_(update, update.conj(), value=1 - current_beta2).clamp_(-adopt_clip, adopt_clip)
+                    else:
+                        fim.mul_(current_beta2).addcmul_(grad, grad.conj(), value=1 - current_beta2).clamp_(-adopt_clip, adopt_clip)
 
                     # Perform weight decay
                     if group["weight_decay"] != 0 and group['weight_decouple']:
@@ -500,13 +509,15 @@ class FCompassADOPTMARS(BaseOptimizer):
             (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
             May not work well with small batch sizes or finetuning.
             (default: False)
+        compass_second_moment_smoothing (bool):
+            Updates the second moment (i.e. ema / fim) with the Compass smoothed gradient. (Default: True)
     """
 
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float = 2.5e-3,
-        betas: BETAS = (0.95, 0.9999),
+        lr: float = 1e-4,
+        betas: BETAS = (0.97, 0.9999),
         amp_fac: float = 2.0,
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
@@ -523,6 +534,7 @@ class FCompassADOPTMARS(BaseOptimizer):
         debias_beta1: bool = False,
         debias_beta2: bool = True,
         use_muon_pp: bool = False,
+        compass_second_moment_smoothing: bool = True,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -553,6 +565,7 @@ class FCompassADOPTMARS(BaseOptimizer):
             'debias_beta1': debias_beta1,
             'debias_beta2': debias_beta2,
             'use_muon_pp': use_muon_pp,
+            'compass_second_moment_smoothing': compass_second_moment_smoothing,
         }
         super().__init__(params, defaults)
 
@@ -616,6 +629,7 @@ class FCompassADOPTMARS(BaseOptimizer):
             amp_fac = group["amp_fac"]
             gamma = group["gamma"]
             use_muon_pp = group["use_muon_pp"]
+            compass_second_moment_smoothing = group["compass_second_moment_smoothing"]
 
             for p in group['params']:
                 if p.grad is None:
@@ -664,7 +678,6 @@ class FCompassADOPTMARS(BaseOptimizer):
                     fim.addcmul_(c_t, c_t.conj()).clamp_(-adopt_clip, adopt_clip)
                 else:
                     fim_base = fim.sqrt().add_(curr_eps)
-                    fim.mul_(current_beta2).addcmul_(c_t, c_t.conj(), value=1 - current_beta2).clamp_(-adopt_clip, adopt_clip)
 
                     grad_nat = c_t.div(fim_base)
                     rms = grad_nat.pow(2).mean().sqrt_()
@@ -674,6 +687,11 @@ class FCompassADOPTMARS(BaseOptimizer):
                     momentum.mul_(beta1).add_(grad_nat, alpha=1.0 - beta1)
 
                     update = grad_nat.add(momentum, alpha=amp_fac)
+
+                    if compass_second_moment_smoothing:
+                        fim.mul_(current_beta2).addcmul_(update, update.conj(), value=1 - current_beta2).clamp_(-adopt_clip, adopt_clip)
+                    else:
+                        fim.mul_(current_beta2).addcmul_(c_t, c_t.conj(), value=1 - current_beta2).clamp_(-adopt_clip, adopt_clip)
 
                     # Perform weight decay
                     if group["weight_decay"] != 0 and group['weight_decouple']:

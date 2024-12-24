@@ -1121,16 +1121,18 @@ class CompassADOPT(BaseOptimizer):
             Apply bias correction to step size (LR). (Default: True)
         debias_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: True)
+        compass_second_moment_smoothing (bool):
+            Updates the second moment (i.e. ema / fim) with the Compass smoothed gradient. (Default: True)
     """
 
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float = 2.5e-3,
+        lr: float = 1e-4,
         betas: BETAS = (0.95, 0.9999),
         amp_fac: float = 2.0,
         weight_decay: float = 0.0,
-        weight_decouple: bool = False,
+        weight_decouple: bool = True,
         stable_weight_decay: bool = False,
         eps: float = 1e-6,
         eps2: float = 1e-2,
@@ -1143,6 +1145,7 @@ class CompassADOPT(BaseOptimizer):
         factor_second_moment: bool = False,
         debias_beta1: bool = True,
         debias_beta2: bool = True,
+        compass_second_moment_smoothing: bool = True,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1172,6 +1175,7 @@ class CompassADOPT(BaseOptimizer):
             'factor_second_moment':factor_second_moment,
             'debias_beta1': debias_beta1,
             'debias_beta2': debias_beta2,
+            'compass_second_moment_smoothing': compass_second_moment_smoothing,
         }
         super().__init__(params, defaults)
 
@@ -1240,6 +1244,7 @@ class CompassADOPT(BaseOptimizer):
             eps_floor = group["eps_floor"]
             amp_fac = group["amp_fac"]
             use_muon_pp = group["use_muon_pp"]
+            compass_second_moment_smoothing = group["compass_second_moment_smoothing"]
 
             lr: float = group['lr']
 
@@ -1304,7 +1309,7 @@ class CompassADOPT(BaseOptimizer):
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    grad = newton_schulz(grad)
+                    grad.copy_(newton_schulz(grad))
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -1320,14 +1325,26 @@ class CompassADOPT(BaseOptimizer):
                     exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2, True)
                 else:
                     de_nom = get_denom(exp_avg_sq).div_(bias_correction2_sqrt).add_(curr_eps)
-                    exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2)
 
-                    normed_grad = grad.div(de_nom)
-                    normed_grad.clamp_(-adopt_clip, adopt_clip)
+                    if compass_second_moment_smoothing:
+                        scaled_adopt_clip = adopt_clip * de_nom
+                        normed_grad = grad.clamp(-scaled_adopt_clip, scaled_adopt_clip)
 
-                    exp_avg.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
+                        unnormed_exp_avg = exp_avg.mul(beta1).add_(grad, alpha=1.0 - beta1)
+                        exp_avg.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
 
-                    update = normed_grad.add(exp_avg, alpha=amp_fac)
+                        unnormed_update = grad.add(unnormed_exp_avg, alpha=amp_fac)
+                        update = normed_grad.add(exp_avg, alpha=amp_fac)
+
+                        exp_avg_sq = update_second_moment(exp_avg_sq, unnormed_update, beta2)
+
+                        cautious_grad = grad
+                    else:
+                        normed_grad = grad.div(de_nom).clamp(-adopt_clip, adopt_clip)
+                        exp_avg.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
+                        update = normed_grad.add(exp_avg, alpha=amp_fac)
+                        exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2)
+                        cautious_grad = normed_grad
 
                     # Weight decay calculated at y
                     if group["weight_decay"] != 0 and group['weight_decouple']:
@@ -1342,12 +1359,15 @@ class CompassADOPT(BaseOptimizer):
 
                     if group["cautious"]:
                         # compute norm gradient
-                        mask = (update * normed_grad > 0).to(normed_grad.dtype)
+                        mask = (update * cautious_grad > 0).to(cautious_grad.dtype)
                         mask.div_(mask.mean().clamp_(min=1e-3))
                     else:
                         mask = 1.0
 
-                    p_fp32.add_(update * mask, alpha=-step_size)
+                    if compass_second_moment_smoothing:
+                        p_fp32.addcdiv_(update * mask, de_nom, value=-step_size)
+                    else:
+                        p_fp32.add_(update * mask, alpha=-step_size)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         exp_avg_sq_sum += exp_avg_sq.sum()
@@ -1414,16 +1434,18 @@ class CompassADOPTMARS(BaseOptimizer):
             Apply bias correction to step size (LR). (Default: True)
         debias_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: True)
+        compass_second_moment_smoothing (bool):
+            Updates the second moment (i.e. ema / fim) with the Compass smoothed gradient. (Default: True)
     """
 
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float = 5e-4,
+        lr: float = 1e-4,
         betas: BETAS = (0.95, 0.9999),
         amp_fac: float = 2.0,
         weight_decay: float = 0.0,
-        weight_decouple: bool = False,
+        weight_decouple: bool = True,
         stable_weight_decay: bool = False,
         eps: float = 1e-6,
         eps2: float = 1e-2,
@@ -1437,6 +1459,7 @@ class CompassADOPTMARS(BaseOptimizer):
         gamma: float = 0.025,
         debias_beta1: bool = True,
         debias_beta2: bool = True,
+        compass_second_moment_smoothing: bool = True,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1467,6 +1490,7 @@ class CompassADOPTMARS(BaseOptimizer):
             'gamma':gamma,
             'debias_beta1': debias_beta1,
             'debias_beta2': debias_beta2,
+            'compass_second_moment_smoothing': compass_second_moment_smoothing,
         }
         super().__init__(params, defaults)
 
@@ -1537,6 +1561,7 @@ class CompassADOPTMARS(BaseOptimizer):
             amp_fac = group["amp_fac"]
             use_muon_pp = group["use_muon_pp"]
             gamma = group["gamma"]
+            compass_second_moment_smoothing = group["compass_second_moment_smoothing"]
 
             lr: float = group['lr']
 
@@ -1606,7 +1631,7 @@ class CompassADOPTMARS(BaseOptimizer):
                 c_t = (grad - previous_grad).mul_(gamma * (beta1 / (1.0 - beta1))).add_(grad)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t = newton_schulz(c_t)
+                    c_t.copy_(newton_schulz(c_t))
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -1622,14 +1647,26 @@ class CompassADOPTMARS(BaseOptimizer):
                     exp_avg_sq = update_second_moment(exp_avg_sq, c_t, beta2, True)
                 else:
                     de_nom = get_denom(exp_avg_sq).div_(bias_correction2_sqrt).add_(curr_eps)
-                    exp_avg_sq = update_second_moment(exp_avg_sq, c_t, beta2)
 
-                    normed_grad = c_t.div(de_nom)
-                    normed_grad.clamp_(-adopt_clip, adopt_clip)
+                    if compass_second_moment_smoothing:
+                        scaled_adopt_clip = adopt_clip * de_nom
+                        normed_grad = c_t.clamp(-scaled_adopt_clip, scaled_adopt_clip)
 
-                    exp_avg.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
+                        unnormed_exp_avg = exp_avg.mul(beta1).add_(c_t, alpha=1.0 - beta1)
+                        exp_avg.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
 
-                    update = normed_grad.add(exp_avg, alpha=amp_fac)
+                        unnormed_update = c_t.add(unnormed_exp_avg, alpha=amp_fac)
+                        update = normed_grad.add(exp_avg, alpha=amp_fac)
+
+                        exp_avg_sq = update_second_moment(exp_avg_sq, unnormed_update, beta2)
+
+                        cautious_grad = c_t
+                    else:
+                        normed_grad = grad.div(de_nom).clamp(-adopt_clip, adopt_clip)
+                        exp_avg.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
+                        update = normed_grad.add(exp_avg, alpha=amp_fac)
+                        exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2)
+                        cautious_grad = normed_grad
 
                     # Weight decay calculated at y
                     if group["weight_decay"] != 0 and group['weight_decouple']:
@@ -1644,12 +1681,15 @@ class CompassADOPTMARS(BaseOptimizer):
 
                     if group["cautious"]:
                         # compute norm gradient
-                        mask = (update * normed_grad > 0).to(normed_grad.dtype)
+                        mask = (update * cautious_grad > 0).to(cautious_grad.dtype)
                         mask.div_(mask.mean().clamp_(min=1e-3))
                     else:
                         mask = 1.0
 
-                    p_fp32.add_(update * mask, alpha=-step_size)
+                    if compass_second_moment_smoothing:
+                        p_fp32.addcdiv_(update * mask, de_nom, value=-step_size)
+                    else:
+                        p_fp32.add_(update * mask, alpha=-step_size)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         exp_avg_sq_sum += exp_avg_sq.sum()
@@ -1822,42 +1862,42 @@ class _CompassBase(Optimizer):
                         
 
 
-                    if group["adopt"] and state["step"] == 1:         
-                        if adaptive_clip > 0:
-                            grad_f32 = grad.float()
-                            grad_f32.copy_(agc(p.float(), grad_f32, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
-                        state["exp_avg_sq"].copy_(state["exp_avg_sq"].float().lerp(grad_f32.float().square(), 1))
-                    else:
-                        # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
-                        # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
-                        # thus, by calling p.detach(), DTensor won't have .grad anymore, which is ok since we
-                        # are passing grad separately anyway.
-                        torch.compile(single_param_compass, fullgraph=True, dynamic=False)(
-                            p.detach(),
-                            grad,
-                            state["step"],
-                            state["exp_avg"],
-                            state["exp_avg_sq"],
-                            state.get("previous_grad", None),
-                            group["lr"],
-                            group["betas"][0],
-                            group["betas"][1],
-                            group["weight_decay"],
-                            group["stable_weight_decay"],
-                            group["eps"],
-                            group["eps2"],
-                            group["eps_floor"],
-                            group["amp_fac"],
-                            group["cautious"],
-                            group["adaptive_clip"],
-                            group["adaptive_clip_eps"],
-                            group["adaptive_clip_type"],
-                            group["debias_beta1"],
-                            group["debias_beta2"],
-                            group["adopt"],
-                            group["mars_gamma"],
-                            group["use_muon_pp"],
-                        )
+                    #if group["adopt"] and state["step"] == 1:         
+                    #    if adaptive_clip > 0:
+                    #        grad_f32 = grad.float()
+                    #        grad_f32.copy_(agc(p.float(), grad_f32, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                    #    state["exp_avg_sq"].copy_(state["exp_avg_sq"].float().lerp(grad_f32.float().square(), 1))
+                    #else:
+                    # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
+                    # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
+                    # thus, by calling p.detach(), DTensor won't have .grad anymore, which is ok since we
+                    # are passing grad separately anyway.
+                    torch.compile(single_param_compass, fullgraph=True, dynamic=False)(
+                        p=p.detach(),
+                        grad=grad,
+                        step=state["step"],
+                        exp_avg=state["exp_avg"],
+                        exp_avg_sq=state["exp_avg_sq"],
+                        previous_grad=state.get("previous_grad", None),
+                        lr=group["lr"],
+                        beta1=group["betas"][0],
+                        beta2=group["betas"][1],
+                        weight_decay=group["weight_decay"],
+                        stable_weight_decay=group["stable_weight_decay"],
+                        eps=group["eps"],
+                        eps2=group["eps2"],
+                        eps_floor=group["eps_floor"],
+                        amp_fac=group["amp_fac"],
+                        cautious=group["cautious"],
+                        adaptive_clip=group["adaptive_clip"],
+                        adaptive_clip_eps=group["adaptive_clip_eps"],
+                        adaptive_clip_type=group["adaptive_clip_type"],
+                        debias_beta1=group["debias_beta1"],
+                        debias_beta2=group["debias_beta2"],
+                        adopt=group["adopt"],
+                        mars_gamma=group["mars_gamma"],
+                        use_muon_pp=group["use_muon_pp"],
+                    )
 
         return loss
 
@@ -1903,7 +1943,7 @@ def single_param_compass(
         bias_correction2 = 1 - beta2**step
 
     #This lerp is intentional, else it doesn't actually create a new exp_avg_sq_f32 tensor
-    exp_avg_sq_f32 = exp_avg_sq.float().lerp(grad_f32, 0)
+    exp_avg_sq_f32 = torch.zeros_like(p_f32).copy_(exp_avg_sq.float())
 
     if mars_gamma > 0:
         # MARS Calculate cₜ (gradient with correction term)
@@ -1929,6 +1969,7 @@ def single_param_compass(
         adopt_clip: float = (step-1)**0.25
         update_grad = grad_f32.div(adopt_denom).clamp_(-adopt_clip, adopt_clip)
     else:
+        exp_avg_sq_f32.lerp_(update.square(), 1 - beta2)
         update_grad = grad_f32
 
     exp_avg_f32 = exp_avg.float().lerp(update_grad, 1 - beta1)
@@ -1939,14 +1980,14 @@ def single_param_compass(
         exp_avg_sq_f32.lerp_(update.mul(adopt_denom).square(), 1 - beta2)
         denom = 1
     else:
-        exp_avg_sq_f32.lerp_(update.square(), 1 - beta2)
+        exp_avg_f32 = exp_avg.float().lerp(update.square(), 1 - beta1)
         denom = (exp_avg_sq_f32.sqrt() / bias_correction2.sqrt()) + curr_eps
 
     exp_avg_sq.copy_(exp_avg_sq_f32)
 
     if cautious:
         # compute norm gradient
-        mask = (update * update_grad > 0).to(update_grad.dtype)
+        mask = (update * grad_f32 > 0).to(grad_f32.dtype)
         mask.div_(mask.mean().clamp_(min=1e-3))
     else:
         mask = 1.0
@@ -1988,24 +2029,24 @@ class Compass8bitAO(_CompassBase):
         **kwargs,
     ) -> None:
         super().__init__(
-            params,
-            lr,
-            betas,
-            eps,
-            eps2,
-            eps_floor,
-            weight_decay,
-            stable_weight_decay,
-            amp_fac,
-            cautious,
-            adaptive_clip,
-            adaptive_clip_eps,
-            adaptive_clip_type,
-            debias_beta1,
-            debias_beta2,
-            adopt,
-            mars_gamma,
-            use_muon_pp,
+            params=params,
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            eps2=eps2,
+            eps_floor=eps_floor,
+            weight_decay=weight_decay,
+            stable_weight_decay=stable_weight_decay,
+            amp_fac=amp_fac,
+            cautious=cautious,
+            adaptive_clip=adaptive_clip,
+            adaptive_clip_eps=adaptive_clip_eps,
+            adaptive_clip_type=adaptive_clip_type,
+            debias_beta1=debias_beta1,
+            debias_beta2=debias_beta2,
+            adopt=adopt,
+            mars_gamma=mars_gamma,
+            use_muon_pp=use_muon_pp,
             block_size=block_size,
             min_quant_size=min_quant_size,
         )
@@ -2041,24 +2082,24 @@ class Compass4bitAO(_CompassBase):
         **kwargs,
     ) -> None:
         super().__init__(
-            params,
-            lr,
-            betas,
-            eps,
-            eps2,
-            eps_floor,
-            weight_decay,
-            stable_weight_decay,
-            amp_fac,
-            cautious,
-            adaptive_clip,
-            adaptive_clip_eps,
-            adaptive_clip_type,
-            debias_beta1,
-            debias_beta2,
-            adopt,
-            mars_gamma,
-            use_muon_pp,
+            params=params,
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            eps2=eps2,
+            eps_floor=eps_floor,
+            weight_decay=weight_decay,
+            stable_weight_decay=stable_weight_decay,
+            amp_fac=amp_fac,
+            cautious=cautious,
+            adaptive_clip=adaptive_clip,
+            adaptive_clip_eps=adaptive_clip_eps,
+            adaptive_clip_type=adaptive_clip_type,
+            debias_beta1=debias_beta1,
+            debias_beta2=debias_beta2,
+            adopt=adopt,
+            mars_gamma=mars_gamma,
+            use_muon_pp=use_muon_pp,
             block_size=block_size,
             min_quant_size=min_quant_size,
         )
