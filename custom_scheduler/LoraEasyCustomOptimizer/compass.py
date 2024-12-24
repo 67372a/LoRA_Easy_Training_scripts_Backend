@@ -19,6 +19,7 @@ from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
+from .low_bit_optim.subclass_fp8 import OptimStateFp8
 from torch.distributed._tensor import DTensor
 
 class Compass(BaseOptimizer):
@@ -1942,7 +1943,7 @@ def single_param_compass(
     if debias_beta2:
         bias_correction2 = 1 - beta2**step
 
-    #This lerp is intentional, else it doesn't actually create a new exp_avg_sq_f32 tensor
+    #Make a fp32 copy
     exp_avg_sq_f32 = torch.zeros_like(p_f32).copy_(exp_avg_sq.float())
 
     if mars_gamma > 0:
@@ -1969,7 +1970,6 @@ def single_param_compass(
         adopt_clip: float = (step-1)**0.25
         update_grad = grad_f32.div(adopt_denom).clamp_(-adopt_clip, adopt_clip)
     else:
-        exp_avg_sq_f32.lerp_(update.square(), 1 - beta2)
         update_grad = grad_f32
 
     exp_avg_f32 = exp_avg.float().lerp(update_grad, 1 - beta1)
@@ -1977,10 +1977,10 @@ def single_param_compass(
     exp_avg.copy_(exp_avg_f32)
 
     if adopt:
-        exp_avg_sq_f32.lerp_(update.mul(adopt_denom).square(), 1 - beta2)
+        exp_avg_sq_f32 = exp_avg_sq_f32.lerp(update.mul(adopt_denom).square(), 1 - beta2)
         denom = 1
     else:
-        exp_avg_f32 = exp_avg.float().lerp(update.square(), 1 - beta1)
+        exp_avg_sq_f32 = exp_avg_sq_f32.lerp(update.square(), 1 - beta1)
         denom = (exp_avg_sq_f32.sqrt() / bias_correction2.sqrt()) + curr_eps
 
     exp_avg_sq.copy_(exp_avg_sq_f32)
@@ -2107,3 +2107,106 @@ class Compass4bitAO(_CompassBase):
     @staticmethod
     def _subclass_zeros(p: torch.Tensor, signed: bool, block_size: int):
         return OptimState4bit.zeros(p.shape, signed, block_size, p.device)
+    
+
+class Compassfp8AO(_CompassBase):
+    def __init__(
+        self,
+        params,
+        lr = 1e-4,
+        betas=(0.97, 0.999),
+        eps: float = 1e-6,
+        eps2: float = 1e-2,
+        eps_floor: Optional[float] = None,
+        weight_decay: float = 0.0,
+        stable_weight_decay: bool = False,
+        amp_fac: float = 2.0,
+        cautious: bool = False,
+        adaptive_clip: float = 1.0,
+        adaptive_clip_eps: float = 1e-3,
+        adaptive_clip_type: NORM_TYPE = 'layer',
+        debias_beta1: bool = True,
+        debias_beta2: bool = True,
+        adopt: bool = False,
+        mars_gamma: float = 0.0,
+        use_muon_pp: bool = False,
+        *,
+        block_size: int = 256,
+        min_quant_size: int = 4096,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            params=params,
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            eps2=eps2,
+            eps_floor=eps_floor,
+            weight_decay=weight_decay,
+            stable_weight_decay=stable_weight_decay,
+            amp_fac=amp_fac,
+            cautious=cautious,
+            adaptive_clip=adaptive_clip,
+            adaptive_clip_eps=adaptive_clip_eps,
+            adaptive_clip_type=adaptive_clip_type,
+            debias_beta1=debias_beta1,
+            debias_beta2=debias_beta2,
+            adopt=adopt,
+            mars_gamma=mars_gamma,
+            use_muon_pp=use_muon_pp,
+            block_size=block_size,
+            min_quant_size=min_quant_size,
+        )
+
+    @staticmethod
+    def _subclass_zeros(p: torch.Tensor, signed: bool, block_size: int):
+        return OptimStateFp8.zeros(p.shape, block_size, p.device)
+    
+class _CompassAO(_CompassBase):
+    def __init__(
+        self,
+        params,
+        lr = 1e-4,
+        betas=(0.97, 0.999),
+        eps: float = 1e-6,
+        eps2: float = 1e-2,
+        eps_floor: Optional[float] = None,
+        weight_decay: float = 0.0,
+        stable_weight_decay: bool = False,
+        amp_fac: float = 2.0,
+        cautious: bool = False,
+        adaptive_clip: float = 1.0,
+        adaptive_clip_eps: float = 1e-3,
+        adaptive_clip_type: NORM_TYPE = 'layer',
+        debias_beta1: bool = True,
+        debias_beta2: bool = True,
+        adopt: bool = False,
+        mars_gamma: float = 0.0,
+        use_muon_pp: bool = False,
+        *,
+        block_size=float("inf"),
+        min_quant_size: int = 4096,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            params=params,
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            eps2=eps2,
+            eps_floor=eps_floor,
+            weight_decay=weight_decay,
+            stable_weight_decay=stable_weight_decay,
+            amp_fac=amp_fac,
+            cautious=cautious,
+            adaptive_clip=adaptive_clip,
+            adaptive_clip_eps=adaptive_clip_eps,
+            adaptive_clip_type=adaptive_clip_type,
+            debias_beta1=debias_beta1,
+            debias_beta2=debias_beta2,
+            adopt=adopt,
+            mars_gamma=mars_gamma,
+            use_muon_pp=use_muon_pp,
+            block_size=block_size,
+            min_quant_size=min_quant_size,
+        )
