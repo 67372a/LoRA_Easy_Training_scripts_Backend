@@ -8,7 +8,7 @@ from LoraEasyCustomOptimizer.adan import Adan
 from LoraEasyCustomOptimizer.ademamix import AdEMAMix
 from LoraEasyCustomOptimizer.adopt import ADOPT
 from LoraEasyCustomOptimizer.came import CAME
-from LoraEasyCustomOptimizer.compass import Compass, Compass8BitBNB, CompassPlus, CompassADOPT, CompassADOPTMARS
+from LoraEasyCustomOptimizer.compass import Compass, Compass8BitBNB, CompassPlus, CompassADOPT, CompassADOPTMARS, Compass8bitAO, Compass4bitAO
 from LoraEasyCustomOptimizer.farmscrop import FARMSCrop, FARMSCropV2
 from LoraEasyCustomOptimizer.fcompass import FCompass, FCompassPlus, FCompassADOPT, FCompassADOPTMARS
 from LoraEasyCustomOptimizer.fishmonger import FishMonger, FishMonger8BitBNB
@@ -38,6 +38,8 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdamW8bitAO,
     CAME,
     Compass,
+    Compass4bitAO,
+    Compass8bitAO,
     Compass8BitBNB,
     CompassADOPT,
     CompassADOPTMARS,
