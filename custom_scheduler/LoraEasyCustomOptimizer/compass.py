@@ -1753,13 +1753,13 @@ class _CompassBase(Optimizer):
             eps_floor = 1e-37
 
         if block_size is None:
-            if self.state_precision == 'parameter':
+            if state_precision == 'parameter':
                 block_size = float('inf')
-            elif self.state_precision == 'q8bit':
+            elif state_precision == 'q8bit':
                 block_size = 256.0
-            elif self.state_precision == 'q4bit':
+            elif state_precision == 'q4bit':
                 block_size = 128.0
-            elif self.state_precision == 'qfp8':
+            elif state_precision == 'qfp8':
                 block_size = float('inf')
             else:
                 raise NotImplementedError
@@ -2252,7 +2252,7 @@ class CompassAO(_CompassBase):
             Iterable of parameters to optimize or dicts defining
             parameter groups.
         lr (float):
-            Learning rate parameter (default 21e-4).
+            Learning rate parameter (default 1e-4).
         betas (float, float):
             coefficients for momentum and exponential moving average squared (default: 0.95, 0.999).
         eps (float):
