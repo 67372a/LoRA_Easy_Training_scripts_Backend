@@ -22,7 +22,7 @@ from .low_bit_optim.subclass_4bit import OptimState4bit
 from .low_bit_optim.subclass_fp8 import OptimStateFp8
 from torch.distributed._tensor import DTensor
 
-STATE_PRECISION = Literal['parameter', '4bit', '8bit', 'fp8']
+STATE_PRECISION = Literal['parameter', 'q4bit', 'q8bit', 'qfp8']
 
 class Compass(BaseOptimizer):
     r"""
@@ -1755,11 +1755,11 @@ class _CompassBase(Optimizer):
         if block_size is None:
             if self.state_precision == 'parameter':
                 block_size = float('inf')
-            elif self.state_precision == '8bit':
+            elif self.state_precision == 'q8bit':
                 block_size = 256.0
-            elif self.state_precision == '4bit':
+            elif self.state_precision == 'q4bit':
                 block_size = 128.0
-            elif self.state_precision == 'fp8':
+            elif self.state_precision == 'qfp8':
                 block_size = float('inf')
             else:
                 raise NotImplementedError
@@ -1813,11 +1813,11 @@ class _CompassBase(Optimizer):
     def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
         if self.state_precision == 'parameter':
             return torch.zeros_like(p)
-        elif self.state_precision == '8bit':
+        elif self.state_precision == 'q8bit':
             return OptimState8bit.zeros(p.shape, signed, block_size, p.device)
-        elif self.state_precision == '4bit':
+        elif self.state_precision == 'q4bit':
             return OptimState4bit.zeros(p.shape, signed, block_size, p.device)
-        elif self.state_precision == 'fp8':
+        elif self.state_precision == 'qfp8':
             return OptimStateFp8.zeros(p.shape, block_size, p.device)
         else:
             raise NotImplementedError
@@ -2302,7 +2302,7 @@ class CompassAO(_CompassBase):
             Controls the minimum size a tensor must be to be subject to quantization. 
             Advise not setting unless you have a clear reason to. (Default: 4096)
         state_precision (string):
-            Determines the precision states should be stored at in the optimizer. Vaid values are 'parameter', '8bit', '4bit', 'fp8'.
+            Determines the precision states should be stored at in the optimizer. Vaid values are 'parameter', 'q8bit', 'q4bit', 'qfp8'.
             Parameter sets the state to the same type as the parameter, i.e. no quantization is applied. (Default: parameter) 
     """
 
