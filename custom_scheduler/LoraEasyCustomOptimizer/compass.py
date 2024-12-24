@@ -8,7 +8,7 @@ from torch.optim import Optimizer
 from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz, create_factored_dims, get_denom, update_second_moment
 import math
 from torch.nn.functional import softplus
-from typing import Optional
+from typing import Optional, Literal
 
 from bitsandbytes.functional import quantize_blockwise, dequantize_blockwise
 from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
@@ -21,6 +21,8 @@ from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
 from .low_bit_optim.subclass_fp8 import OptimStateFp8
 from torch.distributed._tensor import DTensor
+
+STATE_PRECISION = Literal['parameter', '4bit', '8bit', 'fp8']
 
 class Compass(BaseOptimizer):
     r"""
@@ -1735,6 +1737,7 @@ class _CompassBase(Optimizer):
         *,
         block_size,
         min_quant_size,
+        state_precision,
     ) -> None:
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -1748,6 +1751,18 @@ class _CompassBase(Optimizer):
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
+
+        if block_size is None:
+            if self.state_precision == 'parameter':
+                block_size = float('inf')
+            elif self.state_precision == '8bit':
+                block_size = 256.0
+            elif self.state_precision == '4bit':
+                block_size = 128.0
+            elif self.state_precision == 'fp8':
+                block_size = float('inf')
+            else:
+                raise NotImplementedError
 
         defaults = dict(
             lr=torch.tensor(lr),
@@ -1772,6 +1787,7 @@ class _CompassBase(Optimizer):
         super().__init__(params, defaults)
         self.block_size = block_size
         self.min_quant_size = min_quant_size
+        self.state_precision = state_precision
 
     def __setstate__(self, state):
         super().__setstate__(state)
@@ -1794,9 +1810,17 @@ class _CompassBase(Optimizer):
 
 
     # bring your own function to create zero-filled subclass
-    @staticmethod
-    def _subclass_zeros(p: torch.Tensor, signed: bool, block_size: int):
-        raise NotImplementedError
+    def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
+        if self.state_precision == 'parameter':
+            return torch.zeros_like(p)
+        elif self.state_precision == '8bit':
+            return OptimState8bit.zeros(p.shape, signed, block_size, p.device)
+        elif self.state_precision == '4bit':
+            return OptimState4bit.zeros(p.shape, signed, block_size, p.device)
+        elif self.state_precision == 'fp8':
+            return OptimStateFp8.zeros(p.shape, block_size, p.device)
+        else:
+            raise NotImplementedError
 
     def _new_buffer(self, p: torch.Tensor, signed: bool):
         local_p = p.to_local() if isinstance(p, DTensor) else p
@@ -2107,8 +2131,7 @@ class Compass8bitAO(_CompassBase):
             min_quant_size=min_quant_size,
         )
 
-    @staticmethod
-    def _subclass_zeros(p: torch.Tensor, signed: bool, block_size: int):
+    def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
         return OptimState8bit.zeros(p.shape, signed, block_size, p.device)
     
 class Compass4bitAO(_CompassBase):
@@ -2162,8 +2185,7 @@ class Compass4bitAO(_CompassBase):
             min_quant_size=min_quant_size,
         )
 
-    @staticmethod
-    def _subclass_zeros(p: torch.Tensor, signed: bool, block_size: int):
+    def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
         return OptimState4bit.zeros(p.shape, signed, block_size, p.device)
     
 
@@ -2218,8 +2240,7 @@ class Compassfp8AO(_CompassBase):
             min_quant_size=min_quant_size,
         )
 
-    @staticmethod
-    def _subclass_zeros(p: torch.Tensor, signed: bool, block_size: int):
+    def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
         return OptimStateFp8.zeros(p.shape, block_size, p.device)
     
 class CompassAO(_CompassBase):
@@ -2245,8 +2266,9 @@ class CompassAO(_CompassBase):
         use_muon_pp: bool = False,
         compass_second_moment_smoothing: bool = True,
         *,
-        block_size=float("inf"),
+        block_size: Optional[float] = None,
         min_quant_size: int = 4096,
+        state_precision: STATE_PRECISION = 'parameter',
         **kwargs,
     ) -> None:
         super().__init__(
@@ -2271,4 +2293,5 @@ class CompassAO(_CompassBase):
             compass_second_moment_smoothing=compass_second_moment_smoothing,
             block_size=block_size,
             min_quant_size=min_quant_size,
+            state_precision=state_precision,
         )
