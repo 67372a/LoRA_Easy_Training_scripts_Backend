@@ -2244,12 +2244,74 @@ class Compassfp8AO(_CompassBase):
         return OptimStateFp8.zeros(p.shape, block_size, p.device)
     
 class CompassAO(_CompassBase):
+    r"""Compass supporting a number of optional features and quantization via torchao. 
+        Requires Triton is fully setup for your environment, i.e. CUDA framework is installed with paths setup on Linux,
+        and sets outlined at https://github.com/woct0rdho/triton-windows for Windows.
+    Arguments:
+        params (iterable):
+            Iterable of parameters to optimize or dicts defining
+            parameter groups.
+        lr (float):
+            Learning rate parameter (default 21e-4).
+        betas (float, float):
+            coefficients for momentum and exponential moving average squared (default: 0.95, 0.999).
+        eps (float):
+            Term the denominator is minimally clamped to, to improve numerical stability. (default: 1e-8).
+        eps2 (float):
+            Term to multiple the RMS of the grad to calculate adaptive eps. (default: 1e-2).
+        eps_floor (float):
+            Term to set a floor for the eps, to prevent NaNs. (default: None, disabling adaptive eps).
+        weight_decay (float):
+            Weight decay at y, i.e. a L2 penalty (default: 0.0).
+        stable_weight_decay (bool): 
+            Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
+        amp_fac (float):
+            amplification factor for the first moment filter (default: 2)
+        adaptive_clip (float):
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+        adaptive_clip_eps (float):
+            The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
+        adaptive_clip_type (string):
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
+        adopt (bool)
+            Updates the second moment / ema after it is used in a given step, as per ADOPT - https://arxiv.org/abs/2411.02853 (default: False)
+        cautious (bool)
+            Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+        use_muon_pp (boolean):
+            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
+            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
+            May not work well with small batch sizes or finetuning.
+            (default: False)
+        mars_gamma (float):
+            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
+            larger values apply more correction, and will require higher LRs to offset. Zero disables. (default: 0.0)
+        debias_beta1 (bool):
+            Apply bias correction to step size (LR). (Default: True)
+        debias_beta2 (bool):
+            Apply bias correction to denominator of updates (adaptive LR). (Default: True)
+        compass_second_moment_smoothing (bool):
+            Updates the second moment (i.e. ema / fim) with the Compass smoothed gradient. (Default: True)
+        block_size (float):
+            Controls the block sized used during quantization, will be automatically determined by state_precision if not set. 
+            Advise not setting unless you have a clear reason to. (Default: None)
+        min_quant_size (int):
+            Controls the minimum size a tensor must be to be subject to quantization. 
+            Advise not setting unless you have a clear reason to. (Default: 4096)
+        state_precision (string):
+            Determines the precision states should be stored at in the optimizer. Vaid values are 'parameter', '8bit', '4bit', 'fp8'.
+            Parameter sets the state to the same type as the parameter, i.e. no quantization is applied. (Default: parameter) 
+    """
+
     def __init__(
         self,
         params,
         lr = 1e-4,
-        betas=(0.97, 0.999),
-        eps: float = 1e-6,
+        betas=(0.95, 0.999),
+        eps: float = 1e-8,
         eps2: float = 1e-2,
         eps_floor: Optional[float] = None,
         weight_decay: float = 0.0,
