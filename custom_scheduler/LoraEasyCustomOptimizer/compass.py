@@ -1754,13 +1754,13 @@ class _CompassBase(Optimizer):
 
         if block_size is None:
             if state_precision == 'parameter':
-                block_size = float('inf')
+                block_size = 0
             elif state_precision == 'q8bit':
-                block_size = 256.0
+                block_size = 256
             elif state_precision == 'q4bit':
-                block_size = 128.0
+                block_size = 128
             elif state_precision == 'qfp8':
-                block_size = float('inf')
+                block_size = 0
             else:
                 raise NotImplementedError
 
@@ -1826,7 +1826,7 @@ class _CompassBase(Optimizer):
         local_p = p.to_local() if isinstance(p, DTensor) else p
 
         # only quantize tensors >= min_quant_size values, 4096 original default here and in bitsandbytes
-        if local_p.numel() >= self.min_quant_size and local_p.numel() % self.block_size == 0:
+        if self.block_size != 0 and (local_p.numel() >= self.min_quant_size and local_p.numel() % self.block_size == 0):
             out = self._subclass_zeros(local_p, signed, self.block_size)
         else:
             out = torch.zeros_like(local_p)
@@ -1903,7 +1903,11 @@ class _CompassBase(Optimizer):
                         if adaptive_clip > 0:
                             grad_f32 = grad.float()
                             grad_f32.copy_(agc(p.float(), grad_f32, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
-                        state["exp_avg_sq"].copy_(grad_f32.square())
+                        
+                        if state["exp_avg_sq"].dtype == torch.bfloat16:
+                            state["exp_avg_sq"].copy_(_fp32_to_bf16_sr(grad_f32.square()))
+                        else:
+                            state["exp_avg_sq"].copy_(grad_f32.square())
                     else:
                         # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
                         # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
@@ -1999,7 +2003,11 @@ def single_param_compass(
         previous_grad_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(previous_grad.float())
         temp_grad_f32 = grad_f32.clone().detach()
         grad_f32.copy_((grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32))
-        previous_grad.copy_(temp_grad_f32)
+
+        if previous_grad.dtype == torch.bfloat16:
+            previous_grad.copy_(_fp32_to_bf16_sr(temp_grad_f32))
+        else:
+            previous_grad.copy_(temp_grad_f32)
 
     if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
         grad_f32.copy_(newton_schulz(grad_f32))
@@ -2052,8 +2060,12 @@ def single_param_compass(
     if weight_decay > 0 and stable_weight_decay:
         swd_second_moment_parameter_sum.copy_(exp_avg_sq_f32.sum())
 
-    exp_avg.copy_(exp_avg_f32)
-    exp_avg_sq.copy_(exp_avg_sq_f32)
+    if exp_avg.dtype == torch.bfloat16:
+        exp_avg.copy_(_fp32_to_bf16_sr(exp_avg_f32))
+        exp_avg_sq.copy_(_fp32_to_bf16_sr(exp_avg_sq_f32))
+    else:
+        exp_avg.copy_(exp_avg_f32)
+        exp_avg_sq.copy_(exp_avg_sq_f32)
 
     if cautious:
         # compute norm gradient
@@ -2295,7 +2307,7 @@ class CompassAO(_CompassBase):
             Apply bias correction to denominator of updates (adaptive LR). (Default: True)
         compass_second_moment_smoothing (bool):
             Updates the second moment (i.e. ema / fim) with the Compass smoothed gradient. (Default: True)
-        block_size (float):
+        block_size (int):
             Controls the block sized used during quantization, will be automatically determined by state_precision if not set. 
             Advise not setting unless you have a clear reason to. (Default: None)
         min_quant_size (int):
@@ -2328,7 +2340,7 @@ class CompassAO(_CompassBase):
         use_muon_pp: bool = False,
         compass_second_moment_smoothing: bool = True,
         *,
-        block_size: Optional[float] = None,
+        block_size: Optional[int] = None,
         min_quant_size: int = 4096,
         state_precision: STATE_PRECISION = 'parameter',
         **kwargs,
