@@ -8,7 +8,7 @@ from LoraEasyCustomOptimizer.adan import Adan
 from LoraEasyCustomOptimizer.ademamix import AdEMAMix
 from LoraEasyCustomOptimizer.adopt import ADOPT
 from LoraEasyCustomOptimizer.came import CAME
-from LoraEasyCustomOptimizer.compass import Compass, Compass8BitBNB, CompassPlus, CompassADOPT, CompassADOPTMARS, Compass8bitAO, Compass4bitAO, Compassfp8AO, CompassAO
+from LoraEasyCustomOptimizer.compass import Compass, Compass8BitBNB, CompassPlus, CompassADOPT, CompassADOPTMARS, CompassAO
 from LoraEasyCustomOptimizer.farmscrop import FARMSCrop, FARMSCropV2
 from LoraEasyCustomOptimizer.fcompass import FCompass, FCompassPlus, FCompassADOPT, FCompassADOPTMARS
 from LoraEasyCustomOptimizer.fishmonger import FishMonger, FishMonger8BitBNB
@@ -19,13 +19,17 @@ from LoraEasyCustomOptimizer.laprop import LaProp
 from LoraEasyCustomOptimizer.lpfadamw import LPFAdamW
 from LoraEasyCustomOptimizer.ranger21 import Ranger21
 from LoraEasyCustomOptimizer.rmsprop import RMSProp, RMSPropADOPT, RMSPropADOPTMARS
-from LoraEasyCustomOptimizer.schedulefree import ScheduleFreeWrapper, ADOPTScheduleFree, ADOPTEMAMixScheduleFree, ADOPTNesterovScheduleFree, FADOPTScheduleFree, ADOPTMARSScheduleFree, FADOPTMARSScheduleFree
+from LoraEasyCustomOptimizer.schedulefree import (
+    ScheduleFreeWrapper, ADOPTScheduleFree, ADOPTEMAMixScheduleFree, ADOPTNesterovScheduleFree, 
+    FADOPTScheduleFree, ADOPTMARSScheduleFree, FADOPTMARSScheduleFree, ADOPTAOScheduleFree
+    )
 from LoraEasyCustomOptimizer.sgd import SGDSaI
 from LoraEasyCustomOptimizer.shampoo import ScalableShampoo
 from LoraEasyCustomOptimizer.adam import AdamW8bitAO, AdamW4bitAO, AdamWfp8AO
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ADOPT,
+    ADOPTAOScheduleFree,
     ADOPTEMAMixScheduleFree,
     ADOPTMARSScheduleFree,
     ADOPTNesterovScheduleFree,
@@ -40,9 +44,6 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     CAME,
     Compass,
     CompassAO,
-    Compass4bitAO,
-    Compass8bitAO,
-    Compassfp8AO,
     Compass8BitBNB,
     CompassADOPT,
     CompassADOPTMARS,

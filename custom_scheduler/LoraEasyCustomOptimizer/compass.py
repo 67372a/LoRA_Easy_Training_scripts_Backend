@@ -5,7 +5,7 @@
 
 import torch
 from torch.optim import Optimizer
-from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz, create_factored_dims, get_denom, update_second_moment
+from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz, create_factored_dims, get_denom, update_second_moment, STATE_PRECISION
 import math
 from torch.nn.functional import softplus
 from typing import Optional, Literal
@@ -21,8 +21,6 @@ from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
 from .low_bit_optim.subclass_fp8 import OptimStateFp8
 from torch.distributed._tensor import DTensor
-
-STATE_PRECISION = Literal['parameter', 'q4bit', 'q8bit', 'qfp8']
 
 class Compass(BaseOptimizer):
     r"""
@@ -1865,6 +1863,8 @@ class _CompassBase(Optimizer):
                 adaptive_clip_type = group["adaptive_clip_type"]
                 mars_gamma = group["mars_gamma"]
                 stable_weight_decay = group["stable_weight_decay"]
+                beta1 = group["betas"][0]
+                use_muon_pp = group["use_muon_pp"]
 
                 for p in group["params"]:
                     if p.grad is None:
@@ -1887,6 +1887,7 @@ class _CompassBase(Optimizer):
                         state["exp_avg_sq"] = self._new_buffer(p, False)
                         if mars_gamma > 0:
                             state["previous_grad"] = self._new_buffer(p, True)
+                            state["previous_grad"].copy_(p.grad.float())
 
                     state["step"] += 1
 
@@ -1899,9 +1900,24 @@ class _CompassBase(Optimizer):
                             "optim.param_groups[0]['lr'].fill_(new_lr)"
                         )
                         
-                    if group["adopt"] and state["step"] == 1:         
+                    if group["adopt"] and state["step"] == 1:
+                        grad_f32 = grad.float()
+
+                        if mars_gamma > 0:
+                            # MARS Calculate cₜ (gradient with correction term)
+                            previous_grad_f32 = torch.zeros_like(p.float(), dtype=torch.float32).copy_(state["previous_grad"].float())
+                            temp_grad_f32 = grad_f32.clone().detach()
+                            grad_f32.copy_((grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32))
+
+                            if state["previous_grad"].dtype == torch.bfloat16:
+                                state["previous_grad"].copy_(_fp32_to_bf16_sr(temp_grad_f32))
+                            else:
+                                state["previous_grad"].copy_(temp_grad_f32)
+
+                        if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                            grad_f32.copy_(newton_schulz(grad_f32))
+
                         if adaptive_clip > 0:
-                            grad_f32 = grad.float()
                             grad_f32.copy_(agc(p.float(), grad_f32, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
                         
                         if state["exp_avg_sq"].dtype == torch.bfloat16:
@@ -2092,169 +2108,6 @@ def single_param_compass(
     else:
         p.copy_(p_f32)
 
-class Compass8bitAO(_CompassBase):
-    def __init__(
-        self,
-        params,
-        lr = 1e-4,
-        betas=(0.97, 0.999),
-        eps: float = 1e-6,
-        eps2: float = 1e-2,
-        eps_floor: Optional[float] = None,
-        weight_decay: float = 0.0,
-        stable_weight_decay: bool = False,
-        amp_fac: float = 2.0,
-        cautious: bool = False,
-        adaptive_clip: float = 1.0,
-        adaptive_clip_eps: float = 1e-3,
-        adaptive_clip_type: NORM_TYPE = 'layer',
-        debias_beta1: bool = True,
-        debias_beta2: bool = True,
-        adopt: bool = False,
-        mars_gamma: float = 0.0,
-        use_muon_pp: bool = False,
-        compass_second_moment_smoothing: bool = True,
-        *,
-        block_size: int = 256,
-        min_quant_size: int = 4096,
-        **kwargs,
-    ) -> None:
-        super().__init__(
-            params=params,
-            lr=lr,
-            betas=betas,
-            eps=eps,
-            eps2=eps2,
-            eps_floor=eps_floor,
-            weight_decay=weight_decay,
-            stable_weight_decay=stable_weight_decay,
-            amp_fac=amp_fac,
-            cautious=cautious,
-            adaptive_clip=adaptive_clip,
-            adaptive_clip_eps=adaptive_clip_eps,
-            adaptive_clip_type=adaptive_clip_type,
-            debias_beta1=debias_beta1,
-            debias_beta2=debias_beta2,
-            adopt=adopt,
-            mars_gamma=mars_gamma,
-            use_muon_pp=use_muon_pp,
-            compass_second_moment_smoothing=compass_second_moment_smoothing,
-            block_size=block_size,
-            min_quant_size=min_quant_size,
-        )
-
-    def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
-        return OptimState8bit.zeros(p.shape, signed, block_size, p.device)
-    
-class Compass4bitAO(_CompassBase):
-    def __init__(
-        self,
-        params,
-        lr = 1e-4,
-        betas=(0.97, 0.999),
-        eps: float = 1e-6,
-        eps2: float = 1e-2,
-        eps_floor: Optional[float] = None,
-        weight_decay: float = 0.0,
-        stable_weight_decay: bool = False,
-        amp_fac: float = 2.0,
-        cautious: bool = False,
-        adaptive_clip: float = 1.0,
-        adaptive_clip_eps: float = 1e-3,
-        adaptive_clip_type: NORM_TYPE = 'layer',
-        debias_beta1: bool = True,
-        debias_beta2: bool = True,
-        adopt: bool = False,
-        mars_gamma: float = 0.0,
-        use_muon_pp: bool = False,
-        compass_second_moment_smoothing: bool = True,
-        *,
-        block_size: int = 128,
-        min_quant_size: int = 4096,
-        **kwargs,
-    ) -> None:
-        super().__init__(
-            params=params,
-            lr=lr,
-            betas=betas,
-            eps=eps,
-            eps2=eps2,
-            eps_floor=eps_floor,
-            weight_decay=weight_decay,
-            stable_weight_decay=stable_weight_decay,
-            amp_fac=amp_fac,
-            cautious=cautious,
-            adaptive_clip=adaptive_clip,
-            adaptive_clip_eps=adaptive_clip_eps,
-            adaptive_clip_type=adaptive_clip_type,
-            debias_beta1=debias_beta1,
-            debias_beta2=debias_beta2,
-            adopt=adopt,
-            mars_gamma=mars_gamma,
-            use_muon_pp=use_muon_pp,
-            compass_second_moment_smoothing=compass_second_moment_smoothing,
-            block_size=block_size,
-            min_quant_size=min_quant_size,
-        )
-
-    def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
-        return OptimState4bit.zeros(p.shape, signed, block_size, p.device)
-    
-
-class Compassfp8AO(_CompassBase):
-    def __init__(
-        self,
-        params,
-        lr = 1e-4,
-        betas=(0.97, 0.999),
-        eps: float = 1e-6,
-        eps2: float = 1e-2,
-        eps_floor: Optional[float] = None,
-        weight_decay: float = 0.0,
-        stable_weight_decay: bool = False,
-        amp_fac: float = 2.0,
-        cautious: bool = False,
-        adaptive_clip: float = 1.0,
-        adaptive_clip_eps: float = 1e-3,
-        adaptive_clip_type: NORM_TYPE = 'layer',
-        debias_beta1: bool = True,
-        debias_beta2: bool = True,
-        adopt: bool = False,
-        mars_gamma: float = 0.0,
-        use_muon_pp: bool = False,
-        compass_second_moment_smoothing: bool = True,
-        *,
-        block_size: int = 256,
-        min_quant_size: int = 4096,
-        **kwargs,
-    ) -> None:
-        super().__init__(
-            params=params,
-            lr=lr,
-            betas=betas,
-            eps=eps,
-            eps2=eps2,
-            eps_floor=eps_floor,
-            weight_decay=weight_decay,
-            stable_weight_decay=stable_weight_decay,
-            amp_fac=amp_fac,
-            cautious=cautious,
-            adaptive_clip=adaptive_clip,
-            adaptive_clip_eps=adaptive_clip_eps,
-            adaptive_clip_type=adaptive_clip_type,
-            debias_beta1=debias_beta1,
-            debias_beta2=debias_beta2,
-            adopt=adopt,
-            mars_gamma=mars_gamma,
-            use_muon_pp=use_muon_pp,
-            compass_second_moment_smoothing=compass_second_moment_smoothing,
-            block_size=block_size,
-            min_quant_size=min_quant_size,
-        )
-
-    def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
-        return OptimStateFp8.zeros(p.shape, block_size, p.device)
-    
 class CompassAO(_CompassBase):
     r"""Compass supporting a number of optional features and quantization via torchao. 
         Requires Triton is fully setup for your environment, i.e. CUDA framework is installed with paths setup on Linux,

@@ -1,13 +1,13 @@
 import torch
 from typing import Tuple, Union, Type, Literal, Optional
-import torch.nn.functional as F
 from torch.optim import Optimizer
-from einops import rearrange
 import math
 
 OPTIMIZER = Type[Optimizer]
 
 NORM_TYPE = Literal['unit','global','layer']
+
+STATE_PRECISION = Literal['parameter', 'q4bit', 'q8bit', 'qfp8']
 
 def unit_norm(x: torch.Tensor, norm: float = 2.0) -> torch.Tensor:
     r"""Get norm of unit."""
