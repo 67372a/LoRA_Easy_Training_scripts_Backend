@@ -3306,13 +3306,13 @@ def single_param_ADOPTAOScheduleFree(
 class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
     r"""Compass supporting a number of optional features and quantization via torchao. 
         Requires Triton is fully setup for your environment, i.e. CUDA framework is installed with paths setup on Linux,
-        and sets outlined at https://github.com/woct0rdho/triton-windows for Windows.
+        and steps outlined at https://github.com/woct0rdho/triton-windows for Windows.
     Arguments:
         params (iterable):
             Iterable of parameters to optimize or dicts defining
             parameter groups.
         lr (float):
-            Learning rate parameter (default 1e-4).
+            Learning rate parameter (default 5e-4).
         betas (float, float):
             coefficients for momentum and exponential moving average squared (default: 0.9, 0.999).
         eps (float):

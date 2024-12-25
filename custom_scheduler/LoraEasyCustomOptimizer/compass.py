@@ -2115,7 +2115,7 @@ def single_param_compass(
 class CompassAO(_CompassBase):
     r"""Compass supporting a number of optional features and quantization via torchao. 
         Requires Triton is fully setup for your environment, i.e. CUDA framework is installed with paths setup on Linux,
-        and sets outlined at https://github.com/woct0rdho/triton-windows for Windows.
+        and steps outlined at https://github.com/woct0rdho/triton-windows for Windows.
     Arguments:
         params (iterable):
             Iterable of parameters to optimize or dicts defining
