@@ -1962,8 +1962,8 @@ class _CompassBase(Optimizer):
                             swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"],
                         )
 
-                        if group["weight_decay"] > 0 and group['stable_weight_decay']:
-                            swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
+                    if group["weight_decay"] > 0 and group['stable_weight_decay']:
+                        swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
 
                 if group["weight_decay"] > 0 and group['stable_weight_decay']:
                     group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(math.sqrt(swd_second_moment_group_sum / swd_param_size_sum), device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))

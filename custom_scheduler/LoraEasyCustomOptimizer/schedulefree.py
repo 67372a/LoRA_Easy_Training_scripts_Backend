@@ -3069,7 +3069,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                 adaptive_clip_eps = group["adaptive_clip_eps"]
                 adaptive_clip_type = group["adaptive_clip_type"]
                 mars_gamma = group["mars_gamma"]
-                stable_weight_decay = group["stable_weight_decay"]
                 beta1 = group["betas"][0]
                 use_muon_pp = group["use_muon_pp"]
                 
@@ -3173,8 +3172,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"],
                         )
 
-                        if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                            swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
+                    if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                        swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
 
                 if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
                     group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(math.sqrt(swd_second_moment_group_sum / swd_param_size_sum), device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
