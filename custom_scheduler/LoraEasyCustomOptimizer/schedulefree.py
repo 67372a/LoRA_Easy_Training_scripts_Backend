@@ -303,8 +303,6 @@ class ADOPTScheduleFree(BaseOptimizer):
         weight_lr_power (float): 
             during warmup, the weights in the average will be equal to lr raised to this power.
             set to 0 for no weighting. (Default: 2,0)
-        debias_beta1 (bool):
-            Apply bias correction to step size (LR). (Default: False)
         debias_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: False)
     """
@@ -325,7 +323,6 @@ class ADOPTScheduleFree(BaseOptimizer):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        debias_beta1: bool = False,
         debias_beta2: bool = False,
         **kwargs,
     ):
@@ -356,7 +353,6 @@ class ADOPTScheduleFree(BaseOptimizer):
             'adaptive_clip':adaptive_clip,
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
-            'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
         }
         super().__init__(params, defaults)
@@ -446,7 +442,6 @@ class ADOPTScheduleFree(BaseOptimizer):
 
             beta1, beta2 = group['betas']
 
-            bias_correction1: float = self.debias(beta1, group['step'])
             if group["debias_beta2"]:
                 bias_correction2: float = self.debias(beta2, group['step'])
             else:
@@ -456,24 +451,12 @@ class ADOPTScheduleFree(BaseOptimizer):
 
             lr_max = group['lr_max'] = max(lr, group['lr_max'])
 
-            lr_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr,
-                bias_correction1=bias_correction1,
-            )
-
-            lr_max_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr_max,
-                bias_correction1=bias_correction1,
-            )
-
-            weight = (group['step'] ** group['r']) * (lr_max_step_size ** group['weight_lr_power'])
+            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
             weight_sum = group['weight_sum'] = group['weight_sum'] + weight
 
             checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
 
-            adaptive_y_lr: float = lr_step_size * (beta1 * (1.0 - checkpoint) - 1)
+            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
             adopt_clip: float = (group['step']-1)**0.25
 
             adaptive_clip = group["adaptive_clip"]
@@ -543,7 +526,7 @@ class ADOPTScheduleFree(BaseOptimizer):
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(update, alpha=adaptive_y_lr)
 
-                    z.sub_(update, alpha=lr_step_size)
+                    z.sub_(update, alpha=lr)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum()
@@ -624,7 +607,6 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
         cautious: bool = True,
         alpha: float = 2.0,
         t_alpha_beta3: Optional[float] = None,
-        debias_beta1: bool = False,
         debias_beta2: bool = False,
         **kwargs,
     ):
@@ -658,7 +640,6 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
             'alpha': alpha,
             't_alpha_beta3': t_alpha_beta3,
             'cautious': cautious,
-            'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
         }
         super().__init__(params, defaults)
@@ -770,7 +751,6 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
 
             beta1, beta2, beta3 = group['betas']
 
-            bias_correction1: float = self.debias(beta1, group['step'])
             if group["debias_beta2"]:
                 bias_correction2: float = self.debias(beta2, group['step'])
             else:
@@ -780,24 +760,12 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
 
             lr_max = group['lr_max'] = max(lr, group['lr_max'])
 
-            lr_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr,
-                bias_correction1=bias_correction1,
-            )
-
-            lr_max_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr_max,
-                bias_correction1=bias_correction1,
-            )
-
-            weight = (group['step'] ** group['r']) * (lr_max_step_size ** group['weight_lr_power'])
+            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
             weight_sum = group['weight_sum'] = group['weight_sum'] + weight
 
             checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
 
-            adaptive_y_lr: float = lr_step_size * (beta1 * (1.0 - checkpoint) - 1)
+            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
             adopt_clip: float = (group['step']-1)**0.25
 
             adaptive_clip = group["adaptive_clip"]
@@ -884,7 +852,7 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(full_update, alpha=adaptive_y_lr)
 
-                    z.sub_(full_update, alpha=lr_step_size)
+                    z.sub_(full_update, alpha=lr)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum()
@@ -960,7 +928,6 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         cautious: bool = True,
-        debias_beta1: bool = False,
         debias_beta2: bool = False,
         debias_beta3: bool = False,
         **kwargs,
@@ -992,7 +959,6 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
             'adaptive_clip':adaptive_clip,
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
-            'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
             'debias_beta3':debias_beta3,
             'cautious': cautious,
@@ -1086,7 +1052,6 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
 
             beta1, beta2, beta3 = group['betas']
 
-            bias_correction1: float = self.debias(beta1, group['step'])
             if group["debias_beta2"]:
                 bias_correction2: float = self.debias(beta2, group['step'])
             else:
@@ -1101,24 +1066,12 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
 
             lr_max = group['lr_max'] = max(lr, group['lr_max'])
 
-            lr_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr,
-                bias_correction1=bias_correction1,
-            )
-
-            lr_max_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr_max,
-                bias_correction1=bias_correction1,
-            )
-
-            weight = (group['step'] ** group['r']) * (lr_max_step_size ** group['weight_lr_power'])
+            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
             weight_sum = group['weight_sum'] = group['weight_sum'] + weight
 
             checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
 
-            adaptive_y_lr: float = lr_step_size * (beta1 * (1.0 - checkpoint) - 1)
+            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
             adopt_clip: float = (group['step']-1)**0.25
 
             adaptive_clip = group["adaptive_clip"]
@@ -1206,7 +1159,7 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(full_update, alpha=adaptive_y_lr)
 
-                    z.sub_(full_update, alpha=lr_step_size)
+                    z.sub_(full_update, alpha=lr)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         exp_avg_sq_sum += exp_avg_sq.div(bias_correction3).sum()
@@ -1286,7 +1239,6 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         gamma: float = 0.025,
-        debias_beta1: bool = False,
         debias_beta2: bool = False,
         **kwargs,
     ):
@@ -1318,7 +1270,6 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
             'gamma':gamma,
-            'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
         }
         super().__init__(params, defaults)
@@ -1405,7 +1356,6 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
 
             beta1, beta2 = group['betas']
 
-            bias_correction1: float = self.debias(beta1, group['step'])
             if group["debias_beta2"]:
                 bias_correction2: float = self.debias(beta2, group['step'])
             else:
@@ -1415,24 +1365,12 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
 
             lr_max = group['lr_max'] = max(lr, group['lr_max'])
 
-            lr_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr,
-                bias_correction1=bias_correction1,
-            )
-
-            lr_max_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr_max,
-                bias_correction1=bias_correction1,
-            )
-
-            weight = (group['step'] ** group['r']) * (lr_max_step_size ** group['weight_lr_power'])
+            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
             weight_sum = group['weight_sum'] = group['weight_sum'] + weight
 
             checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
 
-            adaptive_y_lr: float = lr_step_size * (beta1 * (1.0 - checkpoint) - 1)
+            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
             adopt_clip: float = (group['step']-1)**0.25
 
             adaptive_clip = group["adaptive_clip"]
@@ -1511,7 +1449,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(grad_update, alpha=adaptive_y_lr)
 
-                    z.sub_(grad_update, alpha=lr_step_size)
+                    z.sub_(grad_update, alpha=lr)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum()
@@ -1590,7 +1528,6 @@ class FADOPTScheduleFree(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
-        debias_beta1: bool = False,
         debias_beta2: bool = False,
         **kwargs,
     ):
@@ -1623,7 +1560,6 @@ class FADOPTScheduleFree(BaseOptimizer):
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
             'fisher_clip':fisher_clip,
-            'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
         }
         super().__init__(params, defaults)
@@ -1709,7 +1645,6 @@ class FADOPTScheduleFree(BaseOptimizer):
 
             beta1, beta2 = group['betas']
 
-            bias_correction1: float = self.debias(beta1, group['step'])
             if group["debias_beta2"]:
                 current_beta2: float = self.debias_beta(beta2, group['step'])
             else:
@@ -1719,24 +1654,12 @@ class FADOPTScheduleFree(BaseOptimizer):
 
             lr_max = group['lr_max'] = max(lr, group['lr_max'])
 
-            lr_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr,
-                bias_correction1=bias_correction1,
-            )
-
-            lr_max_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr_max,
-                bias_correction1=bias_correction1,
-            )
-
-            weight = (group['step'] ** group['r']) * (lr_max_step_size ** group['weight_lr_power'])
+            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
             weight_sum = group['weight_sum'] = group['weight_sum'] + weight
 
             checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
 
-            adaptive_y_lr: float = lr_step_size * (beta1 * (1.0 - checkpoint) - 1)
+            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
             adopt_clip: float = (group['step']-1)**0.25
 
             adaptive_clip = group["adaptive_clip"]
@@ -1816,7 +1739,7 @@ class FADOPTScheduleFree(BaseOptimizer):
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(update, alpha=adaptive_y_lr)
 
-                    z.sub_(update, alpha=lr_step_size)
+                    z.sub_(update, alpha=lr)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         fim_sum += fim.sum()
@@ -1900,7 +1823,6 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
         cautious: bool = True,
         alpha: float = 2.0,
         t_alpha_beta3: Optional[float] = None,
-        debias_beta1: bool = False,
         debias_beta2: bool = False,
         **kwargs,
     ):
@@ -1936,7 +1858,6 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
             'cautious':cautious,
             'alpha':alpha,
             't_alpha_beta3':t_alpha_beta3,
-            'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
         }
         super().__init__(params, defaults)
@@ -2048,7 +1969,6 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
 
             beta1, beta2, beta3 = group['betas']
 
-            bias_correction1: float = self.debias(beta1, group['step'])
             if group["debias_beta2"]:
                 current_beta2: float = self.debias_beta(beta2, group['step'])
             else:
@@ -2058,24 +1978,12 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
 
             lr_max = group['lr_max'] = max(lr, group['lr_max'])
 
-            lr_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr,
-                bias_correction1=bias_correction1,
-            )
-
-            lr_max_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr_max,
-                bias_correction1=bias_correction1,
-            )
-
-            weight = (group['step'] ** group['r']) * (lr_max_step_size ** group['weight_lr_power'])
+            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
             weight_sum = group['weight_sum'] = group['weight_sum'] + weight
 
             checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
 
-            adaptive_y_lr: float = lr_step_size * (beta1 * (1.0 - checkpoint) - 1)
+            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
             adopt_clip: float = (group['step']-1)**0.25
 
             adaptive_clip = group["adaptive_clip"]
@@ -2168,7 +2076,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(update, alpha=adaptive_y_lr)
 
-                    z.sub_(update, alpha=lr_step_size)
+                    z.sub_(update, alpha=lr)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         fim_sum += fim.sum()
@@ -2245,7 +2153,6 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
         cautious: bool = True,
-        debias_beta1: bool = False,
         debias_beta2: bool = False,
         debias_beta3: bool = False,
         **kwargs,
@@ -2279,7 +2186,6 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
             'adaptive_clip_type':adaptive_clip_type,
             'fisher_clip':fisher_clip,
             'cautious':cautious,
-            'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
             'debias_beta3':debias_beta3,
         }
@@ -2372,7 +2278,6 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
 
             beta1, beta2, beta3 = group['betas']
 
-            bias_correction1: float = self.debias(beta1, group['step'])
             if group["debias_beta2"]:
                 current_beta2: float = self.debias_beta(beta2, group['step'])
             else:
@@ -2387,24 +2292,12 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
 
             lr_max = group['lr_max'] = max(lr, group['lr_max'])
 
-            lr_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr,
-                bias_correction1=bias_correction1,
-            )
-
-            lr_max_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr_max,
-                bias_correction1=bias_correction1,
-            )
-
-            weight = (group['step'] ** group['r']) * (lr_max_step_size ** group['weight_lr_power'])
+            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
             weight_sum = group['weight_sum'] = group['weight_sum'] + weight
 
             checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
 
-            adaptive_y_lr: float = lr_step_size * (beta1 * (1.0 - checkpoint) - 1)
+            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
             adopt_clip: float = (group['step']-1)**0.25
 
             adaptive_clip = group["adaptive_clip"]
@@ -2500,7 +2393,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(update, alpha=adaptive_y_lr)
 
-                    z.sub_(update, alpha=lr_step_size)
+                    z.sub_(update, alpha=lr)
 
                     if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                         fim_sum += fim.sum()
@@ -2563,8 +2456,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             larger values apply more correction, and will require higher LRs to offset. (default: 0.025)
         fisher_clip (float):
             Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
-        debias_beta1 (bool):
-            Apply bias correction to step size (LR). (Default: False)
         debias_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: False)
         use_muon_pp (boolean):
@@ -2593,7 +2484,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         adaptive_clip_type: NORM_TYPE = 'layer',
         fisher_clip: float = 1.0,
         gamma: float = 0.025,
-        debias_beta1: bool = False,
         debias_beta2: bool = False,
         use_muon_pp: bool = False,
         weight_decay_lr_max: Optional[float] = None,
@@ -2631,7 +2521,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             'adaptive_clip_type':adaptive_clip_type,
             'fisher_clip':fisher_clip,
             'gamma': gamma,
-            'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
             'use_muon_pp':use_muon_pp,
             'weight_decay_lr_decouple':weight_decay_lr_decouple,
@@ -2725,7 +2614,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
 
             beta1, beta2 = group['betas']
 
-            bias_correction1: float = self.debias(beta1, group['step'])
             if group["debias_beta2"]:
                 current_beta2: float = self.debias_beta(beta2, group['step'])
             else:
@@ -2735,24 +2623,12 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
 
             lr_max = group['lr_max'] = max(lr, group['lr_max'])
 
-            lr_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr,
-                bias_correction1=bias_correction1,
-            )
-
-            lr_max_step_size = self.apply_adam_debias(
-                adam_debias=not group["debias_beta1"],
-                step_size=lr_max,
-                bias_correction1=bias_correction1,
-            )
-
-            weight = (group['step'] ** group['r']) * (lr_max_step_size ** group['weight_lr_power'])
+            weight = (group['step'] ** group['r']) * (lr_max ** group['weight_lr_power'])
             weight_sum = group['weight_sum'] = group['weight_sum'] + weight
 
             checkpoint: float = weight / weight_sum if weight_sum != 0.0 else 0.0
 
-            adaptive_y_lr: float = lr_step_size * (beta1 * (1.0 - checkpoint) - 1)
+            adaptive_y_lr: float = lr * (beta1 * (1.0 - checkpoint) - 1)
             adopt_clip: float = (group['step']-1)**0.25
 
             adaptive_clip = group["adaptive_clip"]
@@ -2843,7 +2719,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                     p_fp32.lerp_(z, weight=checkpoint)
                     p_fp32.add_(grad_nat, alpha=adaptive_y_lr)
 
-                    z.sub_(grad_nat, alpha=lr_step_size)
+                    z.sub_(grad_nat, alpha=lr)
 
                     if weight_decay != 0 and weight_decouple and group['stable_weight_decay']:
                         fim_sum += fim.sum()
@@ -2877,7 +2753,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         adaptive_clip,
         adaptive_clip_eps,
         adaptive_clip_type,
-        debias_beta1,
         debias_beta2,
         mars_gamma,
         use_muon_pp,
@@ -2925,7 +2800,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             adaptive_clip=adaptive_clip,
             adaptive_clip_eps=adaptive_clip_eps,
             adaptive_clip_type=adaptive_clip_type,
-            debias_beta1=debias_beta1,
             debias_beta2=debias_beta2,
             mars_gamma=mars_gamma,
             use_muon_pp=use_muon_pp,
@@ -2944,7 +2818,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("adaptive_clip", 1.0)
             group.setdefault("adaptive_clip_eps", 1e-3)
             group.setdefault("adaptive_clip_type", 'layer')
-            group.setdefault("debias_beta1", True)
             group.setdefault("debias_beta2", True)
             group.setdefault("mars_gamma", 0.0)
             group.setdefault("eps2", 1e-3)
@@ -3160,7 +3033,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             adaptive_clip=group["adaptive_clip"],
                             adaptive_clip_eps=group["adaptive_clip_eps"],
                             adaptive_clip_type=group["adaptive_clip_type"],
-                            debias_beta1=group["debias_beta1"],
                             debias_beta2=group["debias_beta2"],
                             mars_gamma=group["mars_gamma"],
                             use_muon_pp=group["use_muon_pp"],
@@ -3202,7 +3074,6 @@ def single_param_ADOPTAOScheduleFree(
     adaptive_clip: float,
     adaptive_clip_eps: float,
     adaptive_clip_type: NORM_TYPE,
-    debias_beta1: bool,
     debias_beta2: bool,
     mars_gamma: float,
     use_muon_pp: bool,
@@ -3217,25 +3088,18 @@ def single_param_ADOPTAOScheduleFree(
     p_f32 = p.float()
     grad_f32 = grad.float()
 
-    bias_correction1: float = 1.0
-    if debias_beta1:
-        bias_correction1 = 1 - beta1**step
-
     bias_correction2: float = 1.0
     if debias_beta2:
         bias_correction2 = 1 - beta2**step
 
     sf_lr_max.copy_(max(lr, sf_lr_max))
 
-    lr_step_size = lr / bias_correction1
-    lr_max_step_size = sf_lr_max / bias_correction1
-
-    weight = (step ** r) * (lr_max_step_size ** weight_lr_power)
+    weight = (step ** r) * (sf_lr_max ** weight_lr_power)
     sf_weight_sum.copy_(sf_weight_sum + weight)
 
     checkpoint = weight / sf_weight_sum
 
-    adaptive_y_lr = lr_step_size * (beta1 * (1.0 - checkpoint) - 1)
+    adaptive_y_lr = lr * (beta1 * (1.0 - checkpoint) - 1)
 
     #Make a fp32 copies of state
     exp_avg_sq_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(exp_avg_sq.float())
@@ -3285,7 +3149,7 @@ def single_param_ADOPTAOScheduleFree(
     p_f32.lerp_(z_f32, weight=checkpoint)
     p_f32.add_(normed_grad, alpha=adaptive_y_lr)
 
-    z_f32.add_(normed_grad, alpha=-lr_step_size)
+    z_f32.add_(normed_grad, alpha=-lr)
 
     if weight_decay > 0 and stable_weight_decay:
         swd_second_moment_parameter_sum.copy_(exp_avg_sq_f32.sum())
@@ -3342,8 +3206,6 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         mars_gamma (float):
             Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
             larger values apply more correction, and will require higher LRs to offset. Zero disables. (default: 0.0)
-        debias_beta1 (bool):
-            Apply bias correction to step size (LR). (Default: True)
         debias_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: True)
         compass_second_moment_smoothing (bool):
@@ -3378,7 +3240,6 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        debias_beta1: bool = True,
         debias_beta2: bool = True,
         mars_gamma: float = 0.0,
         use_muon_pp: bool = False,
@@ -3403,7 +3264,6 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             adaptive_clip=adaptive_clip,
             adaptive_clip_eps=adaptive_clip_eps,
             adaptive_clip_type=adaptive_clip_type,
-            debias_beta1=debias_beta1,
             debias_beta2=debias_beta2,
             mars_gamma=mars_gamma,
             use_muon_pp=use_muon_pp,
