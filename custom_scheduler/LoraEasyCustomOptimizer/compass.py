@@ -1924,6 +1924,9 @@ class _CompassBase(Optimizer):
                             state["exp_avg_sq"].copy_(_fp32_to_bf16_sr(grad_f32.square()))
                         else:
                             state["exp_avg_sq"].copy_(grad_f32.square())
+
+                        if group["weight_decay"] > 0 and group['stable_weight_decay']:
+                            state["swd_second_moment_parameter_sum"].copy(grad_f32.square().sum())
                     else:
                         # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
                         # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
@@ -1959,9 +1962,10 @@ class _CompassBase(Optimizer):
                             swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"],
                         )
 
-                    swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
+                        if group["weight_decay"] > 0 and group['stable_weight_decay']:
+                            swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
 
-                if group["weight_decay"] > 0 and group['stable_weight_decay'] and (not group["adopt"] or state["step"] > 1):
+                if group["weight_decay"] > 0 and group['stable_weight_decay']:
                     group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(math.sqrt(swd_second_moment_group_sum / swd_param_size_sum), device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
 
         return loss

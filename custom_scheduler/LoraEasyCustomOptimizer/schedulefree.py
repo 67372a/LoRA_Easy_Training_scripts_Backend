@@ -3,12 +3,18 @@
 from typing import Callable, Dict, Optional, Tuple, Union, List, Literal
 
 import torch
+from torch.optim import Optimizer
 import math
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
-from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz
+from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz, STATE_PRECISION
+from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
+from .low_bit_optim.subclass_8bit import OptimState8bit
+from .low_bit_optim.subclass_4bit import OptimState4bit
+from .low_bit_optim.subclass_fp8 import OptimStateFp8
+from torch.distributed._tensor import DTensor
 
 class ScheduleFreeWrapper(BaseOptimizer):
     r"""
@@ -2855,3 +2861,556 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                     state['previous_grad'].copy_(grad)
 
         return loss
+    
+class _ADOPTAOScheduleFreeBase(Optimizer):
+    def __init__(
+        self,
+        params,
+        lr,
+        betas,
+        eps,
+        eps2,
+        eps_floor,
+        weight_decay,
+        weight_decouple,
+        stable_weight_decay,
+        adaptive_clip,
+        adaptive_clip_eps,
+        adaptive_clip_type,
+        debias_beta1,
+        debias_beta2,
+        mars_gamma,
+        use_muon_pp,
+        r,
+        weight_lr_power,
+        *,
+        block_size,
+        min_quant_size,
+        state_precision,
+    ) -> None:
+        if not 0.0 <= lr:
+            raise ValueError("Invalid learning rate: {}".format(lr))
+        if not 0.0 <= eps:
+            raise ValueError("Invalid epsilon value: {}".format(eps))
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
+        
+        # Override zero to 1e-37, as zero and float32.tiny NaNs
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = 1e-37
+
+        if block_size is None:
+            if state_precision == 'parameter':
+                block_size = 0
+            elif state_precision == 'q8bit':
+                block_size = 256
+            elif state_precision == 'q4bit':
+                block_size = 128
+            elif state_precision == 'qfp8':
+                block_size = 0
+            else:
+                raise NotImplementedError
+
+        defaults = dict(
+            lr=torch.tensor(lr),
+            betas=betas,
+            eps=eps,
+            eps2=eps2,
+            eps_floor=eps_floor,
+            weight_decay=weight_decay,
+            weight_decouple=weight_decouple,
+            stable_weight_decay=stable_weight_decay,
+            adaptive_clip=adaptive_clip,
+            adaptive_clip_eps=adaptive_clip_eps,
+            adaptive_clip_type=adaptive_clip_type,
+            debias_beta1=debias_beta1,
+            debias_beta2=debias_beta2,
+            mars_gamma=mars_gamma,
+            use_muon_pp=use_muon_pp,
+            r=r,
+            weight_lr_power=weight_lr_power,
+        )
+        super().__init__(params, defaults)
+        self.block_size = block_size
+        self.min_quant_size = min_quant_size
+        self.state_precision = state_precision
+        self.train_mode = state_precision
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        for group in self.param_groups:
+            group.setdefault("adaptive_clip", 1.0)
+            group.setdefault("adaptive_clip_eps", 1e-3)
+            group.setdefault("adaptive_clip_type", 'layer')
+            group.setdefault("debias_beta1", True)
+            group.setdefault("debias_beta2", True)
+            group.setdefault("mars_gamma", 0.0)
+            group.setdefault("eps2", 1e-3)
+            group.setdefault("eps_floor", None)
+            group.setdefault("use_muon_pp", False)
+            group.setdefault("weight_decay", 0.0)
+            group.setdefault("stable_weight_decay", False)
+            group.setdefault("weight_decouple", False)
+            group.setdefault("r", 0.0)
+            group.setdefault("weight_lr_power", 2.0)
+            group.setdefault("swd_second_moment_mean_sqrt", None)
+            group.setdefault("train_mode", False)
+
+    # bring your own function to create zero-filled subclass
+    def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
+        if self.state_precision == 'parameter':
+            return torch.zeros_like(p)
+        elif self.state_precision == 'q8bit':
+            return OptimState8bit.zeros(p.shape, signed, block_size, p.device)
+        elif self.state_precision == 'q4bit':
+            return OptimState4bit.zeros(p.shape, signed, block_size, p.device)
+        elif self.state_precision == 'qfp8':
+            return OptimStateFp8.zeros(p.shape, block_size, p.device)
+        else:
+            raise NotImplementedError
+
+    def _new_buffer(self, p: torch.Tensor, signed: bool):
+        local_p = p.to_local() if isinstance(p, DTensor) else p
+
+        # only quantize tensors >= min_quant_size values, 4096 original default here and in bitsandbytes
+        if self.block_size != 0 and (local_p.numel() >= self.min_quant_size and local_p.numel() % self.block_size == 0):
+            out = self._subclass_zeros(local_p, signed, self.block_size)
+        else:
+            out = torch.zeros_like(local_p)
+
+        # wrap subclass in DTensor as needed
+        # NOTE: local tensor may have different shapes across ranks.
+        # this happens when the 1st dim is not divisible by WORLD_SIZE.
+        # thus, we must supply shape (and stride) to DTensor.from_local()
+        if isinstance(p, DTensor):
+            out = DTensor.from_local(
+                local_tensor=out,
+                device_mesh=p.device_mesh,
+                placements=p.placements,
+                run_check=False,
+                shape=p.shape,
+                stride=p.stride(),
+            )
+
+        return out
+    
+    @staticmethod
+    @torch.no_grad()
+    def _eval(p: torch.Tensor, z: torch.Tensor, beta1: float):
+        p_f32 = p.float()
+
+        z_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(z.float())
+
+        p_f32.data.lerp_(end=z_f32, weight=1.0 - 1.0 / beta1)
+
+        if z.dtype == torch.bfloat16:
+            z.copy_(_fp32_to_bf16_sr(z_f32))
+        else:
+            z.copy_(z_f32)
+
+    
+    @torch.no_grad()
+    def eval(self):
+        with torch._dynamo.utils.disable_cache_limit():
+            for group in self.param_groups:
+                if self.train_mode:
+                    for p in group['params']:
+                        state = self.state[p]
+                        if 'z' in state:
+                            torch.compile(self._eval, fullgraph=True, dynamic=False)(p=p, z=state["z"], beta1=group['betas'][0])
+                    self.train_mode = False
+
+    @staticmethod
+    @torch.no_grad()
+    def _train(p: torch.Tensor, z: torch.Tensor, beta1: float):
+        p_f32 = p.float()
+
+        z_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(z.float())
+
+        p_f32.data.lerp_(end=z_f32, weight=1.0 - beta1)
+
+        if z.dtype == torch.bfloat16:
+            z.copy_(_fp32_to_bf16_sr(z_f32))
+        else:
+            z.copy_(z_f32)
+
+    @torch.no_grad()
+    def train(self):
+        with torch._dynamo.utils.disable_cache_limit():
+            for group in self.param_groups:
+                if not self.train_mode:
+                    for p in group['params']:
+                        state = self.state[p]
+                        if 'z' in state:
+                            torch.compile(self._train, fullgraph=True, dynamic=False)(p=p, z=state["z"], beta1=group['betas'][0])
+                    self.train_mode = True
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        if not self.train_mode:
+            raise Exception("Optimizer was not in train mode when step is called. "
+                            "Please insert .train() and .eval() calls on the "
+                            "optimizer. See documentation for details.")
+
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        # for a given model, the number of different argument combinations to single_param_adam() is fixed.
+        # thus, it is safe to disable cache limit without the risk of always re-compiling.
+        with torch._dynamo.utils.disable_cache_limit():
+            for group in self.param_groups:
+                swd_param_size_sum = 0
+                swd_second_moment_group_sum = 0.0
+                adaptive_clip = group["adaptive_clip"]
+                adaptive_clip_eps = group["adaptive_clip_eps"]
+                adaptive_clip_type = group["adaptive_clip_type"]
+                mars_gamma = group["mars_gamma"]
+                stable_weight_decay = group["stable_weight_decay"]
+                beta1 = group["betas"][0]
+                use_muon_pp = group["use_muon_pp"]
+                
+                for p in group["params"]:
+                    if p.grad is None:
+                        continue
+
+                    grad = p.grad
+                    if grad.is_sparse:
+                        raise RuntimeError("Sparse gradient is not supported")
+
+                    state = self.state[p]
+
+                    if group["swd_second_moment_mean_sqrt"] is None:
+                        group["swd_second_moment_mean_sqrt"] = torch.tensor(1.0, device=p.device, dtype=torch.float32)
+
+                    # State initialization
+                    if len(state) == 0:
+                        state["step"] = torch.tensor(0, device=p.device, dtype=torch.int32)
+                        state["swd_second_moment_parameter_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
+                        state["z"] = self._new_buffer(p, True)
+                        state["z"].copy_(p.float())
+                        state["exp_avg_sq"] = self._new_buffer(p, False)
+                        state["sf_lr_max"] = torch.tensor(-1.0, device=p.device, dtype=torch.float32)
+                        state["sf_weight_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
+                        if mars_gamma > 0:
+                            state["previous_grad"] = self._new_buffer(p, True)
+                            state["previous_grad"].copy_(p.grad.float())
+
+                    state["step"] += 1
+
+                    if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                        swd_param_size_sum += p.numel()
+
+                    if not isinstance(group["lr"], torch.Tensor):
+                        raise RuntimeError(
+                            "lr was changed to a non-Tensor object. If you want to update lr, please use "
+                            "optim.param_groups[0]['lr'].fill_(new_lr)"
+                        )
+                    
+                    if state["step"] == 1:
+                        grad_f32 = grad.float()
+
+                        if mars_gamma > 0:
+                            # MARS Calculate cₜ (gradient with correction term)
+                            previous_grad_f32 = torch.zeros_like(p.float(), dtype=torch.float32).copy_(state["previous_grad"].float())
+                            temp_grad_f32 = grad_f32.clone().detach()
+                            grad_f32.copy_((grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32))
+
+                            if state["previous_grad"].dtype == torch.bfloat16:
+                                state["previous_grad"].copy_(_fp32_to_bf16_sr(temp_grad_f32))
+                            else:
+                                state["previous_grad"].copy_(temp_grad_f32)
+
+                        if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                            grad_f32.copy_(newton_schulz(grad_f32))
+
+                        if adaptive_clip > 0:
+                            grad_f32.copy_(agc(p.float(), grad_f32, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                        
+                        if state["exp_avg_sq"].dtype == torch.bfloat16:
+                            state["exp_avg_sq"].copy_(_fp32_to_bf16_sr(grad_f32.square()))
+                        else:
+                            state["exp_avg_sq"].copy_(grad_f32.square())
+
+                        if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                            state["swd_second_moment_parameter_sum"].copy(grad_f32.square().sum())
+                    else:
+                        # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
+                        # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
+                        # thus, by calling p.detach(), DTensor won't have .grad anymore, which is ok since we
+                        # are passing grad separately anyway.
+                        torch.compile(single_param_ADOPTAOScheduleFree, fullgraph=True, dynamic=False)(
+                            p=p.detach(),
+                            grad=grad,
+                            step=state["step"],
+                            z=state["z"],
+                            exp_avg_sq=state["exp_avg_sq"],
+                            previous_grad=state.get("previous_grad", None),
+                            lr=group["lr"],
+                            beta1=group["betas"][0],
+                            beta2=group["betas"][1],
+                            weight_decay=group["weight_decay"],
+                            weight_decouple=group["weight_decouple"],
+                            stable_weight_decay=group["stable_weight_decay"],
+                            eps=group["eps"],
+                            eps2=group["eps2"],
+                            eps_floor=group["eps_floor"],
+                            adaptive_clip=group["adaptive_clip"],
+                            adaptive_clip_eps=group["adaptive_clip_eps"],
+                            adaptive_clip_type=group["adaptive_clip_type"],
+                            debias_beta1=group["debias_beta1"],
+                            debias_beta2=group["debias_beta2"],
+                            mars_gamma=group["mars_gamma"],
+                            use_muon_pp=group["use_muon_pp"],
+                            r=group["r"],
+                            weight_lr_power=group["weight_lr_power"],
+                            sf_lr_max=state["sf_lr_max"],
+                            sf_weight_sum=state["sf_weight_sum"],
+                            swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'],
+                            swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"],
+                        )
+
+                        if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                            swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
+
+                if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(math.sqrt(swd_second_moment_group_sum / swd_param_size_sum), device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
+
+        return loss
+
+
+# this will work with any optim state tensor subclass that implements aten.lerp.Scalar and aten.copy_.default
+# and param tensor subclass that implements aten.add_.Tensor, and aten.addcdiv_.default
+def single_param_ADOPTAOScheduleFree(
+    p: torch.Tensor,
+    grad: torch.Tensor,
+    step: torch.Tensor,
+    z: torch.Tensor,
+    exp_avg_sq: torch.Tensor,
+    previous_grad: Optional[torch.Tensor],
+    lr: torch.Tensor,
+    beta1: float,
+    beta2: float,
+    weight_decay: float,
+    weight_decouple: bool,
+    stable_weight_decay: bool,
+    eps: float,
+    eps2: float,
+    eps_floor: Optional[float],
+    adaptive_clip: float,
+    adaptive_clip_eps: float,
+    adaptive_clip_type: NORM_TYPE,
+    debias_beta1: bool,
+    debias_beta2: bool,
+    mars_gamma: float,
+    use_muon_pp: bool,
+    r: float,
+    weight_lr_power: float,
+    sf_lr_max: torch.Tensor,
+    sf_weight_sum: torch.Tensor,
+    swd_second_moment_mean_sqrt: torch.Tensor,
+    swd_second_moment_parameter_sum: torch.Tensor,
+):
+    # compute in FP32 for accurate calculations
+    p_f32 = p.float()
+    grad_f32 = grad.float()
+
+    bias_correction1: float = 1.0
+    if debias_beta1:
+        bias_correction1 = 1 - beta1**step
+
+    bias_correction2: float = 1.0
+    if debias_beta2:
+        bias_correction2 = 1 - beta2**step
+
+    sf_lr_max.copy_(max(lr, sf_lr_max))
+
+    lr_step_size = lr / bias_correction1
+    lr_max_step_size = sf_lr_max / bias_correction1
+
+    weight = (step ** r) * (lr_max_step_size ** weight_lr_power)
+    sf_weight_sum.copy_(sf_weight_sum + weight)
+
+    checkpoint = weight / sf_weight_sum
+
+    adaptive_y_lr = lr_step_size * (beta1 * (1.0 - checkpoint) - 1)
+
+    #Make a fp32 copies of state
+    exp_avg_sq_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(exp_avg_sq.float())
+    z_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(z.float())
+
+    if mars_gamma > 0:
+        # MARS Calculate cₜ (gradient with correction term)
+        previous_grad_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(previous_grad.float())
+        temp_grad_f32 = grad_f32.clone().detach()
+        grad_f32.copy_((grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32))
+
+        if previous_grad.dtype == torch.bfloat16:
+            previous_grad.copy_(_fp32_to_bf16_sr(temp_grad_f32))
+        else:
+            previous_grad.copy_(temp_grad_f32)
+
+    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+        grad_f32.copy_(newton_schulz(grad_f32))
+
+    if adaptive_clip > 0:
+        grad_f32.copy_(agc(p_f32, grad_f32, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+
+    if eps_floor is not None and eps_floor < eps:
+        rms_grad = grad_f32.pow(2).mean().sqrt_()
+        curr_eps = max(min(eps, eps2 * rms_grad), eps_floor) # Set a floor for eps to avoid NaN
+    else:
+        curr_eps = eps
+
+    de_nom = exp_avg_sq_f32.div(bias_correction2).sqrt().add_(curr_eps)
+
+    adopt_clip = (step-1)**0.25
+    normed_grad = grad_f32.div(de_nom).clamp_(-adopt_clip, adopt_clip)
+
+    exp_avg_sq_f32.lerp_(grad_f32.square(), 1.0 - beta2)
+
+    # Weight decay
+    if weight_decay > 0 and weight_decouple:
+        if stable_weight_decay:
+            swd_scaling = 1.0 / swd_second_moment_mean_sqrt
+        else:
+            swd_scaling = 1.0
+
+        p_f32.mul_(1.0 - weight_decay * lr * swd_scaling)
+    elif weight_decay > 0:
+        normed_grad.add_(p_f32, alpha=weight_decay)
+
+    p_f32.lerp_(z_f32, weight=checkpoint)
+    p_f32.add_(normed_grad, alpha=adaptive_y_lr)
+
+    z_f32.add_(normed_grad, alpha=-lr_step_size)
+
+    if weight_decay > 0 and stable_weight_decay:
+        swd_second_moment_parameter_sum.copy_(exp_avg_sq_f32.sum())
+
+    if exp_avg_sq.dtype == torch.bfloat16:
+        exp_avg_sq.copy_(_fp32_to_bf16_sr(exp_avg_sq_f32))
+        z.copy_(_fp32_to_bf16_sr(z_f32))
+    else:
+        exp_avg_sq.copy_(exp_avg_sq_f32)
+        z.copy_(z_f32)
+
+    if p.dtype == torch.bfloat16:
+        p.copy_(_fp32_to_bf16_sr(p_f32))
+    else:
+        p.copy_(p_f32) 
+
+class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
+    r"""Compass supporting a number of optional features and quantization via torchao. 
+        Requires Triton is fully setup for your environment, i.e. CUDA framework is installed with paths setup on Linux,
+        and sets outlined at https://github.com/woct0rdho/triton-windows for Windows.
+    Arguments:
+        params (iterable):
+            Iterable of parameters to optimize or dicts defining
+            parameter groups.
+        lr (float):
+            Learning rate parameter (default 1e-4).
+        betas (float, float):
+            coefficients for momentum and exponential moving average squared (default: 0.9, 0.999).
+        eps (float):
+            Term the denominator is minimally clamped to, to improve numerical stability. (default: 1e-6).
+        eps2 (float):
+            Term to multiple the RMS of the grad to calculate adaptive eps. (default: 1e-2).
+        eps_floor (float):
+            Term to set a floor for the eps, to prevent NaNs. (default: None, disabling adaptive eps).
+        weight_decay (float):
+            Weight decay at y, i.e. a L2 penalty (default: 0.0).
+        stable_weight_decay (bool): 
+            Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
+        adaptive_clip (float):
+            Adaptive clip value to apply to the gradient first, before any further processing or use by the optimizer. (default: 1.0).
+        adaptive_clip_eps (float):
+            The eps for adaptive gradient clipping, provides a minimum to avoid parameters 
+            not getting updates due to very small gradients being clipped excessively. (default: 1e-3).
+        adaptive_clip_type (string):
+            The type of clipping, can be unit or layer. If done at the unit level can change
+            the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
+            Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
+            Valid values: layer, unit (default: layer).
+        use_muon_pp (boolean):
+            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
+            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
+            May not work well with small batch sizes or finetuning.
+            (default: False)
+        mars_gamma (float):
+            Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
+            larger values apply more correction, and will require higher LRs to offset. Zero disables. (default: 0.0)
+        debias_beta1 (bool):
+            Apply bias correction to step size (LR). (Default: True)
+        debias_beta2 (bool):
+            Apply bias correction to denominator of updates (adaptive LR). (Default: True)
+        compass_second_moment_smoothing (bool):
+            Updates the second moment (i.e. ema / fim) with the Compass smoothed gradient. (Default: True)
+        block_size (int):
+            Controls the block sized used during quantization, will be automatically determined by state_precision if not set. 
+            Advise not setting unless you have a clear reason to. (Default: None)
+        min_quant_size (int):
+            Controls the minimum size a tensor must be to be subject to quantization. 
+            Advise not setting unless you have a clear reason to. (Default: 4096)
+        state_precision (string):
+            Determines the precision states should be stored at in the optimizer. Vaid values are 'parameter', 'q8bit', 'q4bit', 'qfp8'.
+            Parameter sets the state to the same type as the parameter, i.e. no quantization is applied. (Default: parameter) 
+        r (float): 
+            ScheduleFree: use polynomial weighting in the average with power r.  (Default: 0.0)
+        weight_lr_power (float): 
+            ScheduleFree: during warmup, the weights in the average will be equal to lr raised to this power.
+            set to 0 for no weighting. (Default: 2.0)
+    """
+
+    def __init__(
+        self,
+        params,
+        lr = 5e-4,
+        betas=(0.9, 0.99),
+        eps: float = 1e-6,
+        eps2: float = 1e-2,
+        eps_floor: Optional[float] = None,
+        weight_decay: float = 0.0,
+        weight_decouple: bool = False,
+        stable_weight_decay: bool = False,
+        adaptive_clip: float = 1.0,
+        adaptive_clip_eps: float = 1e-3,
+        adaptive_clip_type: NORM_TYPE = 'layer',
+        debias_beta1: bool = True,
+        debias_beta2: bool = True,
+        mars_gamma: float = 0.0,
+        use_muon_pp: bool = False,
+        r: float = 0.0,
+        weight_lr_power: float = 2.0,
+        *,
+        block_size: Optional[int] = None,
+        min_quant_size: int = 4096,
+        state_precision: STATE_PRECISION = 'parameter',
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            params=params,
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            eps2=eps2,
+            eps_floor=eps_floor,
+            weight_decay=weight_decay,
+            weight_decouple=weight_decouple,
+            stable_weight_decay=stable_weight_decay,
+            adaptive_clip=adaptive_clip,
+            adaptive_clip_eps=adaptive_clip_eps,
+            adaptive_clip_type=adaptive_clip_type,
+            debias_beta1=debias_beta1,
+            debias_beta2=debias_beta2,
+            mars_gamma=mars_gamma,
+            use_muon_pp=use_muon_pp,
+            r=r,
+            weight_lr_power=weight_lr_power,
+            block_size=block_size,
+            min_quant_size=min_quant_size,
+            state_precision=state_precision,
+        )
