@@ -1398,23 +1398,20 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                 if len(state) == 0:
                     state['z'] = p.clone()
                     state['exp_avg_sq'] = torch.zeros_like(p)
-                    state['previous_grad'] = -p.grad.to(dtype=p.dtype, copy=True).detach()
+                    state['previous_grad'] = p.grad.to(dtype=p.dtype, copy=True).detach()
 
                 z, exp_avg_sq = state['z'], state['exp_avg_sq']
-                grad_diff = state['previous_grad']
+                previous_grad = state['previous_grad']
 
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
                     z, exp_avg_sq = z.to(torch.float32), exp_avg_sq.to(torch.float32)
-                    grad_diff = grad_diff.to(torch.float32)
+                    previous_grad = previous_grad.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
-                grad_diff.add_(grad)
-
                 # MARS Calculate cₜ (gradient with correction term)
-                correction = (gamma * (beta1 / (1.0 - beta1))) * grad_diff
-                c_t = grad + correction
+                c_t = (grad - previous_grad).mul_(gamma * (beta1 / (1.0 - beta1))).add_(grad)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -1461,10 +1458,10 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     copy_stochastic_(state['z'], z)
                     copy_stochastic_(state['exp_avg_sq'], exp_avg_sq)
-                    copy_stochastic_(state['previous_grad'], -grad)
+                    copy_stochastic_(state['previous_grad'], grad)
                     copy_stochastic_(p, p_fp32)
                 else:
-                    state['previous_grad'].copy_(-grad)
+                    state['previous_grad'].copy_(grad)
 
         return loss
     
