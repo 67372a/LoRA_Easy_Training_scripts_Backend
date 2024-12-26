@@ -47,7 +47,12 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
         # copy the higher 16 bit into the target tensor
         target.copy_(result.view(dtype=torch.float32))
     
-def agc(p: torch.Tensor, grad: torch.Tensor, agc_eps: float, agc_clip_val: float, eps: float = 1e-37, norm_type: NORM_TYPE = 'unit') -> torch.Tensor:
+def agc(p: torch.Tensor, 
+        grad: torch.Tensor, 
+        agc_clip_val: float, 
+        agc_eps: float = 1e-3, 
+        eps: float = 1e-37, 
+        norm_type: NORM_TYPE = 'unit') -> torch.Tensor:
     r"""Clip gradient values in excess of the norm.
         Clip updates to be at most clipping * parameter_norm.
 

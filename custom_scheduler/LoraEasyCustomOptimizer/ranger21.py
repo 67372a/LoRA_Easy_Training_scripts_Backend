@@ -10,10 +10,9 @@ from torch.nn.functional import softplus
 from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from pytorch_optimizer.optimizer.agc import agc
 from pytorch_optimizer.optimizer.gc import centralize_gradient
 from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
-from .utils import copy_stochastic_
+from .utils import copy_stochastic_, agc
 
 
 class Ranger21(BaseOptimizer):
@@ -236,7 +235,7 @@ class Ranger21(BaseOptimizer):
                     variance_ma = variance_ma.to(torch.float32)
 
                 # Apply Adaptive Gradient Clipping (AGC)
-                grad.copy_(agc(p_fp32, grad, self.agc_eps, self.agc_clipping_value))
+                grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=self.agc_clipping_value, agc_eps=self.agc_eps, norm_type='unit'))
 
                 # Apply gradient centralization & normalization
                 centralize_gradient(grad, gc_conv_only=False)

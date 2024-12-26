@@ -76,6 +76,13 @@ class OptimState8bit(TorchAOBaseTensor):
         scale = torch.zeros(codes.numel() // block_size, device=device)
         qmap = torch.tensor(QMAP_SIGNED if signed else QMAP_UNSIGNED, device=device)
         return cls(codes, scale, qmap, signed)
+    
+    @classmethod
+    def ones(cls, shape, signed: bool = True, block_size: int = 256, device=None):
+        codes = torch.ones(shape, dtype=torch.uint8, device=device)
+        scale = torch.ones(codes.numel() // block_size, device=device)
+        qmap = torch.tensor(QMAP_SIGNED if signed else QMAP_UNSIGNED, device=device)
+        return cls(codes, scale, qmap, signed)
 
     def __repr__(self):
         return (

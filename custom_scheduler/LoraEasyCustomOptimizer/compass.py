@@ -223,7 +223,7 @@ class Compass(BaseOptimizer):
                 if self.clip > 0.0:
                     if self.adaptive_clipping:
                         # Apply Adaptive Gradient Clipping (AGC)
-                        grad.copy_(agc(p_fp32, grad, self.adaptive_clip_eps, self.clip))
+                        grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=self.clip, agc_eps=self.adaptive_clip_eps, norm_type='layer'))
                     else:
                         # Clip the gradient 
                         grad.div_((self.get_rms(grad).add_(eps) / self.clip).clamp_(min=1.0))
@@ -610,7 +610,7 @@ class CompassPlus(BaseOptimizer):
 
                 # Apply Adaptive Gradient Clipping (AGC)
                 if self.clip > 0.0:
-                    grad.copy_(agc(p_fp32, grad, self.clip_eps, self.clip))
+                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=self.clip, agc_eps=self.clip_eps, norm_type='layer'))
 
                 # Apply gradient centralization & normalization
                 if self.centralize_gradients in {1,3}:
@@ -1314,7 +1314,7 @@ class CompassADOPT(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type='layer'))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -1636,7 +1636,7 @@ class CompassADOPTMARS(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                    c_t.copy_(agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -1918,7 +1918,7 @@ class _CompassBase(Optimizer):
                             grad_f32.copy_(newton_schulz(grad_f32))
 
                         if adaptive_clip > 0:
-                            grad_f32.copy_(agc(p.float(), grad_f32, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                            grad_f32.copy_(agc(p=p.float(), grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
                         
                         if state["exp_avg_sq"].dtype == torch.bfloat16:
                             state["exp_avg_sq"].copy_(_fp32_to_bf16_sr(grad_f32.square()))
@@ -2033,7 +2033,7 @@ def single_param_compass(
         grad_f32.copy_(newton_schulz(grad_f32))
 
     if adaptive_clip > 0:
-        grad_f32.copy_(agc(p_f32, grad_f32, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+        grad_f32.copy_(agc(p_f32, grad_f32, adaptive_clip, adaptive_clip_eps, norm_type=adaptive_clip_type))
 
     if eps_floor is not None and eps_floor < eps:
         rms_grad = grad_f32.pow(2).mean().sqrt_()

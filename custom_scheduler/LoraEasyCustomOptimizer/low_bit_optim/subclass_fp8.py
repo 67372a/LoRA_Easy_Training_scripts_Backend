@@ -73,6 +73,12 @@ class OptimStateFp8(TorchAOBaseTensor):
         codes = torch.zeros(shape, dtype=DTYPE, device=device)
         scale = torch.zeros(codes.numel() // block_size, device=device)
         return cls(codes, scale)
+    
+    @classmethod
+    def ones(cls, shape, block_size: int = 256, device=None):
+        codes = torch.ones(shape, dtype=DTYPE, device=device)
+        scale = torch.ones(codes.numel() // block_size, device=device)
+        return cls(codes, scale)
 
     def __repr__(self):
         return (

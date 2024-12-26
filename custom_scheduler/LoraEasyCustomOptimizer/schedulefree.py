@@ -494,7 +494,7 @@ class ADOPTScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -809,7 +809,7 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -1111,7 +1111,7 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -1418,7 +1418,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                    c_t.copy_(agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -1698,7 +1698,7 @@ class FADOPTScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -2026,7 +2026,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -2338,7 +2338,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p_fp32, grad, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -2676,11 +2676,11 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 c_t = (grad - previous_grad).mul_(gamma * (beta1 / (1.0 - beta1))).add_(grad)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t = newton_schulz(c_t)
+                    c_t.copy_(newton_schulz(c_t))
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    c_t.copy_(agc(p_fp32, c_t, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                    c_t.copy_(agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -3000,7 +3000,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             grad_f32.copy_(newton_schulz(grad_f32))
 
                         if adaptive_clip > 0:
-                            grad_f32.copy_(agc(p.float(), grad_f32, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+                            grad_f32.copy_(agc(p=p.float(), grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
                         
                         if state["exp_avg_sq"].dtype == torch.bfloat16:
                             state["exp_avg_sq"].copy_(_fp32_to_bf16_sr(grad_f32.square()))
@@ -3120,7 +3120,7 @@ def single_param_ADOPTAOScheduleFree(
         grad_f32.copy_(newton_schulz(grad_f32))
 
     if adaptive_clip > 0:
-        grad_f32.copy_(agc(p_f32, grad_f32, adaptive_clip_eps, adaptive_clip, norm_type=adaptive_clip_type))
+        grad_f32.copy_(agc(p=p_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
 
     if eps_floor is not None and eps_floor < eps:
         rms_grad = grad_f32.pow(2).mean().sqrt_()
