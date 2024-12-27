@@ -121,7 +121,7 @@ class FCompass(Optimizer):
                     state["momentum"] = torch.zeros_like(p.data)
                     state['max_ema_squared'] = torch.zeros_like(p.data)
                     # Fisher Information Matrix
-                    state["fim"] = torch.ones_like(p.data)
+                    state['fim'] = torch.ones_like(p.data)
 
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:

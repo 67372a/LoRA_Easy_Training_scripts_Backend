@@ -1683,7 +1683,7 @@ class FADOPTScheduleFree(BaseOptimizer):
 
                 if len(state) == 0:
                     state['z'] = p.clone()
-                    state['fim'] = torch.zeros_like(p)
+                    state['fim'] = torch.ones_like(p)
 
                 z, fim = state['z'], state['fim']
 
@@ -1747,7 +1747,7 @@ class FADOPTScheduleFree(BaseOptimizer):
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     copy_stochastic_(state["z"], z)
-                    copy_stochastic_(state["fim"], fim)
+                    copy_stochastic_(state['fim'], fim)
                     copy_stochastic_(p, p_fp32)
 
         return loss
@@ -2011,7 +2011,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
                 if len(state) == 0:
                     state['z'] = p.clone()
                     state['fim'] = torch.ones_like(p)
-                    state['exp_avg_slow'] = torch.zeros_like(p)
+                    state['exp_avg_slow'] = torch.ones_like(p)
 
                 z, fim, exp_avg_slow = state['z'], state['fim'], state['exp_avg_slow']
 
@@ -2084,7 +2084,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     copy_stochastic_(state["z"], z)
-                    copy_stochastic_(state["fim"], fim)
+                    copy_stochastic_(state['fim'], fim)
                     copy_stochastic_(state["exp_avg_slow"], exp_avg_slow)
                     copy_stochastic_(p, p_fp32)
 
@@ -2401,7 +2401,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     copy_stochastic_(state["z"], z)
-                    copy_stochastic_(state["fim"], fim)
+                    copy_stochastic_(state['fim'], fim)
                     copy_stochastic_(state['exp_avg_diff'], exp_avg_diff)
                     copy_stochastic_(state['previous_grad'], -grad)
                     copy_stochastic_(p, p_fp32)
@@ -2781,9 +2781,11 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             elif state_precision == 'q4bit':
                 block_size = 128
             elif state_precision == 'qfp8':
-                block_size = 0
+                block_size = 256
             else:
                 raise NotImplementedError
+            
+        self.train_mode = False
 
         defaults = dict(
             lr=torch.tensor(lr),
@@ -2807,7 +2809,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         self.block_size = block_size
         self.min_quant_size = min_quant_size
         self.state_precision = state_precision
-        self.train_mode = state_precision
 
     def __setstate__(self, state):
         super().__setstate__(state)
@@ -2889,7 +2890,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     for p in group['params']:
                         state = self.state[p]
                         if 'z' in state:
-                            torch.compile(self._eval, fullgraph=True, dynamic=False)(p=p, z=state["z"], beta1=group['betas'][0])
+                            torch.compile(self._eval, fullgraph=True, dynamic=False)(p=p.detach(), z=state["z"], beta1=group['betas'][0])
                     self.train_mode = False
 
     @staticmethod
@@ -2914,7 +2915,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     for p in group['params']:
                         state = self.state[p]
                         if 'z' in state:
-                            torch.compile(self._train, fullgraph=True, dynamic=False)(p=p, z=state["z"], beta1=group['betas'][0])
+                            torch.compile(self._train, fullgraph=True, dynamic=False)(p=p.detach(), z=state["z"], beta1=group['betas'][0])
                     self.train_mode = True
 
     @torch.no_grad()
@@ -3005,7 +3006,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             state["exp_avg_sq"].copy_(grad_f32.square())
 
                         if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                            state["swd_second_moment_parameter_sum"].copy(grad_f32.square().sum())
+                            state["swd_second_moment_parameter_sum"].copy_(exp_avg_sq_f32.div(bias_correction2).sum())
                     else:
                         # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
                         # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
@@ -3149,7 +3150,7 @@ def single_param_ADOPTAOScheduleFree(
     z_f32.add_(normed_grad, alpha=-lr)
 
     if weight_decay > 0 and stable_weight_decay:
-        swd_second_moment_parameter_sum.copy_(exp_avg_sq_f32.sum())
+        swd_second_moment_parameter_sum.copy_(exp_avg_sq_f32.div(bias_correction2).sum())
 
     if exp_avg_sq.dtype == torch.bfloat16:
         exp_avg_sq.copy_(_fp32_to_bf16_sr(exp_avg_sq_f32))

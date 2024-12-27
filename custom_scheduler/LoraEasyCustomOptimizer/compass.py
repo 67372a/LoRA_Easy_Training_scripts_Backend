@@ -1758,7 +1758,7 @@ class _CompassBase(Optimizer):
             elif state_precision == 'q4bit':
                 block_size = 128
             elif state_precision == 'qfp8':
-                block_size = 0
+                block_size = 256
             else:
                 raise NotImplementedError
 
