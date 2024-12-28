@@ -235,7 +235,7 @@ class Ranger21(BaseOptimizer):
                     variance_ma = variance_ma.to(torch.float32)
 
                 # Apply Adaptive Gradient Clipping (AGC)
-                grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=self.agc_clipping_value, agc_eps=self.agc_eps, norm_type='unit'))
+                grad = agc(p=p_fp32, grad=grad, agc_clip_val=self.agc_clipping_value, agc_eps=self.agc_eps, norm_type='unit')
 
                 # Apply gradient centralization & normalization
                 centralize_gradient(grad, gc_conv_only=False)

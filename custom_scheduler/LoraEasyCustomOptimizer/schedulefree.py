@@ -494,7 +494,7 @@ class ADOPTScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -809,7 +809,7 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -1111,7 +1111,7 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -1415,7 +1415,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    c_t.copy_(agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -1695,7 +1695,7 @@ class FADOPTScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -2023,7 +2023,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -2335,7 +2335,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -2673,11 +2673,11 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 c_t = (grad - previous_grad).mul_(gamma * (beta1 / (1.0 - beta1))).add_(grad)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t.copy_(newton_schulz(c_t))
+                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    c_t.copy_(agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -2755,6 +2755,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         use_muon_pp,
         r,
         weight_lr_power,
+        fisher,
         *,
         block_size,
         min_quant_size,
@@ -2804,6 +2805,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             use_muon_pp=use_muon_pp,
             r=r,
             weight_lr_power=weight_lr_power,
+            fisher=fisher,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -2828,6 +2830,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("weight_lr_power", 2.0)
             group.setdefault("swd_second_moment_mean_sqrt", None)
             group.setdefault("train_mode", False)
+            group.setdefault("fisher", False)
 
     # bring your own function to create zero-filled subclass
     def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
@@ -2841,15 +2844,34 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             return OptimStateFp8.zeros(p.shape, block_size, p.device)
         else:
             raise NotImplementedError
+        
+    # bring your own function to create zero-filled subclass
+    def _subclass_ones(self, p: torch.Tensor, signed: bool, block_size: int):
+        if self.state_precision == 'parameter':
+            return torch.ones_like(p)
+        elif self.state_precision == 'q8bit':
+            return OptimState8bit.ones(p.shape, signed, block_size, p.device)
+        elif self.state_precision == 'q4bit':
+            return OptimState4bit.ones(p.shape, signed, block_size, p.device)
+        elif self.state_precision == 'qfp8':
+            return OptimStateFp8.ones(p.shape, block_size, p.device)
+        else:
+            raise NotImplementedError
 
-    def _new_buffer(self, p: torch.Tensor, signed: bool):
+    def _new_buffer(self, p: torch.Tensor, signed: bool, init_value: str = 'zeros'):
         local_p = p.to_local() if isinstance(p, DTensor) else p
 
         # only quantize tensors >= min_quant_size values, 4096 original default here and in bitsandbytes
         if self.block_size != 0 and (local_p.numel() >= self.min_quant_size and local_p.numel() % self.block_size == 0):
-            out = self._subclass_zeros(local_p, signed, self.block_size)
+            if init_value == 'zeros':
+                out = self._subclass_zeros(local_p, signed, self.block_size)
+            elif init_value == 'ones':
+                out = self._subclass_ones(local_p, signed, self.block_size)
         else:
-            out = torch.zeros_like(local_p)
+            if init_value == 'zeros':
+                out = torch.zeros_like(local_p)
+            elif init_value == 'ones':
+                out = torch.ones_like(local_p)
 
         # wrap subclass in DTensor as needed
         # NOTE: local tensor may have different shapes across ranks.
@@ -2876,10 +2898,10 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
 
         p_f32.data.lerp_(end=z_f32, weight=1.0 - 1.0 / beta1)
 
-        if z.dtype == torch.bfloat16:
-            z.copy_(_fp32_to_bf16_sr(z_f32))
+        if p.dtype == torch.bfloat16:
+            p.copy_(_fp32_to_bf16_sr(p_f32))
         else:
-            z.copy_(z_f32)
+            p.copy_(p_f32)
 
     
     @torch.no_grad()
@@ -2902,10 +2924,10 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
 
         p_f32.data.lerp_(end=z_f32, weight=1.0 - beta1)
 
-        if z.dtype == torch.bfloat16:
-            z.copy_(_fp32_to_bf16_sr(z_f32))
+        if p.dtype == torch.bfloat16:
+            p.copy_(_fp32_to_bf16_sr(p_f32))
         else:
-            z.copy_(z_f32)
+            p.copy_(p_f32)
 
     @torch.no_grad()
     def train(self):
@@ -2942,6 +2964,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                 mars_gamma = group["mars_gamma"]
                 beta1 = group["betas"][0]
                 use_muon_pp = group["use_muon_pp"]
+                fisher = group["fisher"]
                 
                 for p in group["params"]:
                     if p.grad is None:
@@ -2961,18 +2984,23 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         state["step"] = torch.tensor(0, device=p.device, dtype=torch.int32)
                         state["swd_second_moment_parameter_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
                         state["z"] = self._new_buffer(p, True)
-                        state["z"].copy_(p.float())
-                        state["exp_avg_sq"] = self._new_buffer(p, False)
+                        if state["z"].dtype == torch.bfloat16:
+                            state["z"].copy_(_fp32_to_bf16_sr(p.float()))
+                        else:
+                            state["z"].copy_(p.float())
+
+                        state["exp_avg_sq"] = self._new_buffer(p, False, 'ones' if fisher else 'zeros')
                         state["sf_lr_max"] = torch.tensor(-1.0, device=p.device, dtype=torch.float32)
                         state["sf_weight_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
                         if mars_gamma > 0:
                             state["previous_grad"] = self._new_buffer(p, True)
-                            state["previous_grad"].copy_(p.grad.float())
 
-                    state["step"] += 1
+                            if state["previous_grad"].dtype == torch.bfloat16:
+                                state["previous_grad"].copy_(_fp32_to_bf16_sr(p.grad.float()))
+                            else:
+                                state["previous_grad"].copy_(p.grad.float())
 
-                    if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        swd_param_size_sum += p.numel()
+                    state["step"] = state["step"].add_(1)
 
                     if not isinstance(group["lr"], torch.Tensor):
                         raise RuntimeError(
@@ -2980,14 +3008,25 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             "optim.param_groups[0]['lr'].fill_(new_lr)"
                         )
                     
+                    if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                        swd_param_size_sum += p.numel()
+
+                    sf_lr_max = state['sf_lr_max'].copy_(torch.max(group["lr"], state['sf_lr_max']))
+                    weight = (state['step'] ** group['r']) * (sf_lr_max ** group['weight_lr_power'])
+                    sf_weight_sum = state['sf_weight_sum'].copy_(state['sf_weight_sum'] + weight)
+
+                    checkpoint = (weight / sf_weight_sum).to(device=p.device, dtype=torch.float32) if sf_weight_sum != 0.0 else torch.tensor(0.0, device=p.device, dtype=torch.float32)
+                    adaptive_y_lr = group["lr"] * (beta1 * (1.0 - checkpoint) - 1).to(device=p.device, dtype=torch.float32)
+                    adopt_clip = ((state['step'].sub(1))**0.25).to(device=p.device, dtype=torch.float32)
+                    
                     if state["step"] == 1:
                         grad_f32 = grad.float()
 
                         if mars_gamma > 0:
                             # MARS Calculate cₜ (gradient with correction term)
-                            previous_grad_f32 = torch.zeros_like(p.float(), dtype=torch.float32).copy_(state["previous_grad"].float())
+                            previous_grad_f32 = torch.zeros_like(grad_f32, dtype=torch.float32).copy_(state["previous_grad"].float())
                             temp_grad_f32 = grad_f32.clone().detach()
-                            grad_f32.copy_((grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32))
+                            grad_f32 = (grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32)
 
                             if state["previous_grad"].dtype == torch.bfloat16:
                                 state["previous_grad"].copy_(_fp32_to_bf16_sr(temp_grad_f32))
@@ -2995,18 +3034,23 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                                 state["previous_grad"].copy_(temp_grad_f32)
 
                         if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                            grad_f32.copy_(newton_schulz(grad_f32))
+                            grad_f32 = newton_schulz(grad_f32)
 
                         if adaptive_clip > 0:
-                            grad_f32.copy_(agc(p=p.float(), grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                            grad_f32 = agc(p=p.float(), grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
                         
-                        if state["exp_avg_sq"].dtype == torch.bfloat16:
-                            state["exp_avg_sq"].copy_(_fp32_to_bf16_sr(grad_f32.square()))
-                        else:
-                            state["exp_avg_sq"].copy_(grad_f32.square())
+                        #Make a fp32 copy of exp_avg_sq_f32
+                        exp_avg_sq_f32 = torch.zeros_like(p.float(), dtype=torch.float32).copy_(state["exp_avg_sq"].float())
+                        exp_avg_sq_f32.add_(grad_f32.square())
 
-                        if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                            state["swd_second_moment_parameter_sum"].copy_(exp_avg_sq_f32.div(bias_correction2).sum())
+                        if fisher:
+                            # ADOPT clip
+                            exp_avg_sq_f32.clamp_(-adopt_clip, adopt_clip)
+
+                        if state["exp_avg_sq"].dtype == torch.bfloat16:
+                            state["exp_avg_sq"].copy_(_fp32_to_bf16_sr(exp_avg_sq_f32))
+                        else:
+                            state["exp_avg_sq"].copy_(exp_avg_sq_f32)
                     else:
                         # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
                         # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
@@ -3018,7 +3062,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             step=state["step"],
                             z=state["z"],
                             exp_avg_sq=state["exp_avg_sq"],
-                            previous_grad=state.get("previous_grad", None),
+                            previous_grad=state["previous_grad"] if mars_gamma > 0 else None,
                             lr=group["lr"],
                             beta1=group["betas"][0],
                             beta2=group["betas"][1],
@@ -3034,20 +3078,24 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             debias_beta2=group["debias_beta2"],
                             mars_gamma=group["mars_gamma"],
                             use_muon_pp=group["use_muon_pp"],
-                            r=group["r"],
-                            weight_lr_power=group["weight_lr_power"],
-                            sf_lr_max=state["sf_lr_max"],
-                            sf_weight_sum=state["sf_weight_sum"],
+                            fisher=group["fisher"],
+                            adopt_clip=adopt_clip,
+                            sf_checkpoint=checkpoint,
+                            sf_adaptive_y_lr=adaptive_y_lr,
                             swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'],
                             swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"],
                         )
 
-                    if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
+                        if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                            swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
 
                 if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(math.sqrt(swd_second_moment_group_sum / swd_param_size_sum), device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
-
+                    swd_second_moment_mean_sqrt = math.sqrt(swd_second_moment_group_sum / swd_param_size_sum)
+                    if swd_second_moment_mean_sqrt > 0:
+                        group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(swd_second_moment_mean_sqrt, device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
+                    else:
+                        group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(1.0, device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
+                    
         return loss
 
 
@@ -3075,10 +3123,10 @@ def single_param_ADOPTAOScheduleFree(
     debias_beta2: bool,
     mars_gamma: float,
     use_muon_pp: bool,
-    r: float,
-    weight_lr_power: float,
-    sf_lr_max: torch.Tensor,
-    sf_weight_sum: torch.Tensor,
+    fisher: bool,
+    adopt_clip: torch.Tensor,
+    sf_checkpoint: torch.Tensor,
+    sf_adaptive_y_lr: torch.Tensor,
     swd_second_moment_mean_sqrt: torch.Tensor,
     swd_second_moment_parameter_sum: torch.Tensor,
 ):
@@ -3087,17 +3135,12 @@ def single_param_ADOPTAOScheduleFree(
     grad_f32 = grad.float()
 
     bias_correction2: float = 1.0
+    current_beta2 = beta2
     if debias_beta2:
-        bias_correction2 = 1 - beta2**step
-
-    sf_lr_max.copy_(max(lr, sf_lr_max))
-
-    weight = (step ** r) * (sf_lr_max ** weight_lr_power)
-    sf_weight_sum.copy_(sf_weight_sum + weight)
-
-    checkpoint = weight / sf_weight_sum
-
-    adaptive_y_lr = lr * (beta1 * (1.0 - checkpoint) - 1)
+        if fisher:
+            current_beta2 = ((beta2**step - beta2) / (beta2**step - 1.0)) ** (1/2)
+        else:
+            bias_correction2 = 1.0 - beta2**step
 
     #Make a fp32 copies of state
     exp_avg_sq_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(exp_avg_sq.float())
@@ -3105,9 +3148,9 @@ def single_param_ADOPTAOScheduleFree(
 
     if mars_gamma > 0:
         # MARS Calculate cₜ (gradient with correction term)
-        previous_grad_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(previous_grad.float())
+        previous_grad_f32 = torch.zeros_like(grad_f32, dtype=torch.float32).copy_(previous_grad.float())
         temp_grad_f32 = grad_f32.clone().detach()
-        grad_f32.copy_((grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32))
+        grad_f32 = (grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32)
 
         if previous_grad.dtype == torch.bfloat16:
             previous_grad.copy_(_fp32_to_bf16_sr(temp_grad_f32))
@@ -3115,10 +3158,10 @@ def single_param_ADOPTAOScheduleFree(
             previous_grad.copy_(temp_grad_f32)
 
     if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-        grad_f32.copy_(newton_schulz(grad_f32))
+        grad_f32 = newton_schulz(grad_f32)
 
     if adaptive_clip > 0:
-        grad_f32.copy_(agc(p=p_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+        grad_f32 = agc(p=p_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
     if eps_floor is not None and eps_floor < eps:
         rms_grad = grad_f32.pow(2).mean().sqrt_()
@@ -3126,12 +3169,19 @@ def single_param_ADOPTAOScheduleFree(
     else:
         curr_eps = eps
 
-    de_nom = exp_avg_sq_f32.div(bias_correction2).sqrt().add_(curr_eps)
+    if fisher:
+        fim_base = exp_avg_sq_f32.sqrt().add_(curr_eps)
+        exp_avg_sq_f32.mul_(current_beta2).addcmul_(grad_f32, grad_f32, value=1 - current_beta2).clamp_(-adopt_clip, adopt_clip)
 
-    adopt_clip = (step-1)**0.25
-    normed_grad = grad_f32.div(de_nom).clamp_(-adopt_clip, adopt_clip)
+        grad_nat = grad_f32.div(fim_base)
+        rms = grad_nat.pow(2).mean().sqrt_()
+        divisor = max(1.0, rms) / 1.0
+        update = grad_nat.div_(divisor)
+    else:
+        de_nom = exp_avg_sq_f32.div(bias_correction2).sqrt().add_(curr_eps)
+        exp_avg_sq_f32.mul_(beta2).addcmul_(grad_f32, grad_f32, value=1 - beta2)
 
-    exp_avg_sq_f32.lerp_(grad_f32.square(), 1.0 - beta2)
+        update = grad_f32.div(de_nom).clamp_(-adopt_clip, adopt_clip)
 
     # Weight decay
     if weight_decay > 0 and weight_decouple:
@@ -3142,12 +3192,21 @@ def single_param_ADOPTAOScheduleFree(
 
         p_f32.mul_(1.0 - weight_decay * lr * swd_scaling)
     elif weight_decay > 0:
-        normed_grad.add_(p_f32, alpha=weight_decay)
+        if fisher:
+            grad_weights = p_f32.div(fim_base)
 
-    p_f32.lerp_(z_f32, weight=checkpoint)
-    p_f32.add_(normed_grad, alpha=adaptive_y_lr)
+            rms = grad_weights.pow(2).mean().sqrt_()
+            divisor = max(1.0, rms) / 1.0 #fisher_clip
+            grad_weights.div_(divisor)
 
-    z_f32.add_(normed_grad, alpha=-lr)
+            update.add_(grad_weights, alpha=weight_decay)
+        else:
+            update.add_(p_f32, alpha=weight_decay)
+
+    p_f32.lerp_(end=z_f32, weight=sf_checkpoint)
+    p_f32.add_(update, alpha=sf_adaptive_y_lr)
+
+    z_f32.add_(update, alpha=-lr)
 
     if weight_decay > 0 and stable_weight_decay:
         swd_second_moment_parameter_sum.copy_(exp_avg_sq_f32.div(bias_correction2).sum())
@@ -3228,7 +3287,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         self,
         params,
         lr = 5e-4,
-        betas=(0.9, 0.99),
+        betas=(0.9, 0.9999),
         eps: float = 1e-6,
         eps2: float = 1e-2,
         eps_floor: Optional[float] = None,
@@ -3238,11 +3297,12 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        debias_beta2: bool = True,
+        debias_beta2: bool = False,
         mars_gamma: float = 0.0,
         use_muon_pp: bool = False,
         r: float = 0.0,
         weight_lr_power: float = 2.0,
+        fisher: float = False,
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -3267,6 +3327,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             use_muon_pp=use_muon_pp,
             r=r,
             weight_lr_power=weight_lr_power,
+            fisher=fisher,
             block_size=block_size,
             min_quant_size=min_quant_size,
             state_precision=state_precision,

@@ -178,7 +178,7 @@ class RMSProp(BaseOptimizer):
                 if group['clip'] > 0.0 and group['clip_loc'] in {'gradient','both'}:
                     if group['adaptive_clipping']:
                         # Apply Adaptive Gradient Clipping (AGC)
-                        grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=group['clip'], agc_eps=group['adaptive_clip_eps'], eps=group['clip_eps'], norm_type=group['adaptive_clip_type']))
+                        grad = agc(p=p_fp32, grad=grad, agc_clip_val=group['clip'], agc_eps=group['adaptive_clip_eps'], eps=group['clip_eps'], norm_type=group['adaptive_clip_type'])
                     else:
                         # Clip the gradient 
                         grad.div_((self.get_rms(grad).clamp_(group['clip_eps']) / group['clip']).clamp_(min=1.0))
@@ -264,7 +264,7 @@ class RMSProp(BaseOptimizer):
                 if group['clip'] > 0.0 and group['clip_loc'] in {'update','both'} and (step_size > 0 or n_sma >= group["n_sma_threshold"]):
                     if group['adaptive_clipping']:
                         # Apply Adaptive Gradient Clipping (AGC)
-                        update.copy_(agc(p=p_fp32, grad=update, agc_clip_val=group['clip'], agc_eps=group['adaptive_clip_eps'], eps=group['clip_eps'], norm_type=group['adaptive_clip_type']))
+                        update = agc(p=p_fp32, grad=update, agc_clip_val=group['clip'], agc_eps=group['adaptive_clip_eps'], eps=group['clip_eps'], norm_type=group['adaptive_clip_type'])
                     else:
                         # Clip the gradient 
                         update.div_((self.get_rms(update).clamp_(group['clip_eps']) / group['clip']).clamp_(min=1.0))
@@ -489,11 +489,11 @@ class RMSPropADOPT(BaseOptimizer):
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    grad.copy_(newton_schulz(grad))
+                    grad = newton_schulz(grad)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -763,11 +763,11 @@ class RMSPropADOPTMARS(BaseOptimizer):
                 c_t = grad + correction
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t.copy_(newton_schulz(c_t))
+                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    c_t.copy_(agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()

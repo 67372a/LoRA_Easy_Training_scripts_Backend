@@ -275,11 +275,11 @@ class FMARSCrop(BaseOptimizer):
                 c_t = grad + correction
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t.copy_(newton_schulz(c_t))
+                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    c_t.copy_(agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -637,11 +637,11 @@ class FMARSCropV2ExMachina(BaseOptimizer):
                 c_t = prev_grad.mul(gamma * (beta1 / (1.0 - beta1))).add_(grad)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t.copy_(newton_schulz(c_t))
+                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    c_t.copy_(agc(p_fp32, c_t, adaptive_clip, adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    c_t = agc(p_fp32, c_t, adaptive_clip, adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -954,11 +954,11 @@ class FMARSCropV2(BaseOptimizer):
                 c_t = grad + correction
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t.copy_(newton_schulz(c_t))
+                    c_t = newton_schulz(c_t)
 
                 # Gradient clipping (if necessary)
                 if group["adaptive_clip"] > 0.0:
-                    c_t.copy_(agc(p=p_fp32, grad=c_t, agc_clip_val=group["adaptive_clip"], agc_eps=group["adaptive_clip_eps"], norm_type='layer'))
+                    c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=group["adaptive_clip"], agc_eps=group["adaptive_clip_eps"], norm_type='layer')
 
                 clip_lambda = step**0.25
 
@@ -1239,7 +1239,7 @@ class FMARSCropV3(Optimizer):
 
                 # Gradient clipping (if necessary)
                 if group["adaptive_clip"] > 0.0:
-                    c_t.copy_(agc_global_norm(p_fp32, c_t, group["adaptive_clip_eps"], group["adaptive_clip"], unit_norm=group["adaptive_clip_norm_type"]))
+                    c_t = agc_global_norm(p_fp32, c_t, group["adaptive_clip_eps"], group["adaptive_clip"], unit_norm=group["adaptive_clip_norm_type"])
                 grad_norm = torch.linalg.norm(c_t)
                 if grad_norm > clip_lambda:
                     c_t = c_t * clip_lambda / grad_norm

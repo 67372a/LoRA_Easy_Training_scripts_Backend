@@ -223,7 +223,7 @@ class Compass(BaseOptimizer):
                 if self.clip > 0.0:
                     if self.adaptive_clipping:
                         # Apply Adaptive Gradient Clipping (AGC)
-                        grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=self.clip, agc_eps=self.adaptive_clip_eps, norm_type='layer'))
+                        grad = agc(p=p_fp32, grad=grad, agc_clip_val=self.clip, agc_eps=self.adaptive_clip_eps, norm_type='layer')
                     else:
                         # Clip the gradient 
                         grad.div_((self.get_rms(grad).add_(eps) / self.clip).clamp_(min=1.0))
@@ -610,7 +610,7 @@ class CompassPlus(BaseOptimizer):
 
                 # Apply Adaptive Gradient Clipping (AGC)
                 if self.clip > 0.0:
-                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=self.clip, agc_eps=self.clip_eps, norm_type='layer'))
+                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=self.clip, agc_eps=self.clip_eps, norm_type='layer')
 
                 # Apply gradient centralization & normalization
                 if self.centralize_gradients in {1,3}:
@@ -1310,11 +1310,11 @@ class CompassADOPT(BaseOptimizer):
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    grad.copy_(newton_schulz(grad))
+                    grad = newton_schulz(grad)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad.copy_(agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type='layer'))
+                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type='layer')
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -1632,11 +1632,11 @@ class CompassADOPTMARS(BaseOptimizer):
                 c_t = (grad - previous_grad).mul_(gamma * (beta1 / (1.0 - beta1))).add_(grad)
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t.copy_(newton_schulz(c_t))
+                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    c_t.copy_(agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                    c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = c_t.pow(2).mean().sqrt_()
@@ -1905,9 +1905,9 @@ class _CompassBase(Optimizer):
 
                         if mars_gamma > 0:
                             # MARS Calculate cₜ (gradient with correction term)
-                            previous_grad_f32 = torch.zeros_like(p.float(), dtype=torch.float32).copy_(state["previous_grad"].float())
+                            previous_grad_f32 = torch.zeros_like(grad_f32, dtype=torch.float32).copy_(state["previous_grad"].float())
                             temp_grad_f32 = grad_f32.clone().detach()
-                            grad_f32.copy_((grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32))
+                            grad_f32 = (grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32)
 
                             if state["previous_grad"].dtype == torch.bfloat16:
                                 state["previous_grad"].copy_(_fp32_to_bf16_sr(temp_grad_f32))
@@ -1915,18 +1915,23 @@ class _CompassBase(Optimizer):
                                 state["previous_grad"].copy_(temp_grad_f32)
 
                         if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                            grad_f32.copy_(newton_schulz(grad_f32))
+                            grad_f32 = newton_schulz(grad_f32)
 
                         if adaptive_clip > 0:
-                            grad_f32.copy_(agc(p=p.float(), grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type))
+                            grad_f32 = agc(p=p.float(), grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
                         
-                        if state["exp_avg_sq"].dtype == torch.bfloat16:
-                            state["exp_avg_sq"].copy_(_fp32_to_bf16_sr(grad_f32.square()))
-                        else:
-                            state["exp_avg_sq"].copy_(grad_f32.square())
+                        #Make a fp32 copy of exp_avg_sq_f32
+                        exp_avg_sq_f32 = torch.zeros_like(p.float(), dtype=torch.float32).copy_(state["exp_avg_sq"].float())
+                        exp_avg_sq_f32.add_(grad_f32.square())
 
-                        if group["weight_decay"] > 0 and group['stable_weight_decay']:
-                            state["swd_second_moment_parameter_sum"].copy(grad_f32.square().sum())
+                        #if fisher:
+                        #    # ADOPT clip
+                        #    exp_avg_sq_f32.clamp_(-adopt_clip, adopt_clip)
+
+                        if state["exp_avg_sq"].dtype == torch.bfloat16:
+                            state["exp_avg_sq"].copy_(_fp32_to_bf16_sr(exp_avg_sq_f32))
+                        else:
+                            state["exp_avg_sq"].copy_(exp_avg_sq_f32)
                     else:
                         # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
                         # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
@@ -1938,7 +1943,7 @@ class _CompassBase(Optimizer):
                             step=state["step"],
                             exp_avg=state["exp_avg"],
                             exp_avg_sq=state["exp_avg_sq"],
-                            previous_grad=state.get("previous_grad", None),
+                            previous_grad=state["previous_grad"],
                             lr=group["lr"],
                             beta1=group["betas"][0],
                             beta2=group["betas"][1],
@@ -1962,11 +1967,15 @@ class _CompassBase(Optimizer):
                             swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"],
                         )
 
-                    if group["weight_decay"] > 0 and group['stable_weight_decay']:
-                        swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
+                        if group["weight_decay"] > 0 and group['stable_weight_decay']:
+                            swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
 
-                if group["weight_decay"] > 0 and group['stable_weight_decay']:
-                    group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(math.sqrt(swd_second_moment_group_sum / swd_param_size_sum), device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
+                if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    swd_second_moment_mean_sqrt = math.sqrt(swd_second_moment_group_sum / swd_param_size_sum)
+                    if swd_second_moment_mean_sqrt > 0:
+                        group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(swd_second_moment_mean_sqrt, device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
+                    else:
+                        group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(1.0, device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
 
         return loss
 
@@ -2020,9 +2029,9 @@ def single_param_compass(
 
     if mars_gamma > 0:
         # MARS Calculate cₜ (gradient with correction term)
-        previous_grad_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(previous_grad.float())
+        previous_grad_f32 = torch.zeros_like(grad_f32, dtype=torch.float32).copy_(previous_grad.float())
         temp_grad_f32 = grad_f32.clone().detach()
-        grad_f32.copy_((grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32))
+        grad_f32 = (grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32)
 
         if previous_grad.dtype == torch.bfloat16:
             previous_grad.copy_(_fp32_to_bf16_sr(temp_grad_f32))
@@ -2030,10 +2039,10 @@ def single_param_compass(
             previous_grad.copy_(temp_grad_f32)
 
     if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-        grad_f32.copy_(newton_schulz(grad_f32))
+        grad_f32 = newton_schulz(grad_f32)
 
     if adaptive_clip > 0:
-        grad_f32.copy_(agc(p_f32, grad_f32, adaptive_clip, adaptive_clip_eps, norm_type=adaptive_clip_type))
+        grad_f32 = agc(p_f32, grad_f32, adaptive_clip, adaptive_clip_eps, norm_type=adaptive_clip_type)
 
     if eps_floor is not None and eps_floor < eps:
         rms_grad = grad_f32.pow(2).mean().sqrt_()
@@ -2048,37 +2057,38 @@ def single_param_compass(
             scaled_adopt_clip = adopt_clip * adopt_denom
             normed_grad = grad_f32.clamp(-scaled_adopt_clip, scaled_adopt_clip)
 
-            unnormed_exp_avg_f32 = exp_avg_f32.lerp(grad_f32, 1.0 - beta1)
-            exp_avg_f32.lerp_(normed_grad, 1.0 - beta1)
+            unnormed_exp_avg_f32 = exp_avg_f32.mul_(beta1).add_(grad_f32, value=1 - beta1)
+            exp_avg_f32.mul_(beta1).add_(normed_grad, value=1 - beta1)
 
             unnormed_update = grad_f32.add(unnormed_exp_avg_f32, alpha=amp_fac)
             update = normed_grad.add(exp_avg_f32, alpha=amp_fac)
             
-            exp_avg_sq_f32.lerp_(unnormed_update.square(), 1.0 - beta2)
+            exp_avg_sq_f32.mul_(beta2).addcmul_(unnormed_update, unnormed_update, value=1 - beta2)
 
             cautious_grad = grad_f32
             de_nom = adopt_denom
         else:
             normed_grad = grad_f32.div(adopt_denom).clamp(-adopt_clip, adopt_clip)
-            exp_avg_f32.lerp_(normed_grad, 1.0 - beta1)
+            exp_avg_f32.mul_(beta1).add_(normed_grad, value=1 - beta1)
             update = normed_grad.add(exp_avg_f32, alpha=amp_fac)
-            exp_avg_sq_f32.lerp_(grad_f32.square(), 1.0 - beta2)
+            exp_avg_sq_f32.mul_(beta2).addcmul_(grad_f32, grad_f32, value=1 - beta2)
+            
             cautious_grad = normed_grad
             de_nom = torch.tensor(1.0, device=p.device, dtype=torch.float32)
     else:
         cautious_grad = grad_f32
-        exp_avg_f32.lerp_(grad_f32, 1.0 - beta1)
+        exp_avg_f32.mul_(beta1).add_(grad_f32, value=1 - beta1)
         update = grad_f32.add(exp_avg_f32, alpha=amp_fac)
 
         if compass_second_moment_smoothing:
-            exp_avg_sq_f32.lerp_(update.square(), 1.0 - beta2)
+            exp_avg_sq_f32.mul_(beta2).addcmul_(update, update, value=1 - beta2)
         else:
-            exp_avg_sq_f32.lerp_(grad_f32.square(), 1.0 - beta2)
+            exp_avg_sq_f32.mul_(beta2).addcmul_(grad_f32, grad_f32, value=1 - beta2)
 
         de_nom = exp_avg_sq_f32.sqrt().div_(bias_correction2.sqrt()).add_(curr_eps)
 
     if weight_decay > 0 and stable_weight_decay:
-        swd_second_moment_parameter_sum.copy_(exp_avg_sq_f32.sum())
+        swd_second_moment_parameter_sum.copy_(exp_avg_sq_f32.div(bias_correction2).sum())
 
     if exp_avg.dtype == torch.bfloat16:
         exp_avg.copy_(_fp32_to_bf16_sr(exp_avg_f32))
