@@ -1720,6 +1720,7 @@ class _CompassBase(Optimizer):
         eps2,
         eps_floor,
         weight_decay,
+        weight_decouple,
         stable_weight_decay,
         amp_fac,
         cautious,
@@ -1769,6 +1770,7 @@ class _CompassBase(Optimizer):
             eps2=eps2,
             eps_floor=eps_floor,
             weight_decay=weight_decay,
+            weight_decouple=weight_decouple,
             stable_weight_decay=stable_weight_decay,
             amp_fac=amp_fac,
             cautious=cautious,
@@ -1802,6 +1804,7 @@ class _CompassBase(Optimizer):
             group.setdefault("eps2", 1e-3)
             group.setdefault("eps_floor", None)
             group.setdefault("use_muon_pp", False)
+            group.setdefault("weight_decouple", True)
             group.setdefault("stable_weight_decay", False)
             group.setdefault("compass_second_moment_smoothing", True)
             group.setdefault("swd_second_moment_mean_sqrt", None)
@@ -1862,7 +1865,6 @@ class _CompassBase(Optimizer):
                 adaptive_clip_eps = group["adaptive_clip_eps"]
                 adaptive_clip_type = group["adaptive_clip_type"]
                 mars_gamma = group["mars_gamma"]
-                stable_weight_decay = group["stable_weight_decay"]
                 beta1 = group["betas"][0]
                 use_muon_pp = group["use_muon_pp"]
 
@@ -1876,9 +1878,6 @@ class _CompassBase(Optimizer):
 
                     state = self.state[p]
 
-                    if group["swd_second_moment_mean_sqrt"] is None:
-                        group["swd_second_moment_mean_sqrt"] = torch.tensor(1.0, device=p.device, dtype=torch.float32)
-
                     # State initialization
                     if len(state) == 0:
                         state["step"] = torch.tensor(0.0)
@@ -1891,7 +1890,9 @@ class _CompassBase(Optimizer):
 
                     state["step"] += 1
 
-                    if stable_weight_decay:
+                    if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                        if group["swd_second_moment_mean_sqrt"] is None:
+                            group["swd_second_moment_mean_sqrt"] = torch.tensor(1.0, device=p.device, dtype=torch.float32)
                         swd_param_size_sum += p.numel()
 
                     if not isinstance(group["lr"], torch.Tensor):
@@ -1924,10 +1925,6 @@ class _CompassBase(Optimizer):
                         exp_avg_sq_f32 = torch.zeros_like(p.float(), dtype=torch.float32).copy_(state["exp_avg_sq"].float())
                         exp_avg_sq_f32.add_(grad_f32.square())
 
-                        #if fisher:
-                        #    # ADOPT clip
-                        #    exp_avg_sq_f32.clamp_(-adopt_clip, adopt_clip)
-
                         if state["exp_avg_sq"].dtype == torch.bfloat16:
                             state["exp_avg_sq"].copy_(_fp32_to_bf16_sr(exp_avg_sq_f32))
                         else:
@@ -1943,11 +1940,12 @@ class _CompassBase(Optimizer):
                             step=state["step"],
                             exp_avg=state["exp_avg"],
                             exp_avg_sq=state["exp_avg_sq"],
-                            previous_grad=state["previous_grad"],
+                            previous_grad=state["previous_grad"] if mars_gamma > 0 else None,
                             lr=group["lr"],
                             beta1=group["betas"][0],
                             beta2=group["betas"][1],
                             weight_decay=group["weight_decay"],
+                            weight_decouple=group["weight_decouple"],
                             stable_weight_decay=group["stable_weight_decay"],
                             eps=group["eps"],
                             eps2=group["eps2"],
@@ -1967,7 +1965,7 @@ class _CompassBase(Optimizer):
                             swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"],
                         )
 
-                        if group["weight_decay"] > 0 and group['stable_weight_decay']:
+                        if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
                             swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
 
                 if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
@@ -1993,6 +1991,7 @@ def single_param_compass(
     beta1: float,
     beta2: float,
     weight_decay: float,
+    weight_decouple: bool,
     stable_weight_decay: bool,
     eps: float,
     eps2: float,
@@ -2042,7 +2041,7 @@ def single_param_compass(
         grad_f32 = newton_schulz(grad_f32)
 
     if adaptive_clip > 0:
-        grad_f32 = agc(p_f32, grad_f32, adaptive_clip, adaptive_clip_eps, norm_type=adaptive_clip_type)
+        grad_f32 = agc(p=p_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
     if eps_floor is not None and eps_floor < eps:
         rms_grad = grad_f32.pow(2).mean().sqrt_()
@@ -2051,25 +2050,25 @@ def single_param_compass(
         curr_eps = eps
 
     if adopt:
-        adopt_denom = exp_avg_sq_f32.sqrt().div_(bias_correction2.sqrt()).add_(curr_eps)
+        adopt_denom = exp_avg_sq_f32.div(bias_correction2).sqrt().add_(curr_eps)
         adopt_clip: float = (step-1)**0.25
         if compass_second_moment_smoothing:
             scaled_adopt_clip = adopt_clip * adopt_denom
             normed_grad = grad_f32.clamp(-scaled_adopt_clip, scaled_adopt_clip)
 
-            unnormed_exp_avg_f32 = exp_avg_f32.mul_(beta1).add_(grad_f32, value=1 - beta1)
-            exp_avg_f32.mul_(beta1).add_(normed_grad, value=1 - beta1)
+            unnormed_exp_avg_f32 = exp_avg_f32.mul_(beta1).add_(grad_f32, value=1.0 - beta1)
+            exp_avg_f32.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
 
             unnormed_update = grad_f32.add(unnormed_exp_avg_f32, alpha=amp_fac)
             update = normed_grad.add(exp_avg_f32, alpha=amp_fac)
             
-            exp_avg_sq_f32.mul_(beta2).addcmul_(unnormed_update, unnormed_update, value=1 - beta2)
+            exp_avg_sq_f32.mul_(beta2).addcmul_(unnormed_update, unnormed_update, value=1.0 - beta2)
 
             cautious_grad = grad_f32
             de_nom = adopt_denom
         else:
             normed_grad = grad_f32.div(adopt_denom).clamp(-adopt_clip, adopt_clip)
-            exp_avg_f32.mul_(beta1).add_(normed_grad, value=1 - beta1)
+            exp_avg_f32.mul_(beta1).add_(normed_grad, alpha=1 - beta1)
             update = normed_grad.add(exp_avg_f32, alpha=amp_fac)
             exp_avg_sq_f32.mul_(beta2).addcmul_(grad_f32, grad_f32, value=1 - beta2)
             
@@ -2105,13 +2104,15 @@ def single_param_compass(
         mask = 1.0
 
     # Weight decay
-    if weight_decay > 0:
+    if weight_decay > 0 and weight_decouple:
         if stable_weight_decay:
             swd_scaling = 1.0 / swd_second_moment_mean_sqrt
         else:
             swd_scaling = 1.0
 
         p_f32.mul_(1.0 - weight_decay * lr * swd_scaling)
+    elif weight_decay > 0:
+        update.add_(p_f32, alpha=weight_decay)
 
     step_size = lr / bias_correction1
 
@@ -2194,6 +2195,7 @@ class CompassAO(_CompassBase):
         eps2: float = 1e-2,
         eps_floor: Optional[float] = None,
         weight_decay: float = 0.0,
+        weight_decouple: bool = True,
         stable_weight_decay: bool = False,
         amp_fac: float = 2.0,
         cautious: bool = False,
@@ -2220,6 +2222,7 @@ class CompassAO(_CompassBase):
             eps2=eps2,
             eps_floor=eps_floor,
             weight_decay=weight_decay,
+            weight_decouple=weight_decouple,
             stable_weight_decay=stable_weight_decay,
             amp_fac=amp_fac,
             cautious=cautious,
