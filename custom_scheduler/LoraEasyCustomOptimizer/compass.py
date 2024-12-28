@@ -2084,7 +2084,7 @@ def single_param_compass(
         else:
             exp_avg_sq_f32.mul_(beta2).addcmul_(grad_f32, grad_f32, value=1 - beta2)
 
-        de_nom = exp_avg_sq_f32.sqrt().div_(bias_correction2.sqrt()).add_(curr_eps)
+        de_nom = exp_avg_sq_f32.div(bias_correction2).sqrt().add_(curr_eps)
 
     if weight_decay > 0 and stable_weight_decay:
         swd_second_moment_parameter_sum.copy_(exp_avg_sq_f32.div(bias_correction2).sum())
