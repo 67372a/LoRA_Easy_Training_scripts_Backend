@@ -93,6 +93,12 @@ def setup_venv(venv_pip):
         f"{venv_pip} install -U --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu124",
         shell=PLATFORM == "linux",
     )
+    
+    subprocess.check_call(
+        f"{venv_pip} install -U --force-reinstall --no-deps ../installables/lycoris_lora-3.1.1.post1-py3-none-any.whl",
+        shell=PLATFORM == "linux",
+    )
+    
     subprocess.check_call(f"{venv_pip} install -U -r requirements.txt", shell=PLATFORM == "linux")
     subprocess.check_call(f"{venv_pip} install -U ../custom_scheduler/.", shell=PLATFORM == "linux")
     subprocess.check_call(f"{venv_pip} install -U -r ../requirements.txt", shell=PLATFORM == "linux")
