@@ -26,6 +26,7 @@ from LoraEasyCustomOptimizer.schedulefree import (
 from LoraEasyCustomOptimizer.sgd import SGDSaI
 from LoraEasyCustomOptimizer.shampoo import ScalableShampoo
 from LoraEasyCustomOptimizer.adam import AdamW8bitAO, AdamW4bitAO, AdamWfp8AO
+from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ADOPT,
@@ -66,6 +67,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     GrokFastAdamW,
     LPFAdamW,
     LaProp,
+    ProdigyPlusScheduleFree,
     RMSProp,
     RMSPropADOPT,
     RMSPropADOPTMARS,
