@@ -2972,8 +2972,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                 beta1 = group["betas"][0]
                 use_muon_pp = group["use_muon_pp"]
                 fisher = group["fisher"]
-
-                print("update_strategy=" + str(group["update_strategy"]))
                 
                 for p in group["params"]:
                     if p.grad is None:
