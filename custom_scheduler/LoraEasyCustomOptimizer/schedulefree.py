@@ -2772,7 +2772,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
         if not 0.0 <= betas[1] < 1.0:
             raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
-        if update_strategy is not None and update_strategy not in UPDATE_STRATEGY:
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams'}:
             raise ValueError("Invalid update strategy: {}".format(update_strategy))
         
         # Override zero to 1e-37, as zero and float32.tiny NaNs
