@@ -5,7 +5,7 @@ dadaptation
 wandb
 pyngrok
 pycloudflared
-scipy
+scipy==1.15.0
 came-pytorch
 pytorch_optimizer==3.3.0
 wheel
