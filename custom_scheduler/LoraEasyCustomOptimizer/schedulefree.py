@@ -16,6 +16,8 @@ from .low_bit_optim.subclass_4bit import OptimState4bit
 from .low_bit_optim.subclass_fp8 import OptimStateFp8
 from torch.distributed._tensor import DTensor
 
+UPDATE_STRATEGY = Literal['unmodified','cautious','grams']
+
 class ScheduleFreeWrapper(BaseOptimizer):
     r"""
         Wrap any optimizer to make it Schedule-Free. 
@@ -2756,6 +2758,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         r,
         weight_lr_power,
         fisher,
+        update_strategy,
         *,
         block_size,
         min_quant_size,
@@ -2769,6 +2772,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
         if not 0.0 <= betas[1] < 1.0:
             raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
+        if update_strategy is not None and update_strategy not in UPDATE_STRATEGY:
+            raise ValueError("Invalid update strategy: {}".format(update_strategy))
         
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
@@ -2806,6 +2811,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             r=r,
             weight_lr_power=weight_lr_power,
             fisher=fisher,
+            update_strategy=update_strategy,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -2831,6 +2837,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("swd_second_moment_mean_sqrt", None)
             group.setdefault("train_mode", False)
             group.setdefault("fisher", False)
+            group.setdefault("update_strategy", 'unmodified')
 
     # bring your own function to create zero-filled subclass
     def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
@@ -2965,6 +2972,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                 beta1 = group["betas"][0]
                 use_muon_pp = group["use_muon_pp"]
                 fisher = group["fisher"]
+
+                print("update_strategy=" + str(group["update_strategy"]))
                 
                 for p in group["params"]:
                     if p.grad is None:
@@ -3079,6 +3088,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             mars_gamma=group["mars_gamma"],
                             use_muon_pp=group["use_muon_pp"],
                             fisher=group["fisher"],
+                            update_strategy=group["update_strategy"],
                             adopt_clip=adopt_clip,
                             sf_checkpoint=checkpoint,
                             sf_adaptive_y_lr=adaptive_y_lr,
@@ -3124,6 +3134,7 @@ def single_param_ADOPTAOScheduleFree(
     mars_gamma: float,
     use_muon_pp: bool,
     fisher: bool,
+    update_strategy: UPDATE_STRATEGY,
     adopt_clip: torch.Tensor,
     sf_checkpoint: torch.Tensor,
     sf_adaptive_y_lr: torch.Tensor,
@@ -3134,6 +3145,8 @@ def single_param_ADOPTAOScheduleFree(
     p_f32 = p.float()
     grad_f32 = grad.float()
 
+    y_f32 = p_f32  # Notation to match theory
+
     bias_correction2: float = 1.0
     current_beta2 = beta2
     if debias_beta2:
@@ -3143,8 +3156,8 @@ def single_param_ADOPTAOScheduleFree(
             bias_correction2 = 1.0 - beta2**step
 
     #Make a fp32 copies of state
-    exp_avg_sq_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(exp_avg_sq.float())
-    z_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(z.float())
+    exp_avg_sq_f32 = torch.zeros_like(y_f32, dtype=torch.float32).copy_(exp_avg_sq.float())
+    z_f32 = torch.zeros_like(y_f32, dtype=torch.float32).copy_(z.float())
 
     if mars_gamma > 0:
         # MARS Calculate cₜ (gradient with correction term)
@@ -3161,7 +3174,7 @@ def single_param_ADOPTAOScheduleFree(
         grad_f32 = newton_schulz(grad_f32)
 
     if adaptive_clip > 0:
-        grad_f32 = agc(p=p_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
+        grad_f32 = agc(p=y_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
     if eps_floor is not None and eps_floor < eps:
         rms_grad = grad_f32.pow(2).mean().sqrt_()
@@ -3190,10 +3203,10 @@ def single_param_ADOPTAOScheduleFree(
         else:
             swd_scaling = 1.0
 
-        p_f32.mul_(1.0 - weight_decay * lr * swd_scaling)
+        y_f32.mul_(1.0 - weight_decay * lr * swd_scaling)
     elif weight_decay > 0:
         if fisher:
-            grad_weights = p_f32.div(fim_base)
+            grad_weights = y_f32.div(fim_base)
 
             rms = grad_weights.pow(2).mean().sqrt_()
             divisor = max(1.0, rms) / 1.0 #fisher_clip
@@ -3201,10 +3214,22 @@ def single_param_ADOPTAOScheduleFree(
 
             update.add_(grad_weights, alpha=weight_decay)
         else:
-            update.add_(p_f32, alpha=weight_decay)
+            update.add_(y_f32, alpha=weight_decay)
 
-    p_f32.lerp_(end=z_f32, weight=sf_checkpoint)
-    p_f32.add_(update, alpha=sf_adaptive_y_lr)
+    if update_strategy in {'cautious','grams'}:
+        y_update = (y_f32 - z_f32).mul_(sf_checkpoint).add_(update, alpha=-sf_adaptive_y_lr)
+        if update_strategy == 'cautious':
+            mask = (y_update * update > 0).to(update.dtype)
+            mask.div_(mask.mean().clamp_(min=1e-3))
+            y_update.mul_(mask)
+        elif update_strategy == 'grams':
+            y_update.copy_(torch.sign(update) * y_update.abs())
+        y_f32.add_(y_update, alpha=-1)
+    else:
+        # These operations update y in-place,
+        # without computing x explicitly.
+        y_f32.lerp_(end=z_f32, weight=sf_checkpoint)
+        y_f32.add_(update, alpha=sf_adaptive_y_lr)
 
     z_f32.add_(update, alpha=-lr)
 
@@ -3219,9 +3244,9 @@ def single_param_ADOPTAOScheduleFree(
         z.copy_(z_f32)
 
     if p.dtype == torch.bfloat16:
-        p.copy_(_fp32_to_bf16_sr(p_f32))
+        p.copy_(_fp32_to_bf16_sr(y_f32))
     else:
-        p.copy_(p_f32) 
+        p.copy_(y_f32) 
 
 class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
     r"""Compass supporting a number of optional features and quantization via torchao. 
@@ -3281,6 +3306,9 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         weight_lr_power (float): 
             ScheduleFree: during warmup, the weights in the average will be equal to lr raised to this power.
             set to 0 for no weighting. (Default: 2.0)
+        update_strategy (str)
+            Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
+            and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified) (recommended: grams)
     """
 
     def __init__(
@@ -3303,6 +3331,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         r: float = 0.0,
         weight_lr_power: float = 2.0,
         fisher: float = False,
+        update_strategy: UPDATE_STRATEGY = 'unmodified',
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -3331,4 +3360,5 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             block_size=block_size,
             min_quant_size=min_quant_size,
             state_precision=state_precision,
+            update_strategy=update_strategy,
         )
