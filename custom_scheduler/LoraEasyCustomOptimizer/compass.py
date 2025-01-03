@@ -22,6 +22,8 @@ from .low_bit_optim.subclass_4bit import OptimState4bit
 from .low_bit_optim.subclass_fp8 import OptimStateFp8
 from torch.distributed._tensor import DTensor
 
+UPDATE_STRATEGY = Literal['unmodified','cautious','grams']
+
 class Compass(BaseOptimizer):
     r"""
     Arguments:
@@ -1733,6 +1735,7 @@ class _CompassBase(Optimizer):
         mars_gamma,
         use_muon_pp,
         compass_second_moment_smoothing,
+        update_strategy,
         *,
         block_size,
         min_quant_size,
@@ -1746,6 +1749,12 @@ class _CompassBase(Optimizer):
             raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
         if not 0.0 <= betas[1] < 1.0:
             raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams'}:
+            raise ValueError("Invalid update strategy: {}".format(update_strategy))
+        
+        # If cautious true, override update strategy to cautious
+        if cautious:
+            update_strategy = 'cautious'
         
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
@@ -1783,6 +1792,7 @@ class _CompassBase(Optimizer):
             mars_gamma=mars_gamma,
             use_muon_pp=use_muon_pp,
             compass_second_moment_smoothing=compass_second_moment_smoothing,
+            update_strategy=update_strategy,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -1808,6 +1818,7 @@ class _CompassBase(Optimizer):
             group.setdefault("stable_weight_decay", False)
             group.setdefault("compass_second_moment_smoothing", True)
             group.setdefault("swd_second_moment_mean_sqrt", None)
+            group.setdefault("update_strategy", 'unmodified')
 
 
     # bring your own function to create zero-filled subclass
@@ -1951,7 +1962,6 @@ class _CompassBase(Optimizer):
                             eps2=group["eps2"],
                             eps_floor=group["eps_floor"],
                             amp_fac=group["amp_fac"],
-                            cautious=group["cautious"],
                             adaptive_clip=group["adaptive_clip"],
                             adaptive_clip_eps=group["adaptive_clip_eps"],
                             adaptive_clip_type=group["adaptive_clip_type"],
@@ -1961,6 +1971,7 @@ class _CompassBase(Optimizer):
                             mars_gamma=group["mars_gamma"],
                             use_muon_pp=group["use_muon_pp"],
                             compass_second_moment_smoothing=group["compass_second_moment_smoothing"],
+                            update_strategy=group["update_strategy"],
                             swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'],
                             swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"],
                         )
@@ -1997,7 +2008,6 @@ def single_param_compass(
     eps2: float,
     eps_floor: Optional[float],
     amp_fac: float,
-    cautious: bool,
     adaptive_clip: float,
     adaptive_clip_eps: float,
     adaptive_clip_type: NORM_TYPE,
@@ -2007,6 +2017,7 @@ def single_param_compass(
     mars_gamma: float,
     use_muon_pp: bool,
     compass_second_moment_smoothing: bool,
+    update_strategy: UPDATE_STRATEGY,
     swd_second_moment_mean_sqrt: torch.Tensor,
     swd_second_moment_parameter_sum: torch.Tensor,
 ):
@@ -2056,15 +2067,14 @@ def single_param_compass(
             scaled_adopt_clip = adopt_clip * adopt_denom
             normed_grad = grad_f32.clamp(-scaled_adopt_clip, scaled_adopt_clip)
 
-            unnormed_exp_avg_f32 = exp_avg_f32.mul_(beta1).add_(grad_f32, value=1.0 - beta1)
+            unnormed_exp_avg_f32 = exp_avg_f32.mul(beta1).add_(grad_f32, alpha=1.0 - beta1)
             exp_avg_f32.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
+            update = normed_grad.add(exp_avg_f32, alpha=amp_fac)
 
             unnormed_update = grad_f32.add(unnormed_exp_avg_f32, alpha=amp_fac)
-            update = normed_grad.add(exp_avg_f32, alpha=amp_fac)
-            
             exp_avg_sq_f32.mul_(beta2).addcmul_(unnormed_update, unnormed_update, value=1.0 - beta2)
 
-            cautious_grad = grad_f32
+            update_grad = grad_f32
             de_nom = adopt_denom
         else:
             normed_grad = grad_f32.div(adopt_denom).clamp(-adopt_clip, adopt_clip)
@@ -2072,11 +2082,10 @@ def single_param_compass(
             update = normed_grad.add(exp_avg_f32, alpha=amp_fac)
             exp_avg_sq_f32.mul_(beta2).addcmul_(grad_f32, grad_f32, value=1 - beta2)
             
-            cautious_grad = normed_grad
+            update_grad = normed_grad
             de_nom = torch.tensor(1.0, device=p.device, dtype=torch.float32)
     else:
-        cautious_grad = grad_f32
-        exp_avg_f32.mul_(beta1).add_(grad_f32, value=1 - beta1)
+        exp_avg_f32.mul_(beta1).add_(grad_f32, alpha=1 - beta1)
         update = grad_f32.add(exp_avg_f32, alpha=amp_fac)
 
         if compass_second_moment_smoothing:
@@ -2084,6 +2093,7 @@ def single_param_compass(
         else:
             exp_avg_sq_f32.mul_(beta2).addcmul_(grad_f32, grad_f32, value=1 - beta2)
 
+        update_grad = grad_f32
         de_nom = exp_avg_sq_f32.div(bias_correction2).sqrt().add_(curr_eps)
 
     if weight_decay > 0 and stable_weight_decay:
@@ -2096,10 +2106,13 @@ def single_param_compass(
         exp_avg.copy_(exp_avg_f32)
         exp_avg_sq.copy_(exp_avg_sq_f32)
 
-    if cautious:
-        # compute norm gradient
-        mask = (update * cautious_grad > 0).to(cautious_grad.dtype)
-        mask.div_(mask.mean().clamp_(min=1e-3))
+    if update_strategy in {'cautious','grams'}:
+        if update_strategy == 'cautious':
+            mask = (update * update_grad > 0).to(update_grad.dtype)
+            mask.div_(mask.mean().clamp_(min=1e-3))
+        elif update_strategy == 'grams':
+            update.copy_(torch.sign(update_grad) * update.abs())
+            mask = 1.0
     else:
         mask = 1.0
 
@@ -2159,8 +2172,11 @@ class CompassAO(_CompassBase):
             Valid values: layer, unit (default: layer).
         adopt (bool)
             Updates the second moment / ema after it is used in a given step, as per ADOPT - https://arxiv.org/abs/2411.02853 (default: False)
-        cautious (bool)
+        cautious (bool) (deprecated, use update strategy)
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+        update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
+            Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
+            and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified) (recommended: grams)
         use_muon_pp (boolean):
             Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
             (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
@@ -2208,6 +2224,7 @@ class CompassAO(_CompassBase):
         mars_gamma: float = 0.0,
         use_muon_pp: bool = False,
         compass_second_moment_smoothing: bool = True,
+        update_strategy: UPDATE_STRATEGY = 'unmodifed',
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -2235,6 +2252,7 @@ class CompassAO(_CompassBase):
             mars_gamma=mars_gamma,
             use_muon_pp=use_muon_pp,
             compass_second_moment_smoothing=compass_second_moment_smoothing,
+            update_strategy=update_strategy,
             block_size=block_size,
             min_quant_size=min_quant_size,
             state_precision=state_precision,
