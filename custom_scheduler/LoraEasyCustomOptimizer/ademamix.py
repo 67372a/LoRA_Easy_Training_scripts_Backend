@@ -2,15 +2,14 @@
 # Source: https://github.com/kozistr/pytorch_optimizer/blob/main/pytorch_optimizer/optimizer/ademamix.py
 
 import math
-from typing import Optional
+from typing import Optional, Literal
 
 import torch
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from .utils import copy_stochastic_
-
+from .utils import copy_stochastic_, UPDATE_STRATEGY
 
 class AdEMAMix(BaseOptimizer):
     r"""Better, Faster, Older.
@@ -26,7 +25,11 @@ class AdEMAMix(BaseOptimizer):
     :param t_alpha_beta3: Optional[float]. total number of iterations is preferred when needed.
     :param eps: float. term added to the denominator to improve numerical stability.
     :param centralization: float. center model grad 
-    :param cautious: bool: Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085
+    cautious (bool) (deprecated, use update strategy)
+        Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+    update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
+        Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
+        and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified) (recommended: grams)
     """
 
     def __init__(
@@ -43,6 +46,7 @@ class AdEMAMix(BaseOptimizer):
         eps: float = 1e-8,
         centralization: float = 0.0,
         cautious: bool = False,
+        update_strategy: UPDATE_STRATEGY = 'unmodified',
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -53,6 +57,13 @@ class AdEMAMix(BaseOptimizer):
         self.validate_non_negative(eps, 'eps')
         self.validate_non_negative(clip, 'clip')
         self.validate_non_negative(centralization, 'centralization')
+
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams'}:
+            raise ValueError("Invalid update strategy: {}".format(update_strategy))
+        
+        # If cautious true, override update strategy to cautious
+        if cautious:
+            update_strategy = 'cautious'
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -66,6 +77,7 @@ class AdEMAMix(BaseOptimizer):
             'eps': eps,
             'centralization': centralization,
             'cautious': cautious,
+            'update_strategy': update_strategy,
         }
 
         super().__init__(params, defaults)
@@ -192,10 +204,13 @@ class AdEMAMix(BaseOptimizer):
 
                 update = (exp_avg.div(bias_correction1) + alpha_t * exp_avg_slow)
 
-                if group["cautious"]:
-                    # compute norm gradient
-                    mask = (update * grad > 0).to(grad.dtype)
-                    mask.div_(mask.mean().clamp_(min=1e-3))
+                if group['update_strategy'] in {'cautious','grams'}:
+                    if group['update_strategy'] == 'cautious':
+                        mask = (update * grad > 0).to(grad.dtype)
+                        mask.div_(mask.mean().clamp_(min=1e-3))
+                    elif group['update_strategy'] == 'grams':
+                        update.copy_(torch.sign(grad) * update.abs())
+                        mask = 1.0
                 else:
                     mask = 1.0
 

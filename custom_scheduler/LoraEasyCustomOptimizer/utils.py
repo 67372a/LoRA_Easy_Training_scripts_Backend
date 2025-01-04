@@ -9,6 +9,8 @@ NORM_TYPE = Literal['unit','global','layer']
 
 STATE_PRECISION = Literal['parameter', 'q4bit', 'q8bit', 'qfp8']
 
+UPDATE_STRATEGY = Literal['unmodified','cautious','grams']
+
 def unit_norm(x: torch.Tensor, norm: float = 2.0) -> torch.Tensor:
     r"""Get norm of unit."""
     keep_dim: bool = True

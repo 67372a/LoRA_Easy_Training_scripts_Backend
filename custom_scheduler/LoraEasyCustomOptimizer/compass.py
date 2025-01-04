@@ -5,7 +5,7 @@
 
 import torch
 from torch.optim import Optimizer
-from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz, create_factored_dims, get_denom, update_second_moment, STATE_PRECISION
+from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz, create_factored_dims, get_denom, update_second_moment, STATE_PRECISION, UPDATE_STRATEGY
 import math
 from torch.nn.functional import softplus
 from typing import Optional, Literal
@@ -21,8 +21,6 @@ from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
 from .low_bit_optim.subclass_fp8 import OptimStateFp8
 from torch.distributed._tensor import DTensor
-
-UPDATE_STRATEGY = Literal['unmodified','cautious','grams']
 
 class Compass(BaseOptimizer):
     r"""

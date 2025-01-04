@@ -11,6 +11,8 @@ from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 
+from .utils import UPDATE_STRATEGY
+
 
 class CAME(BaseOptimizer):
     r"""Confidence-guided Adaptive Memory Efficient Optimization.
@@ -26,6 +28,11 @@ class CAME(BaseOptimizer):
     :param eps1: float. term added to the denominator to improve numerical stability.
     :param eps2: float. term added to the denominator to improve numerical stability.
     :param cautious: bool: Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085
+    cautious (bool) (deprecated, use update strategy)
+        Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+    update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
+        Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
+        and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified) (recommended: grams)
     """
 
     def __init__(
@@ -41,6 +48,7 @@ class CAME(BaseOptimizer):
         eps1: float = 1e-30,
         eps2: float = 1e-16,
         cautious: bool = False,
+        update_strategy: UPDATE_STRATEGY = 'unmodified',
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -48,6 +56,13 @@ class CAME(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps1, 'eps1')
         self.validate_non_negative(eps2, 'eps2')
+
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams'}:
+            raise ValueError("Invalid update strategy: {}".format(update_strategy))
+        
+        # If cautious true, override update strategy to cautious
+        if cautious:
+            update_strategy = 'cautious'
 
         self.clip_threshold = clip_threshold
         self.eps1 = eps1
@@ -229,10 +244,13 @@ class CAME(BaseOptimizer):
 
                 update.mul_(group['lr'])
 
-                if group["cautious"]:
-                    # compute norm gradient
-                    mask = (update * grad > 0).to(grad.dtype)
-                    mask.div_(mask.mean().clamp_(min=1e-3))
+                if group['update_strategy'] in {'cautious','grams'}:
+                    if group['update_strategy'] == 'cautious':
+                        mask = (update * grad > 0).to(grad.dtype)
+                        mask.div_(mask.mean().clamp_(min=1e-3))
+                    elif group['update_strategy'] == 'grams':
+                        update.copy_(torch.sign(grad) * update.abs())
+                        mask = 1.0
                 else:
                     mask = 1.0
 
