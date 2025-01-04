@@ -80,6 +80,7 @@ class Compass(BaseOptimizer):
         betas: BETAS = (0.975, 0.999), #Original default 0.99, 0.999
         weight_decay: float = 0.001, #Original default 0
         weight_decouple: bool = True,
+        stable_weight_decay: bool = False,
         lr_decouple: bool = False,
         max_lr: float = 0.0,
         fixed_decay: bool = False,
@@ -125,6 +126,7 @@ class Compass(BaseOptimizer):
             'degenerated_to_sgd': degenerated_to_sgd,
             'cautious':cautious,
             'update_strategy': update_strategy,
+            'stable_weight_decay': stable_weight_decay,
         }
 
         self.clip = clip
@@ -148,6 +150,7 @@ class Compass(BaseOptimizer):
     @torch.no_grad()
     def reset(self):
         for group in self.param_groups:
+            group['exp_avg_sq_mean_sqrt'] = 0.0
             group['step'] = 0
 
             for p in group['params']:
@@ -170,6 +173,10 @@ class Compass(BaseOptimizer):
                 group['step'] += 1
             else:
                 group['step'] = 1
+                group['exp_avg_sq_mean_sqrt'] = 0.0
+
+            param_size: int = 0
+            exp_avg_sq_sum: float = 0.0
 
             beta1, beta2 = group["betas"]
             amp_fac = group["amp_fac"]
@@ -211,6 +218,9 @@ class Compass(BaseOptimizer):
                     raise NoSparseGradientError(str(self))
 
                 state = self.state[p]
+
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    param_size += p.numel()   
 
                 # State initialization
                 if len(state) == 0:
@@ -254,8 +264,13 @@ class Compass(BaseOptimizer):
 
                 if not self.rectify_variance or step_size > 0 or n_sma >= self.n_sma_threshold:
                     if weight_decouple:
+                        if group['stable_weight_decay'] and group['exp_avg_sq_mean_sqrt'] > 0:
+                            swd_scaling = 1.0 / group['exp_avg_sq_mean_sqrt']
+                        else:
+                            swd_scaling = 1.0
+
                         # Perform stepweight decay
-                        p_fp32.mul_(1.0 - (1.0 if fixed_decay else step_size if not lr_decouple else step_size / max_lr) * weight_decay)
+                        p_fp32.mul_(1.0 - (1.0 if fixed_decay else step_size if not lr_decouple else step_size / max_lr) * weight_decay * swd_scaling)
                     elif weight_decay > 0.0 and update is not None:
                         update.add_(p_fp32, alpha=weight_decay)
 
@@ -288,6 +303,12 @@ class Compass(BaseOptimizer):
                     copy_stochastic_(state["ema"], ema)
                     copy_stochastic_(state["ema_squared"], ema_squared)
                     copy_stochastic_(p, p_fp32)
+
+                if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    exp_avg_sq_sum += ema.sum()
+
+            if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                group['exp_avg_sq_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
 
         return loss
     
@@ -1334,7 +1355,7 @@ class CompassADOPT(BaseOptimizer):
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
-                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type='layer')
+                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
