@@ -90,7 +90,7 @@ def agc(p: torch.Tensor,
 
         max_norm = p_norm * agc_clip_val
 
-        clipped_grad = grad * max(1, max_norm / g_norm.clamp_(min=eps))
+        clipped_grad = grad * (max_norm / g_norm.clamp_(min=eps))
 
         return torch.where(g_norm > max_norm, clipped_grad, grad)
     else:
