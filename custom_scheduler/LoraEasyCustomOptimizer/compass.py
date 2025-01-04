@@ -66,8 +66,11 @@ class Compass(BaseOptimizer):
             Simple moving average threshold for variance rectification (recommended is 5) (Default: 5).
         degenerated_to_sgd: (bool)
             degenerated to SGD. (Default: false)
-        cautious (bool):
+        cautious (bool) (deprecated, use update strategy)
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+        update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
+            Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
+            and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified) (recommended: grams)
     """
 
     def __init__(
@@ -91,8 +94,17 @@ class Compass(BaseOptimizer):
         n_sma_threshold: int = 5,
         degenerated_to_sgd: bool = False,
         cautious: bool = False,
+        update_strategy: UPDATE_STRATEGY = 'unmodified',
         **kwargs,
     ):
+        
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams'}:
+            raise ValueError("Invalid update strategy: {}".format(update_strategy))
+        
+        # If cautious true, override update strategy to cautious
+        if cautious:
+            update_strategy = 'cautious'
+        
         defaults: DEFAULTS = {
             'lr':lr,
             'betas':betas,
@@ -111,7 +123,8 @@ class Compass(BaseOptimizer):
             'rectify_variance': rectify_variance,
             'n_sma_threshold': n_sma_threshold,
             'degenerated_to_sgd': degenerated_to_sgd,
-            'cautious':cautious
+            'cautious':cautious,
+            'update_strategy': update_strategy,
         }
 
         self.clip = clip
@@ -167,6 +180,7 @@ class Compass(BaseOptimizer):
             eps = group["eps"]
             lr_decouple = group["lr_decouple"]
             max_lr = group["max_lr"]
+            update_strategy = group["update_strategy"]
 
             # bias correction step size
             # soft warmup
@@ -245,10 +259,14 @@ class Compass(BaseOptimizer):
                     elif weight_decay > 0.0 and update is not None:
                         update.add_(p_fp32, alpha=weight_decay)
 
-                if group["cautious"]:
-                    # compute norm gradient
-                    mask = (update * grad > 0).to(grad.dtype)
-                    mask.div_(mask.mean().clamp_(min=1e-3))
+
+                if update_strategy in {'cautious','grams'}:
+                    if update_strategy == 'cautious':
+                        mask = (update * grad > 0).to(grad.dtype)
+                        mask.div_(mask.mean().clamp_(min=1e-3))
+                    elif update_strategy == 'grams':
+                        update.copy_(torch.sign(grad) * update.abs())
+                        mask = 1.0
                 else:
                     mask = 1.0
 
