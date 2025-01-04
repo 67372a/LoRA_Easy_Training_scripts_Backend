@@ -39,6 +39,8 @@ class Compass(BaseOptimizer):
             Weight decay, i.e. a L2 penalty (default: 0.001).
         weight_decouple (bool): 
             the optimizer uses decoupled weight decay as in AdamW. (default: true)
+        stable_weight_decay (bool): 
+            Applies stable weight decay - https://arxiv.org/abs/2011.11152 (default: False)
         lr_decouple (bool): 
             Apply fully decoupled weight decay. (default: false)
         max_lr (float): 
