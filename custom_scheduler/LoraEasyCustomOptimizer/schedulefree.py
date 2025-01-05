@@ -3194,14 +3194,16 @@ def single_param_ADOPTAOScheduleFree(
 
         update = grad_f32.div(de_nom).clamp_(-adopt_clip, adopt_clip)
 
+    if stable_weight_decay:
+        swd_scaling = 1.0 / swd_second_moment_mean_sqrt
+    else:
+        swd_scaling = 1.0
+
     # Weight decay
     if weight_decay > 0 and weight_decouple:
-        if stable_weight_decay:
-            swd_scaling = 1.0 / swd_second_moment_mean_sqrt
-        else:
-            swd_scaling = 1.0
 
-        y_f32.mul_(1.0 - weight_decay * lr * swd_scaling)
+        z_f32.mul_(1.0 - weight_decay * lr * swd_scaling)
+        y_f32.mul_(1.0 - weight_decay * -sf_adaptive_y_lr * swd_scaling)
     elif weight_decay > 0:
         if fisher:
             grad_weights = y_f32.div(fim_base)
@@ -3210,9 +3212,9 @@ def single_param_ADOPTAOScheduleFree(
             divisor = max(1.0, rms) / 1.0 #fisher_clip
             grad_weights.div_(divisor)
 
-            update.add_(grad_weights, alpha=weight_decay)
+            update.add_(grad_weights, alpha=weight_decay * swd_scaling)
         else:
-            update.add_(y_f32, alpha=weight_decay)
+            update.add_(y_f32, alpha=weight_decay * swd_scaling)
 
     if update_strategy in {'cautious','grams'}:
         y_update = (y_f32 - z_f32).mul_(sf_checkpoint).add_(update, alpha=-sf_adaptive_y_lr)
