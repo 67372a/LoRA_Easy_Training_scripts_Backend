@@ -305,7 +305,7 @@ class Compass(BaseOptimizer):
                     copy_stochastic_(p, p_fp32)
 
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    exp_avg_sq_sum += ema.sum()
+                    exp_avg_sq_sum += ema_squared.sum()
 
             if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                 group['exp_avg_sq_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
@@ -1411,11 +1411,8 @@ class CompassADOPT(BaseOptimizer):
                     else:
                         p_fp32.add_(update * mask, alpha=-step_size)
 
-                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        exp_avg_sq_sum += exp_avg_sq.sum()
-
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['exp_avg_sq_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
+                    exp_avg_sq_sum += exp_avg_sq.sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -1423,6 +1420,9 @@ class CompassADOPT(BaseOptimizer):
                     if not group['factor_second_moment']:
                         copy_stochastic_(state['exp_avg_sq'], exp_avg_sq)
                     copy_stochastic_(p, p_fp32)
+
+            if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                group['exp_avg_sq_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
 
         return loss
 
@@ -1733,11 +1733,8 @@ class CompassADOPTMARS(BaseOptimizer):
                     else:
                         p_fp32.add_(update * mask, alpha=-step_size)
 
-                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        exp_avg_sq_sum += exp_avg_sq.sum()
-
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['exp_avg_sq_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
+                    exp_avg_sq_sum += exp_avg_sq.sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -1748,6 +1745,9 @@ class CompassADOPTMARS(BaseOptimizer):
                     copy_stochastic_(p, p_fp32)
                 else:
                     state['previous_grad'].copy_(grad)
+
+            if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                group['exp_avg_sq_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
 
         return loss
 

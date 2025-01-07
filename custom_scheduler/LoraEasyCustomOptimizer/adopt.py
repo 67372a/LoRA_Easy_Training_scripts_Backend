@@ -357,11 +357,8 @@ class ADOPTMARS(BaseOptimizer):
 
                     p_fp32.add_(update * mask, alpha=-lr)
 
-                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        exp_avg_sq_sum += exp_avg_sq.sum()
-
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
+                    exp_avg_sq_sum += exp_avg_sq.sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -371,6 +368,9 @@ class ADOPTMARS(BaseOptimizer):
                     copy_stochastic_(p, p_fp32)
                 else:
                     state['previous_grad'].copy_(-grad)
+
+            if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
 
         return loss
 
@@ -590,11 +590,8 @@ class FADOPTMARS(BaseOptimizer):
 
                     p_fp32.add_(update * mask, alpha=-lr)
 
-                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        fim_sum += fim.sum()
-
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
+                    fim_sum += fim.sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -604,6 +601,9 @@ class FADOPTMARS(BaseOptimizer):
                     copy_stochastic_(p, p_fp32)
                 else:
                     state['previous_grad'].copy_(grad)
+
+            if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
 
         return loss
     

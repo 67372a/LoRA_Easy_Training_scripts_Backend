@@ -530,17 +530,17 @@ class ADOPTScheduleFree(BaseOptimizer):
 
                     z.sub_(update, alpha=lr)
 
-                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum()
-
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
+                    exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     copy_stochastic_(state["z"], z)
                     copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
                     copy_stochastic_(p, p_fp32)
+
+            if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
 
         return loss
     
@@ -856,11 +856,8 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
 
                     z.sub_(full_update, alpha=lr)
 
-                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum()
-
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
+                    exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -868,6 +865,9 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
                     copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
                     copy_stochastic_(state["exp_avg_slow"], exp_avg_slow)
                     copy_stochastic_(p, p_fp32)
+
+            if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
 
         return loss
     
@@ -1163,11 +1163,8 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
 
                     z.sub_(full_update, alpha=lr)
 
-                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        exp_avg_sq_sum += exp_avg_sq.div(bias_correction3).sum()
-
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
+                    exp_avg_sq_sum += exp_avg_sq.div(bias_correction3).sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -1178,6 +1175,9 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
                     copy_stochastic_(p, p_fp32)
                 else:
                     state['previous_grad'].copy_(-grad)
+
+            if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
 
         return loss
 
@@ -1450,11 +1450,8 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
 
                     z.sub_(grad_update, alpha=lr)
 
-                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum()
-
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
+                    exp_avg_sq_sum += exp_avg_sq.div(bias_correction2).sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -1464,6 +1461,9 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                     copy_stochastic_(p, p_fp32)
                 else:
                     state['previous_grad'].copy_(grad)
+
+            if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                group['exp_avg_mean_sqrt'] = math.sqrt(exp_avg_sq_sum / param_size)
 
         return loss
     
@@ -1740,17 +1740,17 @@ class FADOPTScheduleFree(BaseOptimizer):
 
                     z.sub_(update, alpha=lr)
 
-                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        fim_sum += fim.sum()
-
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
+                    fim_sum += fim.sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     copy_stochastic_(state["z"], z)
                     copy_stochastic_(state['fim'], fim)
                     copy_stochastic_(p, p_fp32)
+
+            if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
 
         return loss
 
@@ -2077,11 +2077,8 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
 
                     z.sub_(update, alpha=lr)
 
-                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        fim_sum += fim.sum()
-
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
+                    fim_sum += fim.sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -2089,6 +2086,9 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
                     copy_stochastic_(state['fim'], fim)
                     copy_stochastic_(state["exp_avg_slow"], exp_avg_slow)
                     copy_stochastic_(p, p_fp32)
+
+            if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
 
         return loss
     
@@ -2394,11 +2394,8 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
 
                     z.sub_(update, alpha=lr)
 
-                    if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        fim_sum += fim.sum()
-
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                    group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
+                    fim_sum += fim.sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -2409,6 +2406,9 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
                     copy_stochastic_(p, p_fp32)
                 else:
                     state['previous_grad'].copy_(-grad)
+
+            if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
 
         return loss
     
@@ -2720,11 +2720,8 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
 
                     z.sub_(grad_nat, alpha=lr)
 
-                    if weight_decay != 0 and weight_decouple and group['stable_weight_decay']:
-                        fim_sum += fim.sum()
-
                 if weight_decay != 0 and weight_decouple and group['stable_weight_decay']:
-                    group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
+                    fim_sum += fim.sum()
 
                 # pack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -2734,6 +2731,9 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                     copy_stochastic_(p, p_fp32)
                 else:
                     state['previous_grad'].copy_(grad)
+
+            if weight_decay != 0 and weight_decouple and group['stable_weight_decay']:
+                group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
 
         return loss
     
