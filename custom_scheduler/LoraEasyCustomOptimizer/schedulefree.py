@@ -2901,9 +2901,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
     def _eval(p: torch.Tensor, z: torch.Tensor, beta1: float):
         p_f32 = p.float()
 
-        z_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(z.float())
-
-        p_f32.data.lerp_(end=z_f32, weight=1.0 - 1.0 / beta1)
+        p_f32.data.lerp_(end=z.float(), weight=1.0 - 1.0 / beta1)
 
         if p.dtype == torch.bfloat16:
             p.copy_(_fp32_to_bf16_sr(p_f32))
@@ -2919,7 +2917,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     for p in group['params']:
                         state = self.state[p]
                         if 'z' in state:
-                            torch.compile(self._eval, fullgraph=True, dynamic=False)(p=p.detach(), z=state["z"], beta1=group['betas'][0])
+                            torch.compile(self._eval, fullgraph=True, dynamic=False)(p=p, z=state["z"], beta1=group['betas'][0])
                     self.train_mode = False
 
     @staticmethod
@@ -2927,9 +2925,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
     def _train(p: torch.Tensor, z: torch.Tensor, beta1: float):
         p_f32 = p.float()
 
-        z_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(z.float())
-
-        p_f32.data.lerp_(end=z_f32, weight=1.0 - beta1)
+        p_f32.data.lerp_(end=z.float(), weight=1.0 - beta1)
 
         if p.dtype == torch.bfloat16:
             p.copy_(_fp32_to_bf16_sr(p_f32))
@@ -2944,7 +2940,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     for p in group['params']:
                         state = self.state[p]
                         if 'z' in state:
-                            torch.compile(self._train, fullgraph=True, dynamic=False)(p=p.detach(), z=state["z"], beta1=group['betas'][0])
+                            torch.compile(self._train, fullgraph=True, dynamic=False)(p=p, z=state["z"], beta1=group['betas'][0])
                     self.train_mode = True
 
     @torch.no_grad()
