@@ -3011,7 +3011,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             "optim.param_groups[0]['lr'].fill_(new_lr)"
                         )
                     
-                    if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                    if group["weight_decay"] > 0 and group['stable_weight_decay']:
                         swd_param_size_sum += p.numel()
 
                     sf_lr_max = state['sf_lr_max'].copy_(torch.max(group["lr"], state['sf_lr_max']))
@@ -3090,10 +3090,10 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"],
                         )
 
-                        if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                        if group["weight_decay"] > 0 and group['stable_weight_decay']:
                             swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
 
-                if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                if group["weight_decay"] > 0 and group['stable_weight_decay']:
                     swd_second_moment_mean_sqrt = math.sqrt(swd_second_moment_group_sum / swd_param_size_sum)
                     if swd_second_moment_mean_sqrt > 0:
                         group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(swd_second_moment_mean_sqrt, device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
