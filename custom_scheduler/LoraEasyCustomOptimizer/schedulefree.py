@@ -2979,13 +2979,13 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
 
                     state = self.state[p]
 
-                    if group["swd_second_moment_mean_sqrt"] is None:
-                        group["swd_second_moment_mean_sqrt"] = torch.tensor(1.0, device=p.device, dtype=torch.float32)
-
                     # State initialization
                     if len(state) == 0:
                         state["step"] = torch.tensor(0, device=p.device, dtype=torch.int32)
-                        state["swd_second_moment_parameter_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
+                        if group["weight_decay"] > 0 and group['stable_weight_decay']:
+                            state["swd_second_moment_parameter_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
+                            if group.get("swd_second_moment_mean_sqrt", None) is None:
+                                group["swd_second_moment_mean_sqrt"] = torch.tensor(1.0, device=p.device, dtype=torch.float32)
                         state["z"] = self._new_buffer(p, True)
                         if state["z"].dtype == torch.bfloat16:
                             state["z"].copy_(_fp32_to_bf16_sr(p.float()))
@@ -3086,8 +3086,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             adopt_clip=adopt_clip,
                             sf_checkpoint=checkpoint,
                             sf_adaptive_y_lr=adaptive_y_lr,
-                            swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'],
-                            swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"],
+                            swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] else None,
+                            swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] else None,
                         )
 
                         if group["weight_decay"] > 0 and group['stable_weight_decay']:
@@ -3197,9 +3197,9 @@ def single_param_ADOPTAOScheduleFree(
 
     # Weight decay
     if weight_decay > 0 and weight_decouple:
+        z_f32.add_(y_f32, alpha=-lr * weight_decay * swd_scaling)
+        y_f32.add_(y_f32, alpha=-lr * weight_decay * (1.0 - beta1) * swd_scaling)
 
-        z_f32.mul_(1.0 - weight_decay * lr * swd_scaling)
-        y_f32.mul_(1.0 - weight_decay * -sf_adaptive_y_lr * swd_scaling)
     elif weight_decay > 0:
         if fisher:
             grad_weights = y_f32.div(fim_base)

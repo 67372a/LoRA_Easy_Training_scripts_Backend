@@ -1931,18 +1931,21 @@ class _CompassBase(Optimizer):
                     # State initialization
                     if len(state) == 0:
                         state["step"] = torch.tensor(0.0)
-                        state["swd_second_moment_parameter_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
+                        if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                            state["swd_second_moment_parameter_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
+                            if group.get("swd_second_moment_mean_sqrt", None) is None:
+                                group["swd_second_moment_mean_sqrt"] = torch.tensor(1.0, device=p.device, dtype=torch.float32)
                         state["exp_avg"] = self._new_buffer(p, True)
                         state["exp_avg_sq"] = self._new_buffer(p, False)
                         if mars_gamma > 0:
                             state["previous_grad"] = self._new_buffer(p, True)
                             state["previous_grad"].copy_(p.grad.float())
 
+
                     state["step"] += 1
 
                     if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
-                        if group["swd_second_moment_mean_sqrt"] is None:
-                            group["swd_second_moment_mean_sqrt"] = torch.tensor(1.0, device=p.device, dtype=torch.float32)
+
                         swd_param_size_sum += p.numel()
 
                     if not isinstance(group["lr"], torch.Tensor):
@@ -2011,8 +2014,8 @@ class _CompassBase(Optimizer):
                             use_muon_pp=group["use_muon_pp"],
                             compass_second_moment_smoothing=group["compass_second_moment_smoothing"],
                             update_strategy=group["update_strategy"],
-                            swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'],
-                            swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"],
+                            swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] else None,
+                            swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] else None,
                         )
 
                         if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
