@@ -47,6 +47,7 @@ class AdEMAMix(BaseOptimizer):
         centralization: float = 0.0,
         cautious: bool = False,
         update_strategy: UPDATE_STRATEGY = 'unmodified',
+        adopt: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -78,6 +79,7 @@ class AdEMAMix(BaseOptimizer):
             'centralization': centralization,
             'cautious': cautious,
             'update_strategy': update_strategy,
+            'adopt': adopt,
         }
 
         super().__init__(params, defaults)
@@ -142,15 +144,18 @@ class AdEMAMix(BaseOptimizer):
 
             beta1, beta2, beta3 = group['betas']
 
-            bias_correction1: float = self.debias(beta1, group['step'])
-            bias_correction2_sq: float = math.sqrt(self.debias(beta2, group['step']))
+            step = group['step']
+
+            bias_correction1: float = self.debias(beta1, step)
+            bias_correction2_sq: float = math.sqrt(self.debias(beta2, step))
 
             eps = group['eps']
             clip = group['clip']
             centralization = group['centralization']
+            adopt = group['adopt']
 
-            alpha_t: float = self.schedule_alpha(group['t_alpha_beta3'], group['step'], group['alpha'])
-            beta3_t: float = self.schedule_beta3(group['t_alpha_beta3'], group['step'], beta1, beta3, eps)
+            alpha_t: float = self.schedule_alpha(group['t_alpha_beta3'], step, group['alpha'])
+            beta3_t: float = self.schedule_beta3(group['t_alpha_beta3'], step, beta1, beta3, eps)
 
             for p in group['params']:
                 if p.grad is None:
@@ -193,40 +198,50 @@ class AdEMAMix(BaseOptimizer):
                         exp_avg = exp_avg.to(torch.float32)
                     exp_avg_sq, exp_avg_slow = exp_avg_sq.to(torch.float32), exp_avg_slow.to(torch.float32)
 
-                if beta1 > 0.0:
-                    exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+                if adopt and step == 0:
+                    exp_avg_sq.add_(grad)
                 else:
-                    exp_avg = grad
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-                exp_avg_slow.mul_(beta3_t).add_(grad, alpha=1.0 - beta3_t)
+                    og_grad = grad
+                    if not adopt:
+                        exp_avg_sq.mul_(beta2).addcmul_(og_grad, og_grad, value=1.0 - beta2)
+                        de_nom = (exp_avg_sq.sqrt() / bias_correction2_sq).add_(eps)
+                    else:
+                        de_nom = (exp_avg_sq.sqrt()).add_(eps)
+                        exp_avg_sq.mul_(beta2).addcmul_(og_grad, og_grad, value=1.0 - beta2)
+                        adopt_clip: float = (step-1)**0.25
+                        scaled_adopt_clip = adopt_clip * de_nom
+                        grad = grad.clamp(-scaled_adopt_clip, scaled_adopt_clip)
 
-                de_nom = (exp_avg_sq.sqrt() / bias_correction2_sq).add_(eps)
+                    if beta1 > 0.0:
+                        exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+                    else:
+                        exp_avg = grad
 
-                update = (exp_avg.div(bias_correction1) + alpha_t * exp_avg_slow)
+                    exp_avg_slow.mul_(beta3_t).add_(grad, alpha=1.0 - beta3_t)
 
-                if group['update_strategy'] in {'cautious','grams'}:
-                    if group['update_strategy'] == 'cautious':
-                        mask = (update * grad > 0).to(grad.dtype)
-                        mask.div_(mask.mean().clamp_(min=1e-3))
-                    elif group['update_strategy'] == 'grams':
-                        update.copy_(torch.sign(grad) * update.abs())
-                        mask = 1.0
-                else:
-                    mask = 1.0
+                    update = (exp_avg.div(bias_correction1) + alpha_t * exp_avg_slow)
 
-                update = (update * mask) / de_nom
+                    if group['update_strategy'] in {'cautious','grams'}:
+                        if group['update_strategy'] == 'cautious':
+                            mask = (update * grad > 0).to(grad.dtype)
+                            mask.div_(mask.mean().clamp_(min=1e-3))
+                            update = update * mask
+                        elif group['update_strategy'] == 'grams':
+                            update.copy_(torch.sign(grad) * update.abs())
 
-                self.apply_weight_decay(
-                    p=p_fp32,
-                    grad=update,
-                    lr=group['lr'],
-                    weight_decay=group['weight_decay'],
-                    weight_decouple=group['weight_decouple'],
-                    fixed_decay=group['fixed_decay'],
-                )
+                    update = update / de_nom
 
-                p_fp32.add_(-group['lr'] * update)
-                
+                    self.apply_weight_decay(
+                        p=p_fp32,
+                        grad=update,
+                        lr=group['lr'],
+                        weight_decay=group['weight_decay'],
+                        weight_decouple=group['weight_decouple'],
+                        fixed_decay=group['fixed_decay'],
+                    )
+
+                    p_fp32.add_(-group['lr'] * update)
+                    
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     if beta1 > 0.0:
                         copy_stochastic_(state["exp_avg"], exp_avg)
