@@ -7,7 +7,7 @@ import math
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
-from .utils import copy_stochastic_, NORM_TYPE, agc
+from .utils import copy_stochastic_, NORM_TYPE, agc, UPDATE_STRATEGY
 
 class ADOPT(BaseOptimizer):
     r"""Modified Adam Can Converge with Any β2 with the Optimal Rate.
@@ -20,7 +20,11 @@ class ADOPT(BaseOptimizer):
     :param fixed_decay: bool. fix weight decay.
     :param eps: float. term added to the denominator to improve numerical stability.
     :param clip: float. special form of clip for ADOPT, recommended and default value is 0.25.
-    :param cautious: bool: Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+    cautious (bool) (deprecated, use update strategy)
+        Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+    update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
+        Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
+        and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified) (recommended: grams)
     """
 
     def __init__(
@@ -34,12 +38,20 @@ class ADOPT(BaseOptimizer):
         eps: float = 1e-6,
         clip: float = 0.25,
         cautious: bool = False,
+        update_strategy: UPDATE_STRATEGY = 'unmodified',
         **kwargs,
     ):
         self.validate_learning_rate(lr)
         self.validate_betas(betas)
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
+
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams'}:
+            raise ValueError("Invalid update strategy: {}".format(update_strategy))
+        
+        # If cautious true, override update strategy to cautious
+        if cautious:
+            update_strategy = 'cautious'
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -50,6 +62,7 @@ class ADOPT(BaseOptimizer):
             'eps': eps,
             'clip': clip,
             'cautious': cautious,
+            'update_strategy':update_strategy,
         }
 
         super().__init__(params, defaults)
@@ -133,14 +146,17 @@ class ADOPT(BaseOptimizer):
 
                 exp_avg.lerp_(normed_grad, 1 - beta1)
 
-                if group["cautious"]:
-                    # compute norm gradient
-                    mask = (exp_avg * normed_grad > 0).to(normed_grad.dtype)
-                    mask.div_(mask.mean().clamp_(min=1e-3))
-                else:
-                    mask = 1.0
+                update = exp_avg.clone()
 
-                p_fp32.add_(exp_avg * mask, alpha=-group['lr'])
+                if group['update_strategy'] in {'cautious','grams'}:
+                    if group['update_strategy'] == 'cautious':
+                        mask = (update * grad > 0).to(grad.dtype)
+                        mask.div_(mask.mean().clamp_(min=1e-3))
+                        update = update * mask
+                    elif group['update_strategy'] == 'grams':
+                        update.copy_(torch.sign(grad) * update.abs())
+
+                p_fp32.add_(update, alpha=-group['lr'])
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
 
                 # pack
