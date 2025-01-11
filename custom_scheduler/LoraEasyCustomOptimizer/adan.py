@@ -8,7 +8,7 @@ from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 from pytorch_optimizer.optimizer.gc import centralize_gradient
 from pytorch_optimizer.optimizer.utils import get_global_gradient_norm
-from .utils import copy_stochastic_
+from .utils import copy_stochastic_, UPDATE_STRATEGY
 
 
 class Adan(BaseOptimizer):
@@ -24,7 +24,11 @@ class Adan(BaseOptimizer):
     :param r: float. EMA factor. between 0.9 ~ 0.99 is preferred.
     :param adanorm: bool. whether to use the AdaNorm variant.
     :param eps: float. term added to the denominator to improve numerical stability.
-    :param cautious: bool: Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085
+    cautious (bool) (deprecated, use update strategy)
+        Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+    update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
+        Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
+        and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified) (recommended: grams)
     """
 
     def __init__(
@@ -40,6 +44,7 @@ class Adan(BaseOptimizer):
         adanorm: bool = False,
         eps: float = 1e-8,
         cautious: bool = False,
+        update_strategy: UPDATE_STRATEGY = 'unmodified',
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -47,6 +52,13 @@ class Adan(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(max_grad_norm, 'max_grad_norm')
         self.validate_non_negative(eps, 'eps')
+
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams'}:
+            raise ValueError("Invalid update strategy: {}".format(update_strategy))
+        
+        # If cautious true, override update strategy to cautious
+        if cautious:
+            update_strategy = 'cautious'
 
         self.max_grad_norm = max_grad_norm
         self.use_gc = use_gc
@@ -60,6 +72,7 @@ class Adan(BaseOptimizer):
             'adanorm': adanorm,
             'eps': eps,
             'cautious': cautious,
+            'update_strategy': update_strategy,
         }
         if adanorm:
             defaults.update({'r': r})
@@ -173,23 +186,31 @@ class Adan(BaseOptimizer):
                 if group['weight_decouple']:
                     p_fp32.mul_(1.0 - group['lr'] * group['weight_decay'])
 
-                if group["cautious"]:
-                    # compute norm gradient
-                    exp_avg_mask = (exp_avg * grad > 0).to(grad.dtype)
-                    exp_avg_mask.div_(exp_avg_mask.mean().clamp_(min=1e-3))
+                if group['update_strategy'] in {'cautious','grams'}:
+                    if group['update_strategy'] == 'cautious':
+                        exp_avg_mask = (exp_avg * grad > 0).to(grad.dtype)
+                        exp_avg_mask.div_(exp_avg_mask.mean().clamp_(min=1e-3))
+                    elif group['update_strategy'] == 'grams':
+                        exp_avg_upd = torch.sign(grad) * exp_avg.abs()
+                        exp_avg_mask = 1.0
                 else:
+                    exp_avg_upd = exp_avg
                     exp_avg_mask = 1.0
 
-                p_fp32.addcdiv_(exp_avg * exp_avg_mask, de_nom, value=-group['lr'] / bias_correction1)
+                p_fp32.addcdiv_(exp_avg_upd * exp_avg_mask, de_nom, value=-group['lr'] / bias_correction1)
 
-                if group["cautious"]:
-                    # compute norm gradient
-                    exp_avg_diff_mask = (exp_avg_diff * grad > 0).to(grad.dtype)
-                    exp_avg_diff_mask.div_(exp_avg_diff_mask.mean().clamp_(min=1e-3))
+                if group['update_strategy'] in {'cautious','grams'}:
+                    if group['update_strategy'] == 'cautious':
+                        exp_avg_diff_mask = (exp_avg_diff * grad > 0).to(grad.dtype)
+                        exp_avg_diff_mask.div_(exp_avg_diff_mask.mean().clamp_(min=1e-3))
+                    elif group['update_strategy'] == 'grams':
+                        exp_avg_diff_upd = torch.sign(grad) * exp_avg_diff.abs()
+                        exp_avg_diff_mask = 1.0
                 else:
+                    exp_avg_diff_upd = exp_avg_diff
                     exp_avg_diff_mask = 1.0
 
-                p_fp32.addcdiv_(exp_avg_diff * exp_avg_diff_mask, de_nom, value=-group['lr'] * beta2 / bias_correction2)
+                p_fp32.addcdiv_(exp_avg_diff_upd * exp_avg_diff_mask, de_nom, value=-group['lr'] * beta2 / bias_correction2)
 
                 if not group['weight_decouple']:
                     p_fp32.div_(1.0 + group['lr'] * group['weight_decay'])
