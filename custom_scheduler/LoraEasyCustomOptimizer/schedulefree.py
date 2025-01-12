@@ -2759,6 +2759,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         weight_lr_power,
         fisher,
         update_strategy,
+        stable_update,
+        atan2_denom,
         *,
         block_size,
         min_quant_size,
@@ -2812,6 +2814,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             weight_lr_power=weight_lr_power,
             fisher=fisher,
             update_strategy=update_strategy,
+            stable_update=stable_update,
+            atan2_denom=atan2_denom,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -2838,6 +2842,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("train_mode", False)
             group.setdefault("fisher", False)
             group.setdefault("update_strategy", 'unmodified')
+            group.setdefault("stable_update", False)
+            group.setdefault("atan2_denom", False)
 
     # bring your own function to create zero-filled subclass
     def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
@@ -3083,6 +3089,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             use_muon_pp=group["use_muon_pp"],
                             fisher=group["fisher"],
                             update_strategy=group["update_strategy"],
+                            stable_update=group["stable_update"],
+                            atan2_denom=group["atan2_denom"],
                             adopt_clip=adopt_clip,
                             sf_checkpoint=checkpoint,
                             sf_adaptive_y_lr=adaptive_y_lr,
@@ -3102,6 +3110,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     
         return loss
 
+def get_rms(tensor, eps=1e-8):
+    return tensor.norm().div(tensor.numel() ** 0.5).clamp_min(eps)
 
 # this will work with any optim state tensor subclass that implements aten.lerp.Scalar and aten.copy_.default
 # and param tensor subclass that implements aten.add_.Tensor, and aten.addcdiv_.default
@@ -3129,6 +3139,8 @@ def single_param_ADOPTAOScheduleFree(
     use_muon_pp: bool,
     fisher: bool,
     update_strategy: UPDATE_STRATEGY,
+    stable_update: bool,
+    atan2_denom: bool,
     adopt_clip: torch.Tensor,
     sf_checkpoint: torch.Tensor,
     sf_adaptive_y_lr: torch.Tensor,
@@ -3176,20 +3188,33 @@ def single_param_ADOPTAOScheduleFree(
     else:
         curr_eps = eps
 
+
     if fisher:
-        fim_base = exp_avg_sq_f32.sqrt().add_(curr_eps)
+        fim_base = exp_avg_sq_f32.sqrt()
         exp_avg_sq_f32.mul_(current_beta2).addcmul_(grad_f32, grad_f32, value=1 - current_beta2).clamp_(-adopt_clip, adopt_clip)
 
-        grad_nat = grad_f32.div(fim_base)
+        if atan2_denom:
+            grad_nat = grad_f32.atan2(fim_base)
+        else:
+            fim_base.add_(curr_eps)
+            grad_nat = grad_f32.div(fim_base)
         rms = grad_nat.pow(2).mean().sqrt_()
         divisor = max(1.0, rms) / 1.0
         update = grad_nat.div_(divisor)
     else:
-        de_nom = exp_avg_sq_f32.div(bias_correction2).sqrt().add_(curr_eps)
+        de_nom = exp_avg_sq_f32.div(bias_correction2).sqrt()
+        
+        if atan2_denom:
+            # Approximate scaling for a regular Adam-style update.
+            # Adam-atan2. Use atan2 rather than epsilon and division 
+            # for parameter updates (https://arxiv.org/abs/2407.05872).
+            # Has the nice property of "clipping" the gradient as well.
+            update = grad_f32.atan2(de_nom).mul_(torch.tensor(1) / torch.tensor(math.atan(1)))
+        else:
+            de_nom.add_(curr_eps)
+            update = grad_f32.div(de_nom).clamp_(-adopt_clip, adopt_clip)   
         exp_avg_sq_f32.mul_(beta2).addcmul_(grad_f32, grad_f32, value=1 - beta2)
-
-        update = grad_f32.div(de_nom).clamp_(-adopt_clip, adopt_clip)
-
+      
     if stable_weight_decay:
         swd_scaling = 1.0 / swd_second_moment_mean_sqrt
     else:
@@ -3211,6 +3236,11 @@ def single_param_ADOPTAOScheduleFree(
             update.add_(grad_weights, alpha=weight_decay * swd_scaling)
         else:
             update.add_(y_f32, alpha=weight_decay * swd_scaling)
+
+    if stable_update:
+        clip_threshold = 1
+        rms = get_rms(update, 1).div(clip_threshold).clamp_min(1)
+        update.mul_(1 / rms)
 
     if update_strategy in {'cautious','grams'}:
         y_update = (y_f32 - z_f32).mul_(sf_checkpoint).add_(update, alpha=-sf_adaptive_y_lr)
@@ -3305,6 +3335,13 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         update_strategy (str)
             Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
             and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified)
+        stable_update (boolean):
+            Scales parameter updates by the root-mean-square of the normalised gradient, in essence identical to 
+            Adafactor's gradient scaling. Set to False if the adaptive learning rate never improves.
+            (default: False)
+        atan2_denom (boolean). Use atan2 rather than epsilon and division for parameter updates (https://arxiv.org/abs/2407.05872).
+            Has the nice property of "clipping" the gradient as well.
+            (default: False)
     """
 
     def __init__(
@@ -3328,6 +3365,8 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         weight_lr_power: float = 2.0,
         fisher: float = False,
         update_strategy: UPDATE_STRATEGY = 'unmodified',
+        stable_update: bool = False,
+        atan2_denom: bool = False,
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -3357,4 +3396,6 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             min_quant_size=min_quant_size,
             state_precision=state_precision,
             update_strategy=update_strategy,
+            stable_update=stable_update,
+            atan2_denom=atan2_denom,
         )
