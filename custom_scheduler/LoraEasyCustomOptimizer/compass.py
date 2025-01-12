@@ -70,7 +70,7 @@ class Compass(BaseOptimizer):
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
         update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
             Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
-            and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified) (recommended: grams)
+            and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified)
     """
 
     def __init__(
@@ -2218,7 +2218,7 @@ class CompassAO(_CompassBase):
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
         update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
             Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
-            and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified) (recommended: grams)
+            and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified)
         use_muon_pp (boolean):
             Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
             (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.

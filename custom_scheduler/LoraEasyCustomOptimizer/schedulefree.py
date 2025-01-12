@@ -3304,7 +3304,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             set to 0 for no weighting. (Default: 2.0)
         update_strategy (str)
             Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
-            and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified) (recommended: grams)
+            and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified)
     """
 
     def __init__(

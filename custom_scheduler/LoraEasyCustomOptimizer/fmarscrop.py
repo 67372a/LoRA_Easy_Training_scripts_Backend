@@ -437,7 +437,7 @@ class FMARSCropV2ExMachina(BaseOptimizer):
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
         update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
             Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
-            and 'grams' (https://arxiv.org/abs/2412.17107) (default: cautious) (recommended: grams)
+            and 'grams' (https://arxiv.org/abs/2412.17107) (default: cautious)
         adaptive_clip (float):
             Adaptive clip value to applied to the MARS corrected gradient. (default: 1.0).
         adaptive_clip_eps (float):
