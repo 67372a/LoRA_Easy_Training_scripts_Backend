@@ -3209,7 +3209,7 @@ def single_param_ADOPTAOScheduleFree(
             # Adam-atan2. Use atan2 rather than epsilon and division 
             # for parameter updates (https://arxiv.org/abs/2407.05872).
             # Has the nice property of "clipping" the gradient as well.
-            update = grad_f32.atan2(de_nom).mul_(torch.tensor(1) / torch.tensor(math.atan(1)))
+            update = grad_f32.atan2(de_nom).mul_(torch.tensor(1) / torch.tensor(math.atan(1))).clamp_(-adopt_clip, adopt_clip)   
         else:
             de_nom.add_(curr_eps)
             update = grad_f32.div(de_nom).clamp_(-adopt_clip, adopt_clip)   
