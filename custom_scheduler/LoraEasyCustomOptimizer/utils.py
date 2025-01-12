@@ -53,7 +53,7 @@ def agc(p: torch.Tensor,
         grad: torch.Tensor, 
         agc_clip_val: float, 
         agc_eps: float = 1e-3, 
-        eps: float = 1e-37, 
+        eps: float = 1e-30, 
         norm_type: NORM_TYPE = 'unit') -> torch.Tensor:
     r"""Clip gradient values in excess of the norm.
         Clip updates to be at most clipping * parameter_norm.
@@ -145,7 +145,7 @@ def create_factored_dims(
     
 # https://github.com/LoganBooker/prodigy-plus-schedule-free/blob/23f752a3901686d270dfdcb9b29823541ad1c3c7/prodigyplus/core_optimiser.py#L389
 @torch.no_grad()
-def get_denom(second_moment: torch.tensor, eps: float = 1e-37):
+def get_denom(second_moment: torch.tensor, eps: float = 1e-30):
     # Get denom
     if isinstance(second_moment, list):
         row_var, col_var, _, _, reduce_dc = second_moment
