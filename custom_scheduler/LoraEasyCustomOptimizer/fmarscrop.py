@@ -1,6 +1,6 @@
 # FMARSCrop from https://github.com/Clybius/Personalized-Optimizers by Clybius
 import torch
-from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz
+from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz, UPDATE_STRATEGY
 import math
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
@@ -433,8 +433,11 @@ class FMARSCropV2ExMachina(BaseOptimizer):
             The lambda value for slow momentum / EMA, controlling how much the momentum is amplified while being added to the update. (default: 2.0).
         clip (float):
             Value to clip the grad's RMS at (default: 1.0)
-        cautious (bool):
-            Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: True)
+        cautious (bool) (deprecated, use update strategy)
+            Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
+        update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
+            Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
+            and 'grams' (https://arxiv.org/abs/2412.17107) (default: cautious) (recommended: grams)
         adaptive_clip (float):
             Adaptive clip value to applied to the MARS corrected gradient. (default: 1.0).
         adaptive_clip_eps (float):
@@ -476,7 +479,7 @@ class FMARSCropV2ExMachina(BaseOptimizer):
         diff_mult: float = 1.0,
         momentum_lambda: float = 0.1,
         clip: float = 1.0,
-        cautious: bool = True,
+        cautious: bool = False,
         gamma: float = 0.005,
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
@@ -486,6 +489,7 @@ class FMARSCropV2ExMachina(BaseOptimizer):
         debias_beta2: bool = True,
         debias_beta3: bool = False,
         use_muon_pp: bool = False,
+        update_strategy: UPDATE_STRATEGY = 'cautious',
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -496,6 +500,13 @@ class FMARSCropV2ExMachina(BaseOptimizer):
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
+
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams'}:
+            raise ValueError("Invalid update strategy: {}".format(update_strategy))
+        
+        # If cautious true, override update strategy to cautious
+        if cautious:
+            update_strategy = 'cautious'
 
         defaults: DEFAULTS = {
             'lr':lr,
@@ -520,6 +531,7 @@ class FMARSCropV2ExMachina(BaseOptimizer):
             'debias_beta3':debias_beta3,
             'weight_decouple':weight_decouple,
             'use_muon_pp': use_muon_pp,
+            'update_strategy': update_strategy,
         }
 
         super().__init__(params, defaults)
@@ -700,10 +712,13 @@ class FMARSCropV2ExMachina(BaseOptimizer):
                     else:
                         momentum_cent = momentum
 
-                    if group['cautious']:
-                        mask = (momentum_cent * grad_nat < 0).to(momentum_cent.dtype)
-                        mask.div_(mask.mean().clamp_(min=1e-3))
-                        momentum_cent = momentum_cent * mask
+                    if group['update_strategy'] in {'cautious','grams'}:
+                        if group['update_strategy'] == 'cautious':
+                            mask = (momentum_cent * grad_nat > 0).to(grad_nat.dtype)
+                            mask.div_(mask.mean().clamp_(min=1e-3))
+                            momentum_cent = momentum_cent * mask
+                        elif group['update_strategy'] == 'grams':
+                            momentum_cent = torch.sign(grad_nat) * momentum_cent.abs()
 
                     # Compass-style amplification
                     full_step = grad_nat.add(momentum_cent, alpha=step**momentum_lambda)
@@ -716,13 +731,13 @@ class FMARSCropV2ExMachina(BaseOptimizer):
                             )
                         )
 
+                    if stable_weight_decay and group['fim_mean_sqrt'] is not None:
+                        swd_scaling = 1.0 / group['fim_mean_sqrt']
+                    else:
+                        swd_scaling = 1.0
+
                     # Perform weight decay
                     if weight_decay != 0 and weight_decouple:
-                        if stable_weight_decay and group['fim_mean_sqrt'] > 0:
-                            swd_scaling = 1.0 / group['fim_mean_sqrt']
-                        else:
-                            swd_scaling = 1.0
-
                         p_fp32.mul_(1.0 - weight_decay * lr * swd_scaling)
                     elif weight_decay != 0:
                         grad_weights = p_fp32.data.div(fim_base).div_(diff_fim_base)
@@ -731,21 +746,18 @@ class FMARSCropV2ExMachina(BaseOptimizer):
                         divisor = max(clip, rms) / clip
                         grad_weights.div_(divisor)
 
-                        if stable_weight_decay and group['fim_mean_sqrt'] is not None:
-                            scale = 1.0 / group['fim_mean_sqrt']
-                        else:
-                            scale = 1.0
+                        p_fp32.data.add_(grad_weights, alpha=-lr * weight_decay * swd_scaling)
 
-                        p_fp32.data.add_(grad_weights, alpha=-lr * weight_decay * scale)
-
-                    if group["cautious"]:
-                        mask = (full_step * grad_nat > 0).to(grad_nat.dtype)
-                        mask.div_(mask.mean().clamp_(min=1e-3))
-                    else:
-                        mask = 1.0
+                    if group['update_strategy'] in {'cautious','grams'}:
+                        if group['update_strategy'] == 'cautious':
+                            mask = (full_step * grad_nat > 0).to(grad_nat.dtype)
+                            mask.div_(mask.mean().clamp_(min=1e-3))
+                            full_step = full_step * mask
+                        elif group['update_strategy'] == 'grams':
+                            full_step.copy_(torch.sign(grad_nat) * full_step.abs())
 
                     # Apply full step
-                    p_fp32.data.add_(full_step * mask, alpha=-step_size)
+                    p_fp32.data.add_(full_step, alpha=-step_size)
 
                     fim.mul_(current_beta2).addcmul_(approx_grad_nat, approx_grad_nat, value=1.0 - current_beta2).clamp_(-clip_lambda, clip_lambda)
 
