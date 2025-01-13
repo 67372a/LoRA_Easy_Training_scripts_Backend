@@ -16,7 +16,7 @@ from .low_bit_optim.subclass_4bit import OptimState4bit
 from .low_bit_optim.subclass_fp8 import OptimStateFp8
 from torch.distributed._tensor import DTensor
 
-UPDATE_STRATEGY = Literal['unmodified','cautious','grams']
+UPDATE_STRATEGY = Literal['unmodified','cautious','grams', 'both']
 
 class ScheduleFreeWrapper(BaseOptimizer):
     r"""
@@ -2774,7 +2774,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
         if not 0.0 <= betas[1] < 1.0:
             raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
-        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams'}:
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams','both'}:
             raise ValueError("Invalid update strategy: {}".format(update_strategy))
         
         # Override zero to 1e-37, as zero and float32.tiny NaNs
@@ -3242,13 +3242,13 @@ def single_param_ADOPTAOScheduleFree(
         rms = get_rms(update, 1).div(clip_threshold).clamp_min(1)
         update.mul_(1 / rms)
 
-    if update_strategy in {'cautious','grams'}:
+    if update_strategy in {'cautious','grams','both'}:
         y_update = (y_f32 - z_f32).mul_(sf_checkpoint).add_(update, alpha=-sf_adaptive_y_lr)
-        if update_strategy == 'cautious':
+        if update_strategy in {'cautious','both'}:
             mask = (y_update * update > 0).to(update.dtype)
             mask.div_(mask.mean().clamp_(min=1e-3))
             y_update.mul_(mask)
-        elif update_strategy == 'grams':
+        if update_strategy in {'grams','both'}:
             y_update.copy_(torch.sign(update) * y_update.abs())
         y_f32.add_(y_update, alpha=-1)
     else:
