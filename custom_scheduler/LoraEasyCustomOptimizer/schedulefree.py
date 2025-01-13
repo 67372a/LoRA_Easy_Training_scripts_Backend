@@ -2846,6 +2846,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("update_strategy", 'unmodified')
             group.setdefault("stable_update", False)
             group.setdefault("atan2_denom", False)
+            group.setdefault("use_orthograd", False)
 
     # bring your own function to create zero-filled subclass
     def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
@@ -3047,7 +3048,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
 
                         if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
                             grad_f32 = newton_schulz(grad_f32)
-                        elif group["use_othrograd"]:
+                        elif group["use_orthograd"]:
                             grad_f32 = orthograd(p_f32, grad_f32)
 
                         if adaptive_clip > 0:
