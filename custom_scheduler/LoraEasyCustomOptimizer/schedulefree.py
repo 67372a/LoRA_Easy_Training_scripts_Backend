@@ -9,7 +9,7 @@ import math
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
-from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz, STATE_PRECISION
+from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz, STATE_PRECISION, orthograd
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
@@ -2761,6 +2761,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         update_strategy,
         stable_update,
         atan2_denom,
+        use_othrograd,
         *,
         block_size,
         min_quant_size,
@@ -2816,6 +2817,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             update_strategy=update_strategy,
             stable_update=stable_update,
             atan2_denom=atan2_denom,
+            use_othrograd=use_othrograd,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -3030,6 +3032,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     
                     if state["step"] == 1:
                         grad_f32 = grad.float()
+                        p_f32 = p.float()
 
                         if mars_gamma > 0:
                             # MARS Calculate cₜ (gradient with correction term)
@@ -3044,6 +3047,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
 
                         if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
                             grad_f32 = newton_schulz(grad_f32)
+                        elif group["use_othrograd"]:
+                            grad_f32 = orthograd(p_f32, grad_f32)
 
                         if adaptive_clip > 0:
                             grad_f32 = agc(p=p.float(), grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
@@ -3091,6 +3096,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             update_strategy=group["update_strategy"],
                             stable_update=group["stable_update"],
                             atan2_denom=group["atan2_denom"],
+                            use_othrograd=group["use_othrograd"],
                             adopt_clip=adopt_clip,
                             sf_checkpoint=checkpoint,
                             sf_adaptive_y_lr=adaptive_y_lr,
@@ -3141,6 +3147,7 @@ def single_param_ADOPTAOScheduleFree(
     update_strategy: UPDATE_STRATEGY,
     stable_update: bool,
     atan2_denom: bool,
+    use_othrograd: bool,
     adopt_clip: torch.Tensor,
     sf_checkpoint: torch.Tensor,
     sf_adaptive_y_lr: torch.Tensor,
@@ -3178,6 +3185,8 @@ def single_param_ADOPTAOScheduleFree(
 
     if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
         grad_f32 = newton_schulz(grad_f32)
+    elif use_othrograd:
+        grad_f32 = orthograd(p_f32, grad_f32)
 
     if adaptive_clip > 0:
         grad_f32 = agc(p=y_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
@@ -3187,7 +3196,6 @@ def single_param_ADOPTAOScheduleFree(
         curr_eps = max(min(eps, eps2 * rms_grad), eps_floor) # Set a floor for eps to avoid NaN
     else:
         curr_eps = eps
-
 
     if fisher:
         fim_base = exp_avg_sq_f32.sqrt()
@@ -3367,6 +3375,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         update_strategy: UPDATE_STRATEGY = 'unmodified',
         stable_update: bool = False,
         atan2_denom: bool = False,
+        use_othrograd: bool = False,
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -3398,4 +3407,5 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             update_strategy=update_strategy,
             stable_update=stable_update,
             atan2_denom=atan2_denom,
+            use_othrograd=use_othrograd,
         )

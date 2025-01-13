@@ -223,3 +223,15 @@ def newton_schulz(grad: torch.tensor, steps: int = 6, eps: float = 1e-7) -> torc
         working_grad = working_grad.view(*original_shape)
 
     return working_grad.to(dtype=original_type)
+
+# Implementation from: https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/main/orthograd.py
+def orthograd(param: torch.tensor, grad: torch.tensor, eps: float = 1e-30):
+    w = param.view(-1)
+    og_grad_shape = grad.shape
+    grad = grad.view(-1)
+
+    proj = torch.dot(w, grad) / (torch.dot(w, w) + eps)
+    g_orth = grad.to(dtype=torch.float32, copy=True).add_(w, alpha=-proj)
+    g_orth_scaled = g_orth.mul_(grad.norm(2) / (g_orth.norm(2) + eps))
+
+    return g_orth_scaled.view(og_grad_shape)
