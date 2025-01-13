@@ -2761,7 +2761,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         update_strategy,
         stable_update,
         atan2_denom,
-        use_othrograd,
+        use_orthograd,
         *,
         block_size,
         min_quant_size,
@@ -2817,7 +2817,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             update_strategy=update_strategy,
             stable_update=stable_update,
             atan2_denom=atan2_denom,
-            use_othrograd=use_othrograd,
+            use_orthograd=use_orthograd,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -3096,7 +3096,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             update_strategy=group["update_strategy"],
                             stable_update=group["stable_update"],
                             atan2_denom=group["atan2_denom"],
-                            use_othrograd=group["use_othrograd"],
+                            use_orthograd=group["use_orthograd"],
                             adopt_clip=adopt_clip,
                             sf_checkpoint=checkpoint,
                             sf_adaptive_y_lr=adaptive_y_lr,
@@ -3147,7 +3147,7 @@ def single_param_ADOPTAOScheduleFree(
     update_strategy: UPDATE_STRATEGY,
     stable_update: bool,
     atan2_denom: bool,
-    use_othrograd: bool,
+    use_orthograd: bool,
     adopt_clip: torch.Tensor,
     sf_checkpoint: torch.Tensor,
     sf_adaptive_y_lr: torch.Tensor,
@@ -3185,7 +3185,7 @@ def single_param_ADOPTAOScheduleFree(
 
     if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
         grad_f32 = newton_schulz(grad_f32)
-    elif use_othrograd:
+    elif use_orthograd:
         grad_f32 = orthograd(p_f32, grad_f32)
 
     if adaptive_clip > 0:
@@ -3375,7 +3375,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         update_strategy: UPDATE_STRATEGY = 'unmodified',
         stable_update: bool = False,
         atan2_denom: bool = False,
-        use_othrograd: bool = False,
+        use_orthograd: bool = False,
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -3407,5 +3407,5 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             update_strategy=update_strategy,
             stable_update=stable_update,
             atan2_denom=atan2_denom,
-            use_othrograd=use_othrograd,
+            use_orthograd=use_orthograd,
         )
