@@ -3048,7 +3048,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
 
                         if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
                             grad_f32 = newton_schulz(grad_f32)
-                        elif group["use_orthograd"]:
+                        elif group["use_orthograd"] and p.ndim >= 2:
                             grad_f32 = orthograd(p_f32, grad_f32)
 
                         if adaptive_clip > 0:
@@ -3186,7 +3186,7 @@ def single_param_ADOPTAOScheduleFree(
 
     if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
         grad_f32 = newton_schulz(grad_f32)
-    elif use_orthograd:
+    elif use_orthograd and p.ndim >= 2:
         grad_f32 = orthograd(p_f32, grad_f32)
 
     if adaptive_clip > 0:

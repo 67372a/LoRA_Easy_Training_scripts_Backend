@@ -1596,7 +1596,7 @@ class FMARSCropV3ExMachina(BaseOptimizer):
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
                     c_t = newton_schulz(c_t)
-                elif group["use_orthograd"]:
+                elif group["use_orthograd"] and p.ndim >= 2:
                     c_t = orthograd(p_fp32, c_t)
 
                 if adaptive_clip > 0.0:
