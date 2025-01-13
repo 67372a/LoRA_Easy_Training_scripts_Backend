@@ -1,6 +1,6 @@
 # FMARSCrop from https://github.com/Clybius/Personalized-Optimizers by Clybius
 import torch
-from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz, UPDATE_STRATEGY
+from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz, UPDATE_STRATEGY,orthograd
 import math
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
@@ -1349,6 +1349,9 @@ class FMARSCropV3(Optimizer):
                     state["prev_grad"].copy_(-grad)
         return loss
     
+def get_rms(tensor, eps=1e-8):
+    return tensor.norm().div(tensor.numel() ** 0.5).clamp_min(eps)
+
 class FMARSCropV3ExMachina(BaseOptimizer):
     r"""
     FMARSCropV3ExMachina: Fisher-accelerated MARS (https://arxiv.org/abs/2411.10438), with momentum-based Compass-style amplification, with ADOPT's AdamW changes (https://arxiv.org/abs/2411.02853).
@@ -1433,10 +1436,12 @@ class FMARSCropV3ExMachina(BaseOptimizer):
         adaptive_clip_type: NORM_TYPE = 'global',
         stable_weight_decay: bool = False,
         debias_beta1: bool = False,
-        debias_beta2: bool = True,
-        debias_beta3: bool = False,
+        debias_beta2: bool = False,
         use_muon_pp: bool = False,
         update_strategy: UPDATE_STRATEGY = 'cautious',
+        stable_update: bool = False,
+        atan2_denom: bool = False,
+        use_orthograd: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1448,7 +1453,7 @@ class FMARSCropV3ExMachina(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams'}:
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams','both'}:
             raise ValueError("Invalid update strategy: {}".format(update_strategy))
         
         # If cautious true, override update strategy to cautious
@@ -1475,10 +1480,12 @@ class FMARSCropV3ExMachina(BaseOptimizer):
             'stable_weight_decay': stable_weight_decay,
             'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
-            'debias_beta3':debias_beta3,
             'weight_decouple':weight_decouple,
             'use_muon_pp': use_muon_pp,
             'update_strategy': update_strategy,
+            'stable_update': stable_update,
+            'atan2_denom': atan2_denom,
+            'use_orthograd': use_orthograd,
         }
 
         super().__init__(params, defaults)
@@ -1589,6 +1596,8 @@ class FMARSCropV3ExMachina(BaseOptimizer):
 
                 if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
                     c_t = newton_schulz(c_t)
+                elif group["use_orthograd"]:
+                    c_t = orthograd(p_fp32, c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -1624,14 +1633,20 @@ class FMARSCropV3ExMachina(BaseOptimizer):
                         diff_fim_base = 1.0
                     else:
                         # Get natural gradient (squared ema, obtained sqrt of ema)
-                        diff_fim_base = grad_diff_fim.sqrt().add_(curr_eps)
+                        diff_fim_base = grad_diff_fim.sqrt()
 
-                        grad_diff_fim.mul_(beta2).addcmul_(grad_diff, grad_diff, value=1.0 - beta2)
+                        grad_diff_fim.mul_(current_beta2).addcmul_(grad_diff, grad_diff, value=1.0 - current_beta2)
                     # pack
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         copy_stochastic_(state["grad_diff_fim"], grad_diff_fim)
                 else:
                     diff_fim_base = 1.0
+
+                if group["atan2_denom"]:
+                    approx_grad_nat = c_t.atan2(diff_fim_base)
+                else:
+                    diff_fim_base.add_(curr_eps)
+                    approx_grad_nat = c_t.div(diff_fim_base)
 
                 approx_grad_nat = c_t.div(diff_fim_base)
                 rms = approx_grad_nat.pow(2).mean().sqrt_()
@@ -1641,9 +1656,13 @@ class FMARSCropV3ExMachina(BaseOptimizer):
                 if group['step'] == 1:
                     fim.addcmul_(approx_grad_nat, approx_grad_nat)
                 else:
-                    fim_base = fim.sqrt().add_(curr_eps)
+                    fim_base = fim.sqrt()
+                    if group["atan2_denom"]:
+                        grad_nat = c_t.atan2(fim_base)
+                    else:
+                        fim_base.add_(curr_eps)
+                        grad_nat = c_t.div(fim_base)
 
-                    grad_nat = c_t.div_(diff_fim_base)
                     rms = grad_nat.pow(2).mean().sqrt_()
                     divisor = max(clip, rms) / clip
                     grad_nat.div_(divisor)
@@ -1691,10 +1710,15 @@ class FMARSCropV3ExMachina(BaseOptimizer):
                         elif group['update_strategy'] == 'grams':
                             full_step.copy_(torch.sign(c_t) * full_step.abs())
 
+                    if group["stable_update"]:
+                        clip_threshold = 1
+                        rms = get_rms(full_step, 1).div(clip_threshold).clamp_min(1)
+                        full_step.mul_(1 / rms)
+
                     # Apply full step
                     p_fp32.data.add_(full_step, alpha=-step_size)
 
-                    fim.mul_(beta2).addcmul_(approx_grad_nat, approx_grad_nat, value=1.0 - beta2)
+                    fim.mul_(beta2).addcmul_(approx_grad_nat, approx_grad_nat, value=1.0 - current_beta2)
 
                 if stable_weight_decay:
                     fim_sum += fim.sum()
