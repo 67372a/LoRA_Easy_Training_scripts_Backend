@@ -1630,7 +1630,7 @@ class FMARSCropV3ExMachina(BaseOptimizer):
 
                     if group['step'] == 1:
                         grad_diff_fim.addcmul_(grad_diff, grad_diff)
-                        diff_fim_base = 1.0
+                        diff_fim_base = torch.tensor(1.0)
                     else:
                         # Get natural gradient (squared ema, obtained sqrt of ema)
                         diff_fim_base = grad_diff_fim.sqrt()
@@ -1640,7 +1640,7 @@ class FMARSCropV3ExMachina(BaseOptimizer):
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         copy_stochastic_(state["grad_diff_fim"], grad_diff_fim)
                 else:
-                    diff_fim_base = 1.0
+                    diff_fim_base = torch.tensor(1.0)
 
                 if group["atan2_denom"]:
                     approx_grad_nat = c_t.atan2(diff_fim_base)
