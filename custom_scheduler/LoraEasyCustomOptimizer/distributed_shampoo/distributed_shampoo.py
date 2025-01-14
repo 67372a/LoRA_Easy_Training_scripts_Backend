@@ -434,10 +434,10 @@ class DistributedShampoo(torch.optim.Optimizer):
                 exponent_multiplier=exponent_multiplier,
             )
 
-        if not grafting_config and grafting_config_type:
+        if grafting_config_type:
             GRAFT_CONFIGS[grafting_config_type.lower()](**grafting_config_args)
 
-        if not preconditioner_config and preconditioner_config_type:
+        if preconditioner_config_type:
             PRECONDITIONER_CONFIGS[preconditioner_config_type.lower()](**preconditioner_config_args)
 
         super().__init__(
