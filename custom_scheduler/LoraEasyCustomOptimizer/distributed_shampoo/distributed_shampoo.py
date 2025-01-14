@@ -332,7 +332,7 @@ class DistributedShampoo(torch.optim.Optimizer):
         use_merge_dims: bool = True,
         shampoo_pt2_compile_config: ShampooPT2CompileConfig | None = None,
         distributed_config: DistributedConfig | None = None,
-        preconditioner_dtype: torch.dtype = torch.float,
+        preconditioner_dtype: torch.dtype = torch.bfloat16,
         preconditioner_config: PreconditionerConfig = DefaultShampooConfig,
         grafting_config_type: GRAFT_CONFIGS_TYPES | None = None,
         grafting_config_args: dict = {},
