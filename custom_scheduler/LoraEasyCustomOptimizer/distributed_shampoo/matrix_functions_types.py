@@ -9,7 +9,7 @@ LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
 
-from commons import AbstractDataclass
+from .commons import AbstractDataclass
 
 
 @dataclass(init=False)

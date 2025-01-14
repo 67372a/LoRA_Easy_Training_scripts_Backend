@@ -18,16 +18,16 @@ from itertools import chain
 from typing import Any, cast, Generic, TypeVar
 
 import torch
-from distributed_shampoo.shampoo_types import (
+from ..shampoo_types import (
     PreconditionerConfig,
     PreconditionerValueError,
 )
-from distributed_shampoo.utils.shampoo_block_info import BlockInfo
-from distributed_shampoo.utils.shampoo_utils import compress_list, get_dtype_size
-from matrix_functions import check_diagonal, matrix_eigenvectors, matrix_inverse_root
+from ..utils.shampoo_block_info import BlockInfo
+from ..utils.shampoo_utils import compress_list, get_dtype_size
+from ..matrix_functions import check_diagonal, matrix_eigenvectors, matrix_inverse_root
 
-from matrix_functions_types import EigenvectorConfig, RootInvConfig
-from optimizer_modules import OptimizerModule
+from ..matrix_functions_types import EigenvectorConfig, RootInvConfig
+from ..optimizer_modules import OptimizerModule
 from torch import Tensor
 from torch.autograd import profiler
 

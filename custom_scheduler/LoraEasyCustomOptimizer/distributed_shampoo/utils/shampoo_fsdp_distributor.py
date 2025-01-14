@@ -11,16 +11,16 @@ from math import prod
 from typing import Any
 
 import torch
-from distributed_shampoo.shampoo_types import (
+from ..shampoo_types import (
     FSDPParameterMetadata,
     FSDPShampooConfig,
     MAX_PRECONDITIONER_DIM,
     PARAMS,
     USE_MERGE_DIMS,
 )
-from distributed_shampoo.utils.shampoo_block_info import BlockInfo
-from distributed_shampoo.utils.shampoo_distributor import DistributorInterface
-from distributed_shampoo.utils.shampoo_utils import (
+from ..utils.shampoo_block_info import BlockInfo
+from ..utils.shampoo_distributor import DistributorInterface
+from ..utils.shampoo_utils import (
     compress_list,
     generate_pairwise_indices,
     merge_small_dims,

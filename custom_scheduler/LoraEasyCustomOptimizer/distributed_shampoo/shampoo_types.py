@@ -12,9 +12,9 @@ from dataclasses import dataclass, field
 
 import torch
 
-from commons import AbstractDataclass
+from .commons import AbstractDataclass
 
-from matrix_functions_types import (
+from .matrix_functions_types import (
     DefaultEigenConfig,
     DefaultEighEigenvectorConfig,
     EigenvectorConfig,

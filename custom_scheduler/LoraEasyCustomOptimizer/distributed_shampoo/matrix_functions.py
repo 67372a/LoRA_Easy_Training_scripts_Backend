@@ -16,7 +16,7 @@ from fractions import Fraction
 from math import isfinite
 
 import torch
-from matrix_functions_types import (
+from .matrix_functions_types import (
     CoupledHigherOrderConfig,
     CoupledNewtonConfig,
     DefaultEigenConfig,

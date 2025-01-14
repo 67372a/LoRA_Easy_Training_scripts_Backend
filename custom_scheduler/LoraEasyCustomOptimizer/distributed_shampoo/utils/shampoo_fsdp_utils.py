@@ -10,7 +10,7 @@ LICENSE file in the root directory of this source tree.
 from collections.abc import Callable
 
 import torch
-from distributed_shampoo.shampoo_types import FSDPParameterMetadata
+from ..shampoo_types import FSDPParameterMetadata
 
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy
 from torch.distributed.tensor import DTensor

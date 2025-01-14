@@ -16,7 +16,7 @@ from math import prod
 from typing import Any
 
 import torch
-from distributed_shampoo.shampoo_types import (
+from ..shampoo_types import (
     CommunicationDType,
     FSDPParameterMetadata,
     HSDPShampooConfig,
@@ -24,10 +24,10 @@ from distributed_shampoo.shampoo_types import (
     PARAMS,
     USE_MERGE_DIMS,
 )
-from distributed_shampoo.utils.shampoo_block_info import DDPBlockInfo
-from distributed_shampoo.utils.shampoo_dist_utils import get_device_mesh
-from distributed_shampoo.utils.shampoo_distributor import DistributorInterface
-from distributed_shampoo.utils.shampoo_utils import (
+from ..utils.shampoo_block_info import DDPBlockInfo
+from ..utils.shampoo_dist_utils import get_device_mesh
+from ..utils.shampoo_distributor import DistributorInterface
+from ..utils.shampoo_utils import (
     compress_list,
     generate_pairwise_indices,
     get_dtype_size,

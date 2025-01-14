@@ -13,14 +13,14 @@ from collections.abc import Sequence
 from operator import methodcaller
 
 import torch
-from distributed_shampoo.utils.shampoo_block_info import BlockInfo
+from ..utils.shampoo_block_info import BlockInfo
 
-from distributed_shampoo.utils.shampoo_utils import (
+from ..utils.shampoo_utils import (
     compress_list,
     ParameterizeEnterExitContext,
 )
 
-from optimizer_modules import OptimizerModule
+from ..optimizer_modules import OptimizerModule
 from torch import Tensor
 
 logger: logging.Logger = logging.getLogger(__name__)

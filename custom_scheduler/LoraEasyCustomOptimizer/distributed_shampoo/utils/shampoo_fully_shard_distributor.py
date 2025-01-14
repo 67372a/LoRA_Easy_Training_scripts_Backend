@@ -11,9 +11,9 @@ from collections.abc import Iterable
 
 import torch
 
-from distributed_shampoo.shampoo_types import PARAMS
-from distributed_shampoo.utils.shampoo_block_info import BlockInfo
-from distributed_shampoo.utils.shampoo_distributor import Distributor
+from ..shampoo_types import PARAMS
+from ..utils.shampoo_block_info import BlockInfo
+from ..utils.shampoo_distributor import Distributor
 from torch import distributed as dist, Tensor
 from torch.distributed.tensor import DTensor
 
