@@ -1126,15 +1126,15 @@ class DistributedShampoo(torch.optim.Optimizer):
 
         return loss
 
-    def state_dict(self) -> StateDict:
-        raise NotImplementedError(
-            "Distributed Shampoo does not support the standard state_dict() method for checkpointing!"
-        )
+    #def state_dict(self) -> StateDict:
+    #    raise NotImplementedError(
+    #        "Distributed Shampoo does not support the standard state_dict() method for checkpointing!"
+    #    )
 
-    def load_state_dict(self, state_dict: StateDict) -> None:
-        raise NotImplementedError(
-            "Distributed Shampoo does not support the standard load_state_dict() method for checkpointing!"
-        )
+    #def load_state_dict(self, state_dict: StateDict) -> None:
+    #    raise NotImplementedError(
+    #        "Distributed Shampoo does not support the standard load_state_dict() method for checkpointing!"
+    #    )
 
     @staticmethod
     def _construct_param_group_key(
