@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable, Iterator, Sequence
 from copy import deepcopy
 from functools import partial
-from typing import Any
+from typing import Any, Dict, Literal
 
 import torch
 
@@ -95,6 +95,24 @@ from matrix_functions_types import EigenConfig
 from torch.optim.optimizer import ParamsT, StateDict
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+GRAFT_CONFIGS_TYPES = Literal['none','sgd','adagrad','rmsprop','adam']
+
+GRAFT_CONFIGS: Dict[str, GraftingConfig] = {
+    'none':None,
+    'sgd':SGDGraftingConfig,
+    'adagrad':AdaGradGraftingConfig,
+    'rmsprop':RMSpropGraftingConfig,
+    'adam':AdamGraftingConfig,
+}
+
+PRECONDITIONER_CONFIGS_TYPES = Literal['default','shampoo','eigenvalue']
+
+PRECONDITIONER_CONFIGS: Dict[str, PreconditionerConfig] = {
+    'default':ShampooPreconditionerConfig,
+    'shampoo':ShampooPreconditionerConfig,
+    'eigenvalue':EigenvalueCorrectedShampooPreconditionerConfig,
+}
 
 
 class DistributedShampoo(torch.optim.Optimizer):
@@ -316,6 +334,10 @@ class DistributedShampoo(torch.optim.Optimizer):
         distributed_config: DistributedConfig | None = None,
         preconditioner_dtype: torch.dtype = torch.float,
         preconditioner_config: PreconditionerConfig = DefaultShampooConfig,
+        grafting_config_type: GRAFT_CONFIGS_TYPES | None = None,
+        grafting_config_args: dict = {},
+        preconditioner_config_type: PRECONDITIONER_CONFIGS_TYPES | None = None,
+        preconditioner_config_args: dict = {},
     ) -> None:
         # Hyperparameter checks.
         if not lr >= 0.0:
@@ -411,6 +433,12 @@ class DistributedShampoo(torch.optim.Optimizer):
                 amortized_computation_config,
                 exponent_multiplier=exponent_multiplier,
             )
+
+        if not grafting_config and grafting_config_type:
+            GRAFT_CONFIGS[grafting_config_type.lower()](**grafting_config_args)
+
+        if not preconditioner_config and preconditioner_config_type:
+            PRECONDITIONER_CONFIGS[preconditioner_config_type.lower()](**preconditioner_config_args)
 
         super().__init__(
             params,
