@@ -26,6 +26,7 @@ from LoraEasyCustomOptimizer.schedulefree import (
 from LoraEasyCustomOptimizer.sgd import SGDSaI
 from LoraEasyCustomOptimizer.shampoo import ScalableShampoo
 from LoraEasyCustomOptimizer.adam import AdamW8bitAO, AdamW4bitAO, AdamWfp8AO
+from distributed_shampoo import DistributedShampoo
 from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
@@ -49,6 +50,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     CompassADOPT,
     CompassADOPTMARS,
     CompassPlus,
+    DistributedShampoo,
     FADOPTMARSScheduleFree,
     FADOPTScheduleFree,
     FARMSCrop,
