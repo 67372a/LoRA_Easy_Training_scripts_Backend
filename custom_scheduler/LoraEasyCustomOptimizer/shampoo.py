@@ -6,12 +6,13 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from pytorch_optimizer.optimizer.shampoo_utils import (
+from .shampoo_utils import (
     LayerWiseGrafting,
     PreConditioner,
     PreConditionerType,
     build_graft,
 )
+from .utils import copy_stochastic_
 
 class ScalableShampoo(BaseOptimizer):
     r"""Scalable Preconditioned Stochastic Tensor Optimization.
@@ -176,6 +177,8 @@ class ScalableShampoo(BaseOptimizer):
                 grad = p.grad
                 if grad.is_sparse:
                     raise NoSparseGradientError(str(self))
+                
+                p_fp32 = p
 
                 state = self.state[p]
                 if len(state) == 0:
@@ -196,6 +199,11 @@ class ScalableShampoo(BaseOptimizer):
 
                 pre_conditioner, graft = state['pre_conditioner'], state['graft']
 
+                # unpack
+                if p.dtype == torch.bfloat16:
+                    grad = grad.to(torch.float32)
+                    p_fp32 = p.to(dtype=torch.float32, copy=True)
+
                 graft.add_statistics(grad, beta2)
                 if group['step'] % self.statistics_compute_steps == 0:
                     pre_conditioner.add_statistics(grad)
@@ -215,7 +223,7 @@ class ScalableShampoo(BaseOptimizer):
 
                 for g in (graft_grad, shampoo_grad):
                     self.apply_weight_decay(
-                        p,
+                        p_fp32,
                         g,
                         group['lr'],
                         group['weight_decay'],
@@ -223,10 +231,16 @@ class ScalableShampoo(BaseOptimizer):
                         fixed_decay=False,
                     )
 
-                state['momentum'].mul_(beta1).add_(shampoo_grad)
+                momentum = state['momentum']
+
+                # unpack
+                if p.dtype == torch.bfloat16:
+                    momentum = momentum.to(torch.float32)
+
+                momentum.mul_(beta1).add_(shampoo_grad)
                 graft_momentum = graft.update_momentum(grad, beta1)
 
-                momentum_update = state['momentum'] if is_precondition_step else graft_momentum
+                momentum_update = momentum if is_precondition_step else graft_momentum
 
                 if group['nesterov']:
                     w: float = (1.0 - beta1) if group['moving_average_for_momentum'] else 1.0
@@ -236,6 +250,11 @@ class ScalableShampoo(BaseOptimizer):
 
                     momentum_update.mul_(beta1).add_(wd_update)
 
-                p.add_(momentum_update, alpha=-group['lr'])
+                p_fp32.add_(momentum_update, alpha=-group['lr'])
+
+                # pack
+                if p.dtype == torch.bfloat16:
+                    copy_stochastic_(state['momentum'], momentum)
+                    copy_stochastic_(p, p_fp32)
 
         return loss
