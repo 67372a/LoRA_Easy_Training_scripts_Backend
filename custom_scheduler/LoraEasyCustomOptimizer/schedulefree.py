@@ -3051,9 +3051,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         elif group["use_orthograd"] and p.ndim >= 1:
                             grad_f32 = orthograd(p_f32, grad_f32)
 
-                        if adaptive_clip > 0:
-                            grad_f32 = agc(p=p.float(), grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
-                        
                         #Make a fp32 copy of exp_avg_sq_f32
                         exp_avg_sq_f32 = torch.zeros_like(p.float(), dtype=torch.float32).copy_(state["exp_avg_sq"].float())
                         exp_avg_sq_f32.add_(grad_f32.square())
@@ -3117,8 +3114,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     
         return loss
 
-def get_rms(tensor, eps=1e-8):
-    return tensor.norm().div(tensor.numel() ** 0.5).clamp_min(eps)
+def get_rms(tensor:torch.tensor):
+    return tensor.norm().div(torch.sqrt(tensor.numel()))
 
 # this will work with any optim state tensor subclass that implements aten.lerp.Scalar and aten.copy_.default
 # and param tensor subclass that implements aten.add_.Tensor, and aten.addcdiv_.default
@@ -3248,7 +3245,7 @@ def single_param_ADOPTAOScheduleFree(
 
     if stable_update:
         clip_threshold = 1
-        rms = get_rms(update, 1).div(clip_threshold).clamp_min(1)
+        rms = get_rms(update).div(clip_threshold).clamp_min(1)
         update.mul_(1 / rms)
 
     if update_strategy in {'cautious','grams','both'}:
