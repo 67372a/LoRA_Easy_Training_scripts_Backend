@@ -2737,6 +2737,54 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
 
         return loss
     
+class CosineDecay:
+    """
+    Applies cosine decay to a parameter (death_rate), using PyTorch's built-in
+    `torch.optim.lr_scheduler.CosineAnnealingLR`.
+
+    Args:
+        death_rate (float): Initial value to be decayed.
+        T_max (int): Maximum number of iterations for the decay.
+        eta_min (float, optional): Minimum value of the parameter after decay.
+            Defaults to 0.
+        last_epoch (int, optional): The index of the last epoch. Defaults to -1.
+    """
+
+    def __init__(self, death_rate: float, T_max: int, eta_min: float = 0, last_epoch: int = -1):
+        self.sgd = torch.optim.SGD(
+            torch.nn.ParameterList([torch.nn.Parameter(torch.zeros(1))]),
+            lr=death_rate,
+        )
+        self.cosine_stepper = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.sgd, T_max + 1, eta_min, last_epoch
+        )
+        self.T_max = T_max
+        self.eta_min = eta_min
+
+    def step(self, current_step: int) -> None:
+        """
+        Performs one step of the cosine decay scheduler.
+
+        Args:
+            current_step (int): Current step index.
+        """
+        self.cosine_stepper.step(current_step)
+
+    def get_dr(self, current_step: int) -> float:
+        """
+        Returns the updated rate (death_rate) at the given step.
+
+        Args:
+            current_step (int): Current step index.
+
+        Returns:
+            float: The decayed parameter.
+        """
+        if current_step >= self.T_max:
+            return self.eta_min
+        self.step(current_step)
+        return self.sgd.param_groups[0]["lr"]
+
 class _ADOPTAOScheduleFreeBase(Optimizer):
     def __init__(
         self,
@@ -2762,6 +2810,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         stable_update,
         atan2_denom,
         use_orthograd,
+        use_spam_clipping,
+        spam_clipping_threshold,
+        spam_clipping_start_step,
         *,
         block_size,
         min_quant_size,
@@ -2818,6 +2869,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             stable_update=stable_update,
             atan2_denom=atan2_denom,
             use_orthograd=use_orthograd,
+            use_spam_clipping=use_spam_clipping,
+            spam_clipping_threshold=spam_clipping_threshold,
+            spam_clipping_start_step=spam_clipping_start_step,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -2847,6 +2901,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("stable_update", False)
             group.setdefault("atan2_denom", False)
             group.setdefault("use_orthograd", False)
+            group.setdefault("use_spam_clipping", False)
+            group.setdefault("spam_clipping_threshold", 5000.0)
+            group.setdefault("spam_clipping_start_step", 10)
 
     # bring your own function to create zero-filled subclass
     def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
@@ -2970,9 +3027,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             for group in self.param_groups:
                 swd_param_size_sum = 0
                 swd_second_moment_group_sum = 0.0
-                adaptive_clip = group["adaptive_clip"]
-                adaptive_clip_eps = group["adaptive_clip_eps"]
-                adaptive_clip_type = group["adaptive_clip_type"]
                 mars_gamma = group["mars_gamma"]
                 beta1 = group["betas"][0]
                 use_muon_pp = group["use_muon_pp"]
@@ -3095,6 +3149,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             stable_update=group["stable_update"],
                             atan2_denom=group["atan2_denom"],
                             use_orthograd=group["use_orthograd"],
+                            spam_clipping_threshold = group["spam_clipping_threshold"],
+                            apply_spam_clipping = group["use_spam_clipping"] and state["step"].item() <= group["spam_clipping_start_step"],
+                            reset_momentum = state["step"].item() > group["spam_clipping_start_step"] and (state["step"].item() - group["spam_clipping_start_step"]) % 20,
                             adopt_clip=adopt_clip,
                             sf_checkpoint=checkpoint,
                             sf_adaptive_y_lr=adaptive_y_lr,
@@ -3146,6 +3203,9 @@ def single_param_ADOPTAOScheduleFree(
     stable_update: bool,
     atan2_denom: bool,
     use_orthograd: bool,
+    spam_clipping_threshold: float,
+    apply_spam_clipping: bool,
+    reset_momentum: bool,
     adopt_clip: torch.Tensor,
     sf_checkpoint: torch.Tensor,
     sf_adaptive_y_lr: torch.Tensor,
@@ -3170,6 +3230,11 @@ def single_param_ADOPTAOScheduleFree(
     exp_avg_sq_f32 = torch.zeros_like(y_f32, dtype=torch.float32).copy_(exp_avg_sq.float())
     z_f32 = torch.zeros_like(y_f32, dtype=torch.float32).copy_(z.float())
 
+    # Reset momentum when total_step hits update_proj_gap
+    # Can't reset z_f32, it isn't momentum
+    if reset_momentum:
+        exp_avg_sq_f32 = torch.zeros_like(grad_f32)
+
     if mars_gamma > 0:
         # MARS Calculate cₜ (gradient with correction term)
         previous_grad_f32 = torch.zeros_like(grad_f32, dtype=torch.float32).copy_(previous_grad.float())
@@ -3188,6 +3253,13 @@ def single_param_ADOPTAOScheduleFree(
 
     if adaptive_clip > 0:
         grad_f32 = agc(p=y_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
+
+    if reset_momentum:
+        exp_avg_sq_f32.add_(grad_f32.square())
+
+    if spam_clipping_threshold != 0 and apply_spam_clipping:
+        mask = (grad_f32**2) > (spam_clipping_threshold * exp_avg_sq_f32)
+        grad_f32 = grad_f32.sign() * torch.sqrt(exp_avg_sq_f32 * spam_clipping_threshold)
 
     if eps_floor is not None and eps_floor < eps:
         rms_grad = grad_f32.pow(2).mean().sqrt_()
@@ -3374,6 +3446,9 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         stable_update: bool = False,
         atan2_denom: bool = False,
         use_orthograd: bool = False,
+        use_spam_clipping: bool = False,
+        spam_clipping_threshold: float = 5000.0,
+        spam_clipping_start_step: int = 10,
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -3406,4 +3481,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             stable_update=stable_update,
             atan2_denom=atan2_denom,
             use_orthograd=use_orthograd,
+            use_spam_clipping=use_spam_clipping,
+            spam_clipping_threshold=spam_clipping_threshold,
+            spam_clipping_start_step=spam_clipping_start_step,
         )
