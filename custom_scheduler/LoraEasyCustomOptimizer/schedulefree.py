@@ -3283,7 +3283,7 @@ def single_param_ADOPTAOScheduleFree(
             update = grad_f32.div(de_nom).clamp_(-adopt_clip, adopt_clip)   
         exp_avg_sq_f32.mul_(beta2).addcmul_(grad_f32, grad_f32, value=1 - beta2)
       
-    if stable_weight_decay:
+    if weight_decay > 0 and stable_weight_decay:
         swd_scaling = 1.0 / swd_second_moment_mean_sqrt
     else:
         swd_scaling = 1.0
