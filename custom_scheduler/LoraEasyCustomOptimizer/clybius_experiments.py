@@ -86,6 +86,7 @@ class MomentusCaution(Optimizer):
         adaptive_clip: float = 0.0,
         cautious: bool = True,
         nesterov: bool = False,
+        **kwargs,
     ):
 
         defaults = dict(
