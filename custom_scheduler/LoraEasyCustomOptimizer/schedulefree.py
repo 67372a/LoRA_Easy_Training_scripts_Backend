@@ -2902,8 +2902,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("atan2_denom", False)
             group.setdefault("use_orthograd", False)
             group.setdefault("use_spam_clipping", False)
-            group.setdefault("spam_clipping_threshold", 5000.0)
-            group.setdefault("spam_clipping_start_step", 10)
+            group.setdefault("spam_clipping_threshold", 500.0)
+            group.setdefault("spam_clipping_start_step", 1)
 
     # bring your own function to create zero-filled subclass
     def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
@@ -3447,8 +3447,8 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         atan2_denom: bool = False,
         use_orthograd: bool = False,
         use_spam_clipping: bool = False,
-        spam_clipping_threshold: float = 5000.0,
-        spam_clipping_start_step: int = 10,
+        spam_clipping_threshold: float = 500.0,
+        spam_clipping_start_step: int = 1,
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
