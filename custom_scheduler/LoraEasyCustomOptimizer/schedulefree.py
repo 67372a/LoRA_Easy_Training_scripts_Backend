@@ -3151,7 +3151,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             use_orthograd=group["use_orthograd"],
                             spam_clipping_threshold = group["spam_clipping_threshold"],
                             apply_spam_clipping = group["use_spam_clipping"] and state["step"].item() <= group["spam_clipping_start_step"],
-                            reset_momentum = state["step"].item() > group["spam_clipping_start_step"] and (state["step"].item() - group["spam_clipping_start_step"]) % 20,
                             adopt_clip=adopt_clip,
                             sf_checkpoint=checkpoint,
                             sf_adaptive_y_lr=adaptive_y_lr,
@@ -3205,7 +3204,6 @@ def single_param_ADOPTAOScheduleFree(
     use_orthograd: bool,
     spam_clipping_threshold: float,
     apply_spam_clipping: bool,
-    reset_momentum: bool,
     adopt_clip: torch.Tensor,
     sf_checkpoint: torch.Tensor,
     sf_adaptive_y_lr: torch.Tensor,
@@ -3230,11 +3228,6 @@ def single_param_ADOPTAOScheduleFree(
     exp_avg_sq_f32 = torch.zeros_like(y_f32, dtype=torch.float32).copy_(exp_avg_sq.float())
     z_f32 = torch.zeros_like(y_f32, dtype=torch.float32).copy_(z.float())
 
-    # Reset momentum when total_step hits update_proj_gap
-    # Can't reset z_f32, it isn't momentum
-    if reset_momentum:
-        exp_avg_sq_f32 = torch.zeros_like(grad_f32)
-
     if mars_gamma > 0:
         # MARS Calculate cₜ (gradient with correction term)
         previous_grad_f32 = torch.zeros_like(grad_f32, dtype=torch.float32).copy_(previous_grad.float())
@@ -3253,9 +3246,6 @@ def single_param_ADOPTAOScheduleFree(
 
     if adaptive_clip > 0:
         grad_f32 = agc(p=y_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
-
-    if reset_momentum:
-        exp_avg_sq_f32.add_(grad_f32.square())
 
     if spam_clipping_threshold != 0 and apply_spam_clipping:
         mask = (grad_f32**2) > (spam_clipping_threshold * exp_avg_sq_f32)
