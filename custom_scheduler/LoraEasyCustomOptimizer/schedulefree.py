@@ -9,7 +9,7 @@ import math
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
-from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz, STATE_PRECISION, orthograd, schedule_beta_tc, schedule_beta, spam_grad_clipping
+from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz, STATE_PRECISION, orthograd, schedule_beta_tc, schedule_beta, spam_grad_clipping,CLIP_TYPE
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
@@ -2814,6 +2814,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         atan2_denom,
         use_orthograd,
         use_spam_clipping,
+        spam_clipping_type,
         spam_clipping_threshold,
         spam_clipping_start_step,
         *,
@@ -2878,6 +2879,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             use_spam_clipping=use_spam_clipping,
             spam_clipping_threshold=spam_clipping_threshold,
             spam_clipping_start_step=spam_clipping_start_step,
+            spam_clipping_type=spam_clipping_type,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -2908,8 +2910,12 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("atan2_denom", False)
             group.setdefault("use_orthograd", False)
             group.setdefault("use_spam_clipping", False)
-            group.setdefault("spam_clipping_threshold", 500.0)
-            group.setdefault("spam_clipping_start_step", 1)
+            group.setdefault("spam_clipping_threshold", 1000.0)
+            group.setdefault("spam_clipping_start_step", 10)
+            group.setdefault("spam_clipping_type", 'unit')
+            group.setdefault("use_beta2_warmup", False)
+            group.setdefault("beta2_warmup_initial", 0.9)
+            group.setdefault("beta2_warmup_steps", 1)
 
     # bring your own function to create zero-filled subclass
     def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
@@ -3159,6 +3165,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             atan2_denom=group["atan2_denom"],
                             use_orthograd=group["use_orthograd"],
                             spam_clipping_threshold = group["spam_clipping_threshold"],
+                            spam_clipping_type = group["spam_clipping_type"],
                             apply_spam_clipping = group["use_spam_clipping"] and state["step"].item() <= group["spam_clipping_start_step"],
                             adopt_clip=adopt_clip,
                             sf_checkpoint=checkpoint,
@@ -3215,6 +3222,7 @@ def single_param_ADOPTAOScheduleFree(
     atan2_denom: bool,
     use_orthograd: bool,
     spam_clipping_threshold: float,
+    spam_clipping_type: CLIP_TYPE,
     apply_spam_clipping: bool,
     adopt_clip: torch.Tensor,
     sf_checkpoint: torch.Tensor,
@@ -3260,7 +3268,7 @@ def single_param_ADOPTAOScheduleFree(
         grad_f32 = orthograd(p_f32, grad_f32)
 
     if spam_clipping_threshold != 0 and apply_spam_clipping:
-        grad_f32 = spam_grad_clipping(grad_f32, exp_avg_sq_f32, spam_clipping_threshold)
+        grad_f32 = spam_grad_clipping(grad_f32, exp_avg_sq_f32, spam_clipping_threshold, spam_clipping_type)
 
     if adaptive_clip > 0:
         grad_f32 = agc(p=y_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
@@ -3454,8 +3462,9 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         atan2_denom: bool = False,
         use_orthograd: bool = False,
         use_spam_clipping: bool = False,
-        spam_clipping_threshold: float = 500.0,
+        spam_clipping_threshold: float = 1000.0,
         spam_clipping_start_step: int = 10,
+        spam_clipping_type: CLIP_TYPE = 'unit',
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -3492,6 +3501,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             atan2_denom=atan2_denom,
             use_orthograd=use_orthograd,
             use_spam_clipping=use_spam_clipping,
+            spam_clipping_type=spam_clipping_type,
             spam_clipping_threshold=spam_clipping_threshold,
             spam_clipping_start_step=spam_clipping_start_step,
         )
