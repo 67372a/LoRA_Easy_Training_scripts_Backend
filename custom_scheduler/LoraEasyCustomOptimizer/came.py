@@ -78,6 +78,7 @@ class CAME(BaseOptimizer):
             'eps1': eps1,
             'eps2': eps2,
             'cautious':cautious,
+            'update_strategy':update_strategy,
         }
         super().__init__(params, defaults)
 
