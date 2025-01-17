@@ -3154,8 +3154,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             adopt_clip=adopt_clip,
                             sf_checkpoint=checkpoint,
                             sf_adaptive_y_lr=adaptive_y_lr,
-                            swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] else None,
-                            swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] else None,
+                            swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] and group["weight_decay"] > 0 else None,
+                            swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] and group["weight_decay"] > 0 else None,
                         )
 
                         if group["weight_decay"] > 0 and group['stable_weight_decay']:
