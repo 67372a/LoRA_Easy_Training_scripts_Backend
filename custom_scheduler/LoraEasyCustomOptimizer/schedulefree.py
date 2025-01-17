@@ -3244,12 +3244,11 @@ def single_param_ADOPTAOScheduleFree(
     elif use_orthograd and p.ndim >= 1:
         grad_f32 = orthograd(p_f32, grad_f32)
 
+    if spam_clipping_threshold != 0 and apply_spam_clipping:
+        grad_f32 = spam_grad_clipping(grad_f32, exp_avg_sq_f32, spam_clipping_threshold)
+
     if adaptive_clip > 0:
         grad_f32 = agc(p=y_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
-
-    if spam_clipping_threshold != 0 and apply_spam_clipping:
-        mask = (grad_f32**2) > (spam_clipping_threshold * exp_avg_sq_f32)
-        grad_f32 = grad_f32.sign() * torch.sqrt(exp_avg_sq_f32 * spam_clipping_threshold)
 
     if eps_floor is not None and eps_floor < eps:
         rms_grad = grad_f32.pow(2).mean().sqrt_()
