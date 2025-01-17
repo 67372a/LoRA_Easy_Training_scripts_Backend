@@ -7,6 +7,8 @@ OPTIMIZER = Type[Optimizer]
 
 NORM_TYPE = Literal['unit','global','layer']
 
+CLIP_TYPE = Literal['unit','layer']
+
 STATE_PRECISION = Literal['parameter', 'q4bit', 'q8bit', 'qfp8']
 
 UPDATE_STRATEGY = Literal['unmodified','cautious','grams','both']
@@ -118,6 +120,50 @@ def schedule_beta(t_beta: Optional[float], step: int, beta_initial: float, beta_
         ),
         beta_final,
     )
+
+def schedule_beta_tc(t_beta: Optional[float], step: int, beta_initial: float, beta_final: float, eps: float = 1e-8) -> float:
+    if t_beta is None:
+        return beta_initial
+
+    # Add eps to prevent log 0
+    log_beta_intial, log_beta_final = math.log(max(beta_initial, eps)), math.log(beta_final)
+
+    return min(
+        torch.exp(
+            log_beta_intial * log_beta_final / ((1.0 - step / t_beta) * log_beta_final + (step / t_beta) * log_beta_intial)
+        ),
+        beta_final,
+    )
+
+@torch.no_grad()
+def spam_grad_clipping(grad: torch.Tensor, second_moment: torch.Tensor, clip_threshold: float, clip_type: CLIP_TYPE = 'unit') -> torch.Tensor:
+    if clip_type == 'unit':
+        # Calculate the clipping condition
+        second_momentum_threshold = second_moment.mul(clip_threshold)
+        second_momentum_threshold_sqrt = torch.sqrt(second_momentum_threshold)
+        sign_grad = grad.sign()
+
+        # Use torch.where instead of boolean masking
+        return torch.where(
+            grad.square() > second_momentum_threshold,
+            sign_grad * second_momentum_threshold_sqrt,
+            grad
+        )
+    elif clip_type == 'layer':
+        # Calculate the global gradient norm
+        max_norm = torch.norm(torch.sqrt(second_moment * clip_threshold))
+        grad_norm = torch.norm(grad)
+
+        # Calculate scaling factor for clipping
+        scale = torch.where(
+            grad_norm > max_norm,
+            max_norm / grad_norm,
+            torch.ones_like(grad_norm)
+        )
+
+        # Apply scaling to gradient
+        return grad * scale
+    
 
 # Modified Adafactor factorisation implementation by Ross Wightman 
 # https://github.com/huggingface/pytorch-image-models/pull/2320

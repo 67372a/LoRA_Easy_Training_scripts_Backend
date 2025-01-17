@@ -9,7 +9,7 @@ import math
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
-from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz, STATE_PRECISION, orthograd
+from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz, STATE_PRECISION, orthograd, schedule_beta_tc, schedule_beta, spam_grad_clipping
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
