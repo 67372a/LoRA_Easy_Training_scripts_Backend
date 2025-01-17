@@ -2801,6 +2801,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         adaptive_clip_eps,
         adaptive_clip_type,
         debias_beta2,
+        use_beta2_warmup,
+        beta2_warmup_initial,
+        beta2_warmup_steps,
         mars_gamma,
         use_muon_pp,
         r,
@@ -2860,6 +2863,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             adaptive_clip_eps=adaptive_clip_eps,
             adaptive_clip_type=adaptive_clip_type,
             debias_beta2=debias_beta2,
+            use_beta2_warmup=use_beta2_warmup,
+            beta2_warmup_initial=beta2_warmup_initial,
+            beta2_warmup_steps=beta2_warmup_steps,
             mars_gamma=mars_gamma,
             use_muon_pp=use_muon_pp,
             r=r,
@@ -3142,6 +3148,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             adaptive_clip_eps=group["adaptive_clip_eps"],
                             adaptive_clip_type=group["adaptive_clip_type"],
                             debias_beta2=group["debias_beta2"],
+                            use_beta2_warmup=group["use_beta2_warmup"],
+                            beta2_warmup_initial=group["beta2_warmup_initial"],
+                            beta2_warmup_steps=group["beta2_warmup_steps"],
                             mars_gamma=group["mars_gamma"],
                             use_muon_pp=group["use_muon_pp"],
                             fisher=group["fisher"],
@@ -3195,6 +3204,9 @@ def single_param_ADOPTAOScheduleFree(
     adaptive_clip_eps: float,
     adaptive_clip_type: NORM_TYPE,
     debias_beta2: bool,
+    use_beta2_warmup: bool,
+    beta2_warmup_initial: float,
+    beta2_warmup_steps: int,
     mars_gamma: float,
     use_muon_pp: bool,
     fisher: bool,
@@ -3223,6 +3235,9 @@ def single_param_ADOPTAOScheduleFree(
             current_beta2 = ((beta2**step - beta2) / (beta2**step - 1.0)) ** (1/2)
         else:
             bias_correction2 = 1.0 - beta2**step
+
+    if use_beta2_warmup:
+        current_beta2 = schedule_beta_tc(beta2_warmup_steps, step, beta2_warmup_initial, beta2)
 
     #Make a fp32 copies of state
     exp_avg_sq_f32 = torch.zeros_like(y_f32, dtype=torch.float32).copy_(exp_avg_sq.float())
@@ -3280,7 +3295,7 @@ def single_param_ADOPTAOScheduleFree(
         else:
             de_nom.add_(curr_eps)
             update = grad_f32.div(de_nom).clamp_(-adopt_clip, adopt_clip)   
-        exp_avg_sq_f32.mul_(beta2).addcmul_(grad_f32, grad_f32, value=1 - beta2)
+        exp_avg_sq_f32.mul_(current_beta2).addcmul_(grad_f32, grad_f32, value=1 - current_beta2)
       
     if weight_decay > 0 and stable_weight_decay:
         swd_scaling = 1.0 / swd_second_moment_mean_sqrt
@@ -3426,6 +3441,9 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         debias_beta2: bool = False,
+        use_beta2_warmup: bool = False,
+        beta2_warmup_initial: float = 0.9,
+        beta2_warmup_steps: int = 0,
         mars_gamma: float = 0.0,
         use_muon_pp: bool = False,
         r: float = 0.0,
@@ -3437,7 +3455,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         use_orthograd: bool = False,
         use_spam_clipping: bool = False,
         spam_clipping_threshold: float = 500.0,
-        spam_clipping_start_step: int = 1,
+        spam_clipping_start_step: int = 10,
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -3458,6 +3476,9 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             adaptive_clip_eps=adaptive_clip_eps,
             adaptive_clip_type=adaptive_clip_type,
             debias_beta2=debias_beta2,
+            use_beta2_warmup=use_beta2_warmup,
+            beta2_warmup_initial=beta2_warmup_initial,
+            beta2_warmup_steps=beta2_warmup_steps,
             mars_gamma=mars_gamma,
             use_muon_pp=use_muon_pp,
             r=r,
