@@ -5,16 +5,19 @@ from typing import Callable, Dict, Optional, Tuple, Union, List, Literal
 import torch
 from torch.optim import Optimizer
 import math
+import inspect
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
-from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz, STATE_PRECISION, orthograd, schedule_beta_tc, schedule_beta, spam_grad_clipping,CLIP_TYPE
+from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz, STATE_PRECISION, orthograd, schedule_beta_tc, schedule_beta, spam_grad_clipping,CLIP_TYPE, clean_dict_params
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
 from .low_bit_optim.subclass_fp8 import OptimStateFp8
 from torch.distributed._tensor import DTensor
+
+
 
 UPDATE_STRATEGY = Literal['unmodified','cautious','grams', 'both']
 
@@ -82,7 +85,9 @@ class ScheduleFreeWrapper(BaseOptimizer):
         defaults.update(kwargs)
         super().__init__(params, defaults)
 
-        self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
+        clean_kwargs = clean_dict_params(base_optimizer, kwargs, wrapped=True)
+
+        self.base_optimizer = base_optimizer(self.param_groups, **clean_kwargs)
         self.param_groups = self.base_optimizer.param_groups
 
     def __str__(self) -> str:

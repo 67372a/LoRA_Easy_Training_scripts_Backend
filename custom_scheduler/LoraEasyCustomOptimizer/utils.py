@@ -2,6 +2,7 @@ import torch
 from typing import Tuple, Union, Type, Literal, Optional
 from torch.optim import Optimizer
 import math
+import inspect
 
 OPTIMIZER = Type[Optimizer]
 
@@ -281,3 +282,28 @@ def orthograd(param: torch.tensor, grad: torch.tensor, eps: float = 1e-30):
     g_orth_scaled = g_orth.mul_(grad.norm(2) / (g_orth.norm(2) + eps))
 
     return g_orth_scaled.view(og_grad_shape)
+
+def clean_dict_params(func, params_dict, wrapped=False):
+    """
+    Remove dictionary keys that don't match function parameters and warn about removals.
+    
+    Args:
+        func: The function to check parameters against
+        params_dict: Dictionary of parameters to clean
+        
+    Returns:
+        dict: New dictionary with only valid parameters
+    """
+    # Get the function's signature
+    sig = inspect.signature(func)
+    
+    # Create a new dict with only valid parameters
+    valid_params = {}
+    
+    for key, value in params_dict.items():
+        if key in sig.parameters:
+            valid_params[key] = value
+        else:
+            print(f"Parameter '{key}' is not a valid parameter for the {'wrapped ' if wrapped else ''}optimizer and will be ignored.")
+    
+    return valid_params
