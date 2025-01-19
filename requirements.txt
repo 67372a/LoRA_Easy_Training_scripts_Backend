@@ -13,6 +13,6 @@ triton==3.1.0; platform_system == "Linux"
 prodigy-plus-schedule-free==1.8.51
 
 # Triton wheels
-https://github.com/woct0rdho/triton-windows/releases/download/v3.1.0-windows.post5/triton-3.1.0-cp312-cp312-win_amd64.whl; platform_system == "Windows" and python_version == "3.12"
-https://github.com/woct0rdho/triton-windows/releases/download/v3.1.0-windows.post5/triton-3.1.0-cp311-cp311-win_amd64.whl; platform_system == "Windows" and python_version == "3.11"
-https://github.com/woct0rdho/triton-windows/releases/download/v3.1.0-windows.post5/triton-3.1.0-cp310-cp310-win_amd64.whl; platform_system == "Windows" and python_version == "3.10"
+https://github.com/woct0rdho/triton-windows/releases/download/v3.1.0-windows.post7/triton-3.1.0-cp312-cp312-win_amd64.whl; platform_system == "Windows" and python_version == "3.12"
+https://github.com/woct0rdho/triton-windows/releases/download/v3.1.0-windows.post7/triton-3.1.0-cp311-cp311-win_amd64.whl; platform_system == "Windows" and python_version == "3.11"
+https://github.com/woct0rdho/triton-windows/releases/download/v3.1.0-windows.post7/triton-3.1.0-cp310-cp310-win_amd64.whl; platform_system == "Windows" and python_version == "3.10"
