@@ -307,3 +307,51 @@ def clean_dict_params(func, params_dict, wrapped=False):
             print(f"Parameter '{key}' is not a valid parameter for the {'wrapped ' if wrapped else ''}optimizer and will be ignored.")
     
     return valid_params
+
+class CosineDecay:
+    """
+    Applies cosine decay to a parameter (death_rate), using PyTorch's built-in
+    `torch.optim.lr_scheduler.CosineAnnealingLR`.
+
+    Args:
+        death_rate (float): Initial value to be decayed.
+        T_max (int): Maximum number of iterations for the decay.
+        eta_min (float, optional): Minimum value of the parameter after decay.
+            Defaults to 0.
+        last_epoch (int, optional): The index of the last epoch. Defaults to -1.
+    """
+
+    def __init__(self, death_rate: float, T_max: int, eta_min: float = 0, last_epoch: int = -1):
+        self.sgd = torch.optim.SGD(
+            torch.nn.ParameterList([torch.nn.Parameter(torch.zeros(1))]),
+            lr=death_rate,
+        )
+        self.cosine_stepper = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.sgd, T_max + 1, eta_min, last_epoch
+        )
+        self.T_max = T_max
+        self.eta_min = eta_min
+
+    def step(self, current_step: int) -> None:
+        """
+        Performs one step of the cosine decay scheduler.
+
+        Args:
+            current_step (int): Current step index.
+        """
+        self.cosine_stepper.step(current_step)
+
+    def get_dr(self, current_step: int) -> float:
+        """
+        Returns the updated rate (death_rate) at the given step.
+
+        Args:
+            current_step (int): Current step index.
+
+        Returns:
+            float: The decayed parameter.
+        """
+        if current_step >= self.T_max:
+            return self.eta_min
+        self.step(current_step)
+        return self.sgd.param_groups[0]["lr"]

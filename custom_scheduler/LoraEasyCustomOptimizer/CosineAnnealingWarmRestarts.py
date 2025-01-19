@@ -64,31 +64,6 @@ class CosineAnnealingWarmRestarts(LRScheduler):
 
         self.optimizer.step = with_counter(self.optimizer.step)
 
-        # Following https://github.com/pytorch/pytorch/issues/20124
-        # We would like to ensure that `lr_scheduler.step()` is called after
-        # `optimizer.step()`
-        def patch_track_step_called(opt: Optimizer):
-            if hasattr(opt.step, "_wrapped_by_lr_sched"):
-                # we've already patched
-                return opt.step
-
-            def wrap_step(step_fn):
-                opt_ref = ref(self.optimizer)
-                func = step_fn.__func__
-
-                @wraps(func)
-                def wrapper(*args, **kwargs):
-                    opt = opt_ref()
-                    opt._opt_called = True  # type: ignore[union-attr]
-                    return func.__get__(opt, opt.__class__)(*args, **kwargs)
-
-                wrapper._wrapped_by_lr_sched = True  # type: ignore[attr-defined]
-                return wrapper
-
-            opt.step = wrap_step(opt.step)  # type: ignore[method-assign]
-
-        patch_track_step_called(self.optimizer)
-
         self._initial_step()
 
     def setup_optimizer(
