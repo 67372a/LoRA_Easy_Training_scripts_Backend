@@ -10,7 +10,10 @@ import inspect
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
-from .utils import copy_stochastic_, NORM_TYPE, agc, newton_schulz, STATE_PRECISION, orthograd, schedule_beta_tc, schedule_beta, spam_grad_clipping,CLIP_TYPE, clean_dict_params
+from .utils import (copy_stochastic_, NORM_TYPE, agc, newton_schulz, 
+                    STATE_PRECISION, orthograd, schedule_beta_tc, 
+                    spam_grad_clipping, CLIP_TYPE, clean_dict_params,
+                    CosineDecay)
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
@@ -2741,54 +2744,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 group['fim_mean_sqrt'] = math.sqrt(fim_sum / param_size)
 
         return loss
-    
-class CosineDecay:
-    """
-    Applies cosine decay to a parameter (death_rate), using PyTorch's built-in
-    `torch.optim.lr_scheduler.CosineAnnealingLR`.
-
-    Args:
-        death_rate (float): Initial value to be decayed.
-        T_max (int): Maximum number of iterations for the decay.
-        eta_min (float, optional): Minimum value of the parameter after decay.
-            Defaults to 0.
-        last_epoch (int, optional): The index of the last epoch. Defaults to -1.
-    """
-
-    def __init__(self, death_rate: float, T_max: int, eta_min: float = 0, last_epoch: int = -1):
-        self.sgd = torch.optim.SGD(
-            torch.nn.ParameterList([torch.nn.Parameter(torch.zeros(1))]),
-            lr=death_rate,
-        )
-        self.cosine_stepper = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.sgd, T_max + 1, eta_min, last_epoch
-        )
-        self.T_max = T_max
-        self.eta_min = eta_min
-
-    def step(self, current_step: int) -> None:
-        """
-        Performs one step of the cosine decay scheduler.
-
-        Args:
-            current_step (int): Current step index.
-        """
-        self.cosine_stepper.step(current_step)
-
-    def get_dr(self, current_step: int) -> float:
-        """
-        Returns the updated rate (death_rate) at the given step.
-
-        Args:
-            current_step (int): Current step index.
-
-        Returns:
-            float: The decayed parameter.
-        """
-        if current_step >= self.T_max:
-            return self.eta_min
-        self.step(current_step)
-        return self.sgd.param_groups[0]["lr"]
 
 class _ADOPTAOScheduleFreeBase(Optimizer):
     def __init__(
@@ -2822,6 +2777,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         spam_clipping_type,
         spam_clipping_threshold,
         spam_clipping_start_step,
+        use_spam_momentum_reset,
+        spam_momentum_reset_warmup_steps,
+        spam_momentum_reset_interval_steps,
         *,
         block_size,
         min_quant_size,
@@ -2838,9 +2796,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams','both'}:
             raise ValueError("Invalid update strategy: {}".format(update_strategy))
         
-        # Override zero to 1e-37, as zero and float32.tiny NaNs
+        # Override zero to 1e-30
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-37
+            eps_floor = 1e-30
 
         if block_size is None:
             if state_precision == 'parameter':
@@ -2885,6 +2843,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             spam_clipping_threshold=spam_clipping_threshold,
             spam_clipping_start_step=spam_clipping_start_step,
             spam_clipping_type=spam_clipping_type,
+            use_spam_momentum_reset=use_spam_momentum_reset,
+            spam_momentum_reset_warmup_steps=spam_momentum_reset_warmup_steps,
+            spam_momentum_reset_interval_steps=spam_momentum_reset_interval_steps,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -2897,7 +2858,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("adaptive_clip", 1.0)
             group.setdefault("adaptive_clip_eps", 1e-3)
             group.setdefault("adaptive_clip_type", 'layer')
-            group.setdefault("debias_beta2", True)
+            group.setdefault("debias_beta2", False)
             group.setdefault("mars_gamma", 0.0)
             group.setdefault("eps2", 1e-3)
             group.setdefault("eps_floor", None)
@@ -2915,12 +2876,19 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("atan2_denom", False)
             group.setdefault("use_orthograd", False)
             group.setdefault("use_spam_clipping", False)
-            group.setdefault("spam_clipping_threshold", 1000.0)
-            group.setdefault("spam_clipping_start_step", 10)
+            group.setdefault("spam_clipping_threshold", 500.0)
+            group.setdefault("spam_clipping_start_step", 5)
             group.setdefault("spam_clipping_type", 'unit')
-            group.setdefault("use_beta2_warmup", False)
+            group.setdefault("use_spam_momentum_reset", False)
+            group.setdefault("spam_momentum_reset_warmup_steps", 10)
+            group.setdefault("spam_momentum_reset_interval_steps", 30)
+            group.setdefault("spam_momentum_reset_warmup_scheduler", CosineDecay(0.99, group.get("spam_momentum_reset_warmup_steps")))
+            group.setdefault("spam_momentum_reset_warmup_scheduler_current_step", group.get("spam_momentum_reset_warmup_steps"))
+            group.setdefault("spam_warmup_scaling_factor", torch.tensor(1.0))
             group.setdefault("beta2_warmup_initial", 0.9)
             group.setdefault("beta2_warmup_steps", 1)
+            group.setdefault("step", 0)
+
 
     # bring your own function to create zero-filled subclass
     def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
@@ -3042,13 +3010,40 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         # thus, it is safe to disable cache limit without the risk of always re-compiling.
         with torch._dynamo.utils.disable_cache_limit():
             for group in self.param_groups:
+                if 'step' in group:
+                    group['step'] += 1
+                else:
+                    group['step'] = 1
+
                 swd_param_size_sum = 0
                 swd_second_moment_group_sum = 0.0
                 mars_gamma = group["mars_gamma"]
                 beta1 = group["betas"][0]
                 use_muon_pp = group["use_muon_pp"]
                 fisher = group["fisher"]
-                
+
+                if group["use_spam_momentum_reset"]:
+                    group["spam_warmup_scaling_factor"].fill_(1 - group["spam_momentum_reset_warmup_scheduler"].get_dr(group["spam_momentum_reset_warmup_scheduler_current_step"]))
+                    group["spam_momentum_reset_warmup_scheduler_current_step"] += 1
+                else:
+                    group["spam_warmup_scaling_factor"].fill_(1.0)
+
+                if group["use_spam_momentum_reset"] and group['step'] % group["spam_momentum_reset_interval_steps"] == 0:
+                    reset_momentum = True
+                    print("resetting momentum")
+                else:
+                    reset_momentum = False
+
+                apply_spam_clipping = False
+                if group["use_spam_clipping"] and group["step"] >= group["spam_clipping_start_step"]:
+                    if group["use_spam_momentum_reset"]:
+                        if group["spam_momentum_reset_warmup_scheduler_current_step"] % group["spam_momentum_reset_interval_steps"] >= group["spam_clipping_start_step"]:
+                            apply_spam_clipping = True
+                            print("spam clipping")
+                    else:
+                        apply_spam_clipping = True
+
+                    
                 for p in group["params"]:
                     if p.grad is None:
                         continue
@@ -3093,6 +3088,11 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     
                     if group["weight_decay"] > 0 and group['stable_weight_decay']:
                         swd_param_size_sum += p.numel()
+
+                    if reset_momentum:
+                        # Reset weight accumulation
+                        state['sf_weight_sum'].fill_(0.0)
+                        state['sf_lr_max'].fill_(-2.0)
 
                     sf_lr_max = state['sf_lr_max'].copy_(torch.max(group["lr"], state['sf_lr_max']))
                     weight = (state['step'] ** group['r']) * (sf_lr_max ** group['weight_lr_power'])
@@ -3171,7 +3171,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             use_orthograd=group["use_orthograd"],
                             spam_clipping_threshold = group["spam_clipping_threshold"],
                             spam_clipping_type = group["spam_clipping_type"],
-                            apply_spam_clipping = group["use_spam_clipping"] and state["step"].item() <= group["spam_clipping_start_step"],
+                            apply_spam_clipping = apply_spam_clipping,
+                            reset_momentum = reset_momentum,
+                            spam_warmup_scaling_factor = group["spam_warmup_scaling_factor"],
                             adopt_clip=adopt_clip,
                             sf_checkpoint=checkpoint,
                             sf_adaptive_y_lr=adaptive_y_lr,
@@ -3181,6 +3183,10 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
 
                         if group["weight_decay"] > 0 and group['stable_weight_decay']:
                             swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
+
+                if group["use_spam_momentum_reset"] and group['step'] % group["spam_momentum_reset_interval_steps"] == 0:
+                        group["spam_momentum_reset_warmup_scheduler_current_step"] = 0
+                        group["spam_momentum_reset_warmup_scheduler"] = CosineDecay(0.99, group["spam_momentum_reset_warmup_steps"])
 
                 if group["weight_decay"] > 0 and group['stable_weight_decay']:
                     swd_second_moment_mean_sqrt = math.sqrt(swd_second_moment_group_sum / swd_param_size_sum)
@@ -3229,6 +3235,8 @@ def single_param_ADOPTAOScheduleFree(
     spam_clipping_threshold: float,
     spam_clipping_type: CLIP_TYPE,
     apply_spam_clipping: bool,
+    reset_momentum: bool,
+    spam_warmup_scaling_factor: torch.tensor,
     adopt_clip: torch.Tensor,
     sf_checkpoint: torch.Tensor,
     sf_adaptive_y_lr: torch.Tensor,
@@ -3252,9 +3260,13 @@ def single_param_ADOPTAOScheduleFree(
     if use_beta2_warmup:
         current_beta2 = schedule_beta_tc(beta2_warmup_steps, step, beta2_warmup_initial, beta2)
 
-    #Make a fp32 copies of state
+    #Make fp32 copies of state
     exp_avg_sq_f32 = torch.zeros_like(y_f32, dtype=torch.float32).copy_(exp_avg_sq.float())
     z_f32 = torch.zeros_like(y_f32, dtype=torch.float32).copy_(z.float())
+
+    if reset_momentum:
+        exp_avg_sq_f32 = torch.zeros_like(exp_avg_sq_f32)
+        z_f32.copy_(y_f32)
 
     if mars_gamma > 0:
         # MARS Calculate cₜ (gradient with correction term)
@@ -3336,6 +3348,8 @@ def single_param_ADOPTAOScheduleFree(
         clip_threshold = 1
         rms = get_rms(update).div(clip_threshold).clamp_min(1)
         update.mul_(1 / rms)
+
+    update = update.mul(spam_warmup_scaling_factor)
 
     if update_strategy in {'cautious','grams','both'}:
         y_update = (y_f32 - z_f32).mul_(sf_checkpoint).add_(update, alpha=-sf_adaptive_y_lr)
@@ -3443,8 +3457,8 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         self,
         params,
         lr = 5e-4,
-        betas=(0.9, 0.9999),
-        eps: float = 1e-6,
+        betas=(0.85, 0.9998),
+        eps: float = 1e-8,
         eps2: float = 1e-2,
         eps_floor: Optional[float] = None,
         weight_decay: float = 0.0,
@@ -3467,9 +3481,12 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         atan2_denom: bool = False,
         use_orthograd: bool = False,
         use_spam_clipping: bool = False,
-        spam_clipping_threshold: float = 1000.0,
-        spam_clipping_start_step: int = 10,
+        spam_clipping_threshold: float = 500.0,
+        spam_clipping_start_step: int = 5,
         spam_clipping_type: CLIP_TYPE = 'unit',
+        use_spam_momentum_reset: bool = False,
+        spam_momentum_reset_warmup_steps: int = 10,
+        spam_momentum_reset_interval_steps: int = 30,
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -3509,4 +3526,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             spam_clipping_type=spam_clipping_type,
             spam_clipping_threshold=spam_clipping_threshold,
             spam_clipping_start_step=spam_clipping_start_step,
+            use_spam_momentum_reset=use_spam_momentum_reset,
+            spam_momentum_reset_warmup_steps=spam_momentum_reset_warmup_steps,
+            spam_momentum_reset_interval_steps=spam_momentum_reset_interval_steps,
         )
