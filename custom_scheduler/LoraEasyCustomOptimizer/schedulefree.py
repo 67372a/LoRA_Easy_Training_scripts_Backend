@@ -3039,7 +3039,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     if group["use_spam_momentum_reset"]:
                         if group["spam_momentum_reset_warmup_scheduler_current_step"] % group["spam_momentum_reset_interval_steps"] >= group["spam_clipping_start_step"]:
                             apply_spam_clipping = True
-                            print("spam clipping")
                     else:
                         apply_spam_clipping = True
 
