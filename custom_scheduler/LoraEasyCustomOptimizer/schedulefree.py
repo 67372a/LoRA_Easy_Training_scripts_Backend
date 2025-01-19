@@ -3030,7 +3030,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
 
                 if group["use_spam_momentum_reset"] and group['step'] % group["spam_momentum_reset_interval_steps"] == 0:
                     reset_momentum = True
-                    print("resetting momentum")
                 else:
                     reset_momentum = False
 
@@ -3088,10 +3087,10 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     if group["weight_decay"] > 0 and group['stable_weight_decay']:
                         swd_param_size_sum += p.numel()
 
-                    if reset_momentum:
+                    #if reset_momentum:
                         # Reset weight accumulation
-                        state['sf_weight_sum'].fill_(0.0)
-                        state['sf_lr_max'].fill_(-2.0)
+                    #    state['sf_weight_sum'].fill_(0.0)
+                    #    state['sf_lr_max'].fill_(-2.0)
 
                     sf_lr_max = state['sf_lr_max'].copy_(torch.max(group["lr"], state['sf_lr_max']))
                     weight = (state['step'] ** group['r']) * (sf_lr_max ** group['weight_lr_power'])
@@ -3184,8 +3183,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
 
                 if group["use_spam_momentum_reset"] and group['step'] % group["spam_momentum_reset_interval_steps"] == 0:
-                        group["spam_momentum_reset_warmup_scheduler_current_step"] = 0
-                        group["spam_momentum_reset_warmup_scheduler"] = CosineDecay(0.99, group["spam_momentum_reset_warmup_steps"])
+                    group["spam_momentum_reset_warmup_scheduler_current_step"] = 0
+                    group["spam_momentum_reset_warmup_scheduler"] = CosineDecay(0.99, group["spam_momentum_reset_warmup_steps"])
 
                 if group["weight_decay"] > 0 and group['stable_weight_decay']:
                     swd_second_moment_mean_sqrt = math.sqrt(swd_second_moment_group_sum / swd_param_size_sum)
@@ -3265,7 +3264,7 @@ def single_param_ADOPTAOScheduleFree(
 
     if reset_momentum:
         exp_avg_sq_f32 = torch.zeros_like(exp_avg_sq_f32)
-        z_f32.copy_(y_f32)
+        #z_f32.copy_(y_f32)
 
     if mars_gamma > 0:
         # MARS Calculate cₜ (gradient with correction term)
