@@ -55,7 +55,7 @@ class CosineAnnealingWarmRestarts(LRScheduler):
             @wraps(func)
             def wrapper(*args, **kwargs):
                 instance = instance_ref()
-                instance._step_count += 1
+                instance._step_count = getattr(instance, "_step_count", 0) + 1
                 wrapped = func.__get__(instance, cls)
                 return wrapped(*args, **kwargs)
 
