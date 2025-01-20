@@ -2877,7 +2877,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("use_orthograd", False)
             group.setdefault("use_spam_clipping", False)
             group.setdefault("spam_clipping_threshold", 500.0)
-            group.setdefault("spam_clipping_start_step", 5)
+            group.setdefault("spam_clipping_start_step", 10)
             group.setdefault("spam_clipping_type", 'unit')
             group.setdefault("use_spam_momentum_reset", False)
             group.setdefault("spam_momentum_reset_warmup_steps", 10)
@@ -3480,7 +3480,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         use_orthograd: bool = False,
         use_spam_clipping: bool = False,
         spam_clipping_threshold: float = 500.0,
-        spam_clipping_start_step: int = 5,
+        spam_clipping_start_step: int = 10,
         spam_clipping_type: CLIP_TYPE = 'unit',
         use_spam_momentum_reset: bool = False,
         spam_momentum_reset_warmup_steps: int = 10,
