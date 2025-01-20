@@ -2771,6 +2771,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         fisher,
         update_strategy,
         stable_update,
+        stable_update_clip_threshold,
         atan2_denom,
         use_orthograd,
         use_spam_clipping,
@@ -2837,6 +2838,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             fisher=fisher,
             update_strategy=update_strategy,
             stable_update=stable_update,
+            stable_update_clip_threshold=stable_update_clip_threshold,
             atan2_denom=atan2_denom,
             use_orthograd=use_orthograd,
             use_spam_clipping=use_spam_clipping,
@@ -2873,6 +2875,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("fisher", False)
             group.setdefault("update_strategy", 'unmodified')
             group.setdefault("stable_update", False)
+            group.setdefault("stable_update_clip_threshold", 1.0)
             group.setdefault("atan2_denom", False)
             group.setdefault("use_orthograd", False)
             group.setdefault("use_spam_clipping", False)
@@ -3160,6 +3163,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             fisher=group["fisher"],
                             update_strategy=group["update_strategy"],
                             stable_update=group["stable_update"],
+                            stable_update_clip_threshold=group["stable_update_clip_threshold"],
                             atan2_denom=group["atan2_denom"],
                             use_orthograd=group["use_orthograd"],
                             spam_clipping_threshold = group["spam_clipping_threshold"],
@@ -3223,6 +3227,7 @@ def single_param_ADOPTAOScheduleFree(
     fisher: bool,
     update_strategy: UPDATE_STRATEGY,
     stable_update: bool,
+    stable_update_clip_threshold: float,
     atan2_denom: bool,
     use_orthograd: bool,
     spam_clipping_threshold: float,
@@ -3339,8 +3344,7 @@ def single_param_ADOPTAOScheduleFree(
     update = update.mul(spam_warmup_scaling_factor)
 
     if stable_update:
-        clip_threshold = 1
-        rms = get_rms(update).div(clip_threshold).clamp_min(1)
+        rms = get_rms(update).div(stable_update_clip_threshold).clamp_min(1)
         update.mul_(1 / rms)
 
     if update_strategy in {'cautious','grams','both'}:
@@ -3470,6 +3474,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         fisher: float = False,
         update_strategy: UPDATE_STRATEGY = 'unmodified',
         stable_update: bool = False,
+        stable_update_clip_threshold: float = 1.0,
         atan2_denom: bool = False,
         use_orthograd: bool = False,
         use_spam_clipping: bool = False,
@@ -3512,6 +3517,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             state_precision=state_precision,
             update_strategy=update_strategy,
             stable_update=stable_update,
+            stable_update_clip_threshold=stable_update_clip_threshold,
             atan2_denom=atan2_denom,
             use_orthograd=use_orthograd,
             use_spam_clipping=use_spam_clipping,
