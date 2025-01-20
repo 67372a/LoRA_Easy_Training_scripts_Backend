@@ -3264,7 +3264,7 @@ def single_param_ADOPTAOScheduleFree(
 
     if reset_momentum:
         exp_avg_sq_f32 = torch.zeros_like(exp_avg_sq_f32)
-        #z_f32.copy_(y_f32)
+        z_f32.lerp_(y_f32, weight=1 - 1 / beta1)
 
     if mars_gamma > 0:
         # MARS Calculate cₜ (gradient with correction term)
