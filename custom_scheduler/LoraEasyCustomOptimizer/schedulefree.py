@@ -3087,11 +3087,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     if group["weight_decay"] > 0 and group['stable_weight_decay']:
                         swd_param_size_sum += p.numel()
 
-                    #if reset_momentum:
-                        # Reset weight accumulation
-                    #    state['sf_weight_sum'].fill_(0.0)
-                    #    state['sf_lr_max'].fill_(-2.0)
-
                     sf_lr_max = state['sf_lr_max'].copy_(torch.max(group["lr"], state['sf_lr_max']))
                     weight = (state['step'] ** group['r']) * (sf_lr_max ** group['weight_lr_power'])
                     sf_weight_sum = state['sf_weight_sum'].copy_(state['sf_weight_sum'] + weight)
@@ -3196,7 +3191,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         return loss
 
 def get_rms(tensor:torch.tensor):
-    return tensor.norm().div(torch.sqrt(tensor.numel()))
+    return tensor.norm().div(math.sqrt(tensor.numel()))
 
 # this will work with any optim state tensor subclass that implements aten.lerp.Scalar and aten.copy_.default
 # and param tensor subclass that implements aten.add_.Tensor, and aten.addcdiv_.default
@@ -3264,7 +3259,6 @@ def single_param_ADOPTAOScheduleFree(
 
     if reset_momentum:
         exp_avg_sq_f32 = torch.zeros_like(exp_avg_sq_f32)
-        z_f32.lerp_(y_f32, weight=1 - 1 / beta1)
 
     if mars_gamma > 0:
         # MARS Calculate cₜ (gradient with correction term)
@@ -3342,12 +3336,12 @@ def single_param_ADOPTAOScheduleFree(
         else:
             update.add_(y_f32, alpha=weight_decay * swd_scaling)
 
+    update = update.mul(spam_warmup_scaling_factor)
+
     if stable_update:
         clip_threshold = 1
         rms = get_rms(update).div(clip_threshold).clamp_min(1)
         update.mul_(1 / rms)
-
-    update = update.mul(spam_warmup_scaling_factor)
 
     if update_strategy in {'cautious','grams','both'}:
         y_update = (y_f32 - z_f32).mul_(sf_checkpoint).add_(update, alpha=-sf_adaptive_y_lr)
