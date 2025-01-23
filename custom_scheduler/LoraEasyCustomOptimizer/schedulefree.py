@@ -3372,7 +3372,7 @@ def single_param_ADOPTAOScheduleFree(
 
     if use_focus:
         pbar.mul_(focus_beta).add_(y_f32, alpha=1.0 - focus_beta)
-        update = torch.sign(update) + focus_gamma * torch.sign(y_f32 - pbar_hat)
+        update = update + focus_gamma * (y_f32 - pbar_hat)
 
     if update_strategy in {'cautious','grams','both'}:
         y_update = (y_f32 - z_f32).mul_(sf_checkpoint).add_(update, alpha=-sf_adaptive_y_lr)
