@@ -2781,6 +2781,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         use_spam_momentum_reset,
         spam_momentum_reset_warmup_steps,
         spam_momentum_reset_interval_steps,
+        use_focus,
+        focus_gamma,
+        focus_beta,
         *,
         block_size,
         min_quant_size,
@@ -2848,6 +2851,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             use_spam_momentum_reset=use_spam_momentum_reset,
             spam_momentum_reset_warmup_steps=spam_momentum_reset_warmup_steps,
             spam_momentum_reset_interval_steps=spam_momentum_reset_interval_steps,
+            use_focus=use_focus,
+            focus_gamma=focus_gamma,
+            focus_beta=focus_beta,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -2891,7 +2897,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("beta2_warmup_initial", 0.9)
             group.setdefault("beta2_warmup_steps", 1)
             group.setdefault("step", 0)
-
+            group.setdefault("use_focus", False)
+            group.setdefault("focus_gamma", 0.1)
+            group.setdefault("focus_beta", 0.9)
 
     # bring your own function to create zero-filled subclass
     def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
@@ -3071,6 +3079,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         state["exp_avg_sq"] = self._new_buffer(p, False, 'ones' if fisher else 'zeros')
                         state["sf_lr_max"] = torch.tensor(-1.0, device=p.device, dtype=torch.float32)
                         state["sf_weight_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
+                        if group["use_focus"]:
+                            state["pbar"] = torch.zeros_like(p)
                         if mars_gamma > 0:
                             state["previous_grad"] = self._new_buffer(p, True)
 
@@ -3142,6 +3152,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             z=state["z"],
                             exp_avg_sq=state["exp_avg_sq"],
                             previous_grad=state["previous_grad"] if mars_gamma > 0 else None,
+                            pbar=state["pbar"] if group["use_focus"] else None,
                             lr=group["lr"],
                             beta1=group["betas"][0],
                             beta2=group["betas"][1],
@@ -3168,6 +3179,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             use_orthograd=group["use_orthograd"],
                             spam_clipping_threshold = group["spam_clipping_threshold"],
                             spam_clipping_type = group["spam_clipping_type"],
+                            use_focus=group["use_focus"],
+                            focus_gamma=group["focus_gamma"],
+                            focus_beta=group["focus_beta"],
                             apply_spam_clipping = apply_spam_clipping,
                             reset_momentum = reset_momentum,
                             spam_warmup_scaling_factor = group["spam_warmup_scaling_factor"],
@@ -3206,6 +3220,7 @@ def single_param_ADOPTAOScheduleFree(
     z: torch.Tensor,
     exp_avg_sq: torch.Tensor,
     previous_grad: Optional[torch.Tensor],
+    pbar: Optional[torch.Tensor],
     lr: torch.Tensor,
     beta1: float,
     beta2: float,
@@ -3232,6 +3247,9 @@ def single_param_ADOPTAOScheduleFree(
     use_orthograd: bool,
     spam_clipping_threshold: float,
     spam_clipping_type: CLIP_TYPE,
+    use_focus: bool,
+    focus_gamma: float,
+    focus_beta: float,
     apply_spam_clipping: bool,
     reset_momentum: bool,
     spam_warmup_scaling_factor: torch.tensor,
@@ -3261,6 +3279,11 @@ def single_param_ADOPTAOScheduleFree(
     #Make fp32 copies of state
     exp_avg_sq_f32 = torch.zeros_like(y_f32, dtype=torch.float32).copy_(exp_avg_sq.float())
     z_f32 = torch.zeros_like(y_f32, dtype=torch.float32).copy_(z.float())
+
+    if use_focus:
+        pbar_f32 = torch.zeros_like(pbar, dtype=torch.float32).copy_(pbar.float())
+        # Compute bias-corrected pbar
+        pbar_hat = pbar / (1.0 - focus_beta ** step)
 
     if reset_momentum:
         exp_avg_sq_f32 = torch.zeros_like(exp_avg_sq_f32)
@@ -3325,11 +3348,11 @@ def single_param_ADOPTAOScheduleFree(
         swd_scaling = 1.0
 
     # Weight decay
-    if weight_decay > 0 and weight_decouple:
+    if weight_decay > 0 and weight_decouple and not use_focus:
         z_f32.add_(y_f32, alpha=-lr * weight_decay * swd_scaling)
         y_f32.add_(y_f32, alpha=-lr * weight_decay * (1.0 - beta1) * swd_scaling)
 
-    elif weight_decay > 0:
+    elif weight_decay > 0 and not use_focus:
         if fisher:
             grad_weights = y_f32.div(fim_base)
 
@@ -3347,8 +3370,13 @@ def single_param_ADOPTAOScheduleFree(
         rms = get_rms(update).div(stable_update_clip_threshold).clamp_min(1)
         update.mul_(1 / rms)
 
+    if use_focus:
+        pbar.mul_(beta2).add_(y_f32, alpha=1.0 - beta2)
+        update = torch.sign(update) + focus_gamma * torch.sign(y_f32 - pbar_hat)
+
     if update_strategy in {'cautious','grams','both'}:
         y_update = (y_f32 - z_f32).mul_(sf_checkpoint).add_(update, alpha=-sf_adaptive_y_lr)
+
         if update_strategy in {'cautious','both'}:
             mask = (y_update * update > 0).to(update.dtype)
             mask.div_(mask.mean().clamp_(min=1e-3))
@@ -3364,15 +3392,24 @@ def single_param_ADOPTAOScheduleFree(
 
     z_f32.add_(update, alpha=-lr)
 
+    # Weight decay
+    if weight_decay > 0 and use_focus:
+        z_f32.add_(pbar_hat, alpha=-lr * weight_decay * swd_scaling)
+        y_f32.add_(pbar_hat, alpha=-lr * weight_decay * (1.0 - beta1) * swd_scaling)
+
     if weight_decay > 0 and stable_weight_decay:
         swd_second_moment_parameter_sum.copy_(exp_avg_sq_f32.div(bias_correction2).sum())
 
     if exp_avg_sq.dtype == torch.bfloat16:
         exp_avg_sq.copy_(_fp32_to_bf16_sr(exp_avg_sq_f32))
         z.copy_(_fp32_to_bf16_sr(z_f32))
+        if use_focus:
+            pbar.copy_(_fp32_to_bf16_sr(pbar_f32))
     else:
         exp_avg_sq.copy_(exp_avg_sq_f32)
         z.copy_(z_f32)
+        if use_focus:
+            pbar.copy_(pbar_f32)
 
     if p.dtype == torch.bfloat16:
         p.copy_(_fp32_to_bf16_sr(y_f32))
@@ -3484,6 +3521,9 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         use_spam_momentum_reset: bool = False,
         spam_momentum_reset_warmup_steps: int = 10,
         spam_momentum_reset_interval_steps: int = 30,
+        use_focus: bool = False,
+        focus_gamma: float = 0.1,
+        focus_beta: float = 0.9,
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -3527,4 +3567,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             use_spam_momentum_reset=use_spam_momentum_reset,
             spam_momentum_reset_warmup_steps=spam_momentum_reset_warmup_steps,
             spam_momentum_reset_interval_steps=spam_momentum_reset_interval_steps,
+            use_focus=use_focus,
+            focus_gamma=focus_gamma,
+            focus_beta=focus_beta,
         )
