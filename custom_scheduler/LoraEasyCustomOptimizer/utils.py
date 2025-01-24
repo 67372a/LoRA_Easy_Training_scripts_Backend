@@ -3,6 +3,7 @@ from typing import Tuple, Union, Type, Literal, Optional
 from torch.optim import Optimizer
 import math
 import inspect
+import logging
 
 OPTIMIZER = Type[Optimizer]
 
@@ -137,10 +138,10 @@ def schedule_beta_tc(t_beta: Optional[float], step: int, beta_initial: float, be
     )
 
 @torch.no_grad()
-def spam_grad_clipping(grad: torch.Tensor, second_moment: torch.Tensor, clip_threshold: float, clip_type: CLIP_TYPE = 'unit') -> torch.Tensor:
+def spam_grad_clipping(grad: torch.Tensor, second_moment: torch.Tensor, clip_threshold: float, clip_type: CLIP_TYPE = 'unit', spam_clip_eps: float = 1e-12) -> torch.Tensor:
     if clip_type == 'unit':
         # Calculate the clipping condition
-        second_momentum_threshold = second_moment.mul(clip_threshold)
+        second_momentum_threshold = second_moment.mul(clip_threshold).add_(spam_clip_eps)
         second_momentum_threshold_sqrt = torch.sqrt(second_momentum_threshold)
         sign_grad = grad.sign()
 
@@ -164,6 +165,54 @@ def spam_grad_clipping(grad: torch.Tensor, second_moment: torch.Tensor, clip_thr
 
         # Apply scaling to gradient
         return grad * scale
+    
+def spam_grad_clipping_logging(grad: torch.Tensor, second_moment: torch.Tensor, clip_threshold: float, clip_type: str = 'unit', spam_clip_eps: float = 1e-12) -> torch.Tensor:
+    if clip_type == 'unit':
+        # Calculate the clipping condition
+        second_momentum_threshold = second_moment.mul(clip_threshold).add_(spam_clip_eps)
+        second_momentum_threshold_sqrt = torch.sqrt(second_momentum_threshold)
+        
+        # Check where scaling will occur
+        scaling_mask = grad.square() > second_momentum_threshold
+        total_elements = grad.numel()
+        
+        if scaling_mask.any():
+            # Calculate scaling ratios for logging
+            original_values = grad[scaling_mask].abs()  # Use absolute values
+            scaled_values = second_momentum_threshold_sqrt[scaling_mask]
+            
+            # Add small epsilon to prevent division by zero
+            scaling_ratios = scaled_values / (original_values + spam_clip_eps)
+            
+            # Add more detailed logging
+            logging.info(
+                f"Total elements {total_elements}. "
+                f"Unit-wise gradient clipping applied to {scaling_mask.sum().item()} elements. "
+                f"\nOriginal values - Mean: {original_values.mean().item():.6f}, Max: {original_values.max().item():.6f}. "
+                f"\nScaled values - Mean: {scaled_values.mean().item():.6f}, Max: {scaled_values.max().item():.6f}. "
+                f"\nScaling ratios - Mean: {scaling_ratios.mean().item():.6f}, Max: {scaling_ratios.max().item():.6f}"
+            )
+        
+    elif clip_type == 'layer':
+        # Calculate the global gradient norm
+        max_norm = torch.norm(torch.sqrt(second_moment * clip_threshold))
+        grad_norm = torch.norm(grad)
+        
+        # Calculate scaling factor
+        scale = torch.where(
+            grad_norm > max_norm,
+            max_norm / grad_norm,
+            torch.ones_like(grad_norm)
+        )
+        
+        # Log if scaling is applied
+        if grad_norm > max_norm:
+            logging.info(
+                f"Layer-wise gradient clipping applied. "
+                f"Gradient norm: {grad_norm.item():.4f}, "
+                f"Max norm: {max_norm.item():.4f}, "
+                f"Scaling factor: {scale.item():.4f}"
+            )
     
 
 # Modified Adafactor factorisation implementation by Ross Wightman 

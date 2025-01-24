@@ -13,7 +13,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError
 from .utils import (copy_stochastic_, NORM_TYPE, agc, newton_schulz, 
                     STATE_PRECISION, orthograd, schedule_beta_tc, 
                     spam_grad_clipping, CLIP_TYPE, clean_dict_params,
-                    CosineDecay)
+                    CosineDecay, spam_grad_clipping_logging)
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
@@ -2778,12 +2778,14 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         spam_clipping_type,
         spam_clipping_threshold,
         spam_clipping_start_step,
+        spam_clipping_eps,
         use_spam_momentum_reset,
         spam_momentum_reset_warmup_steps,
         spam_momentum_reset_interval_steps,
         use_focus,
         focus_gamma,
         focus_beta,
+        debug,
         *,
         block_size,
         min_quant_size,
@@ -2848,12 +2850,14 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             spam_clipping_threshold=spam_clipping_threshold,
             spam_clipping_start_step=spam_clipping_start_step,
             spam_clipping_type=spam_clipping_type,
+            spam_clipping_eps=spam_clipping_eps,
             use_spam_momentum_reset=use_spam_momentum_reset,
             spam_momentum_reset_warmup_steps=spam_momentum_reset_warmup_steps,
             spam_momentum_reset_interval_steps=spam_momentum_reset_interval_steps,
             use_focus=use_focus,
             focus_gamma=focus_gamma,
             focus_beta=focus_beta,
+            debug=debug,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -2876,7 +2880,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("weight_decouple", False)
             group.setdefault("r", 0.0)
             group.setdefault("weight_lr_power", 2.0)
-            group.setdefault("swd_second_moment_mean_sqrt", None)
+            group.setdefault("swd_second_moment_mean_sqrt", torch.tensor(1.0, dtype=torch.float32))
             group.setdefault("train_mode", False)
             group.setdefault("fisher", False)
             group.setdefault("update_strategy", 'unmodified')
@@ -2885,21 +2889,24 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("atan2_denom", False)
             group.setdefault("use_orthograd", False)
             group.setdefault("use_spam_clipping", False)
-            group.setdefault("spam_clipping_threshold", 500.0)
+            group.setdefault("spam_clipping_threshold", 100.0)
             group.setdefault("spam_clipping_start_step", 10)
             group.setdefault("spam_clipping_type", 'unit')
+            group.setdefault("spam_clipping_eps", '1e-12')
             group.setdefault("use_spam_momentum_reset", False)
             group.setdefault("spam_momentum_reset_warmup_steps", 10)
             group.setdefault("spam_momentum_reset_interval_steps", 30)
             group.setdefault("spam_momentum_reset_warmup_scheduler", CosineDecay(0.99, group.get("spam_momentum_reset_warmup_steps")))
             group.setdefault("spam_momentum_reset_warmup_scheduler_current_step", group.get("spam_momentum_reset_warmup_steps"))
-            group.setdefault("spam_warmup_scaling_factor", torch.tensor(1.0))
+            group.setdefault("spam_warmup_scaling_factor", torch.tensor(1.0, dtype=torch.float32))
             group.setdefault("beta2_warmup_initial", 0.9)
             group.setdefault("beta2_warmup_steps", 1)
             group.setdefault("step", 0)
             group.setdefault("use_focus", False)
             group.setdefault("focus_gamma", 0.1)
             group.setdefault("focus_beta", 0.9)
+            group.setdefault("debug", False)
+            
 
     # bring your own function to create zero-filled subclass
     def _subclass_zeros(self, p: torch.Tensor, signed: bool, block_size: int):
@@ -3026,6 +3033,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                 else:
                     group['step'] = 1
 
+                if 'swd_second_moment_mean_sqrt' not in group:
+                    group['swd_second_moment_mean_sqrt'] = torch.tensor(1.0, dtype=torch.float32)
+
                 swd_param_size_sum = 0
                 swd_second_moment_group_sum = 0.0
                 mars_gamma = group["mars_gamma"]
@@ -3068,8 +3078,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         state["step"] = torch.tensor(0, device=p.device, dtype=torch.int32)
                         if group["weight_decay"] > 0 and group['stable_weight_decay']:
                             state["swd_second_moment_parameter_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
-                            if group.get("swd_second_moment_mean_sqrt", None) is None:
-                                group["swd_second_moment_mean_sqrt"] = torch.tensor(1.0, device=p.device, dtype=torch.float32)
                         state["z"] = self._new_buffer(p, True)
                         if state["z"].dtype == torch.bfloat16:
                             state["z"].copy_(_fp32_to_bf16_sr(p.float()))
@@ -3123,9 +3131,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             else:
                                 state["previous_grad"].copy_(temp_grad_f32)
 
-                        if use_muon_pp and p.ndim >= 2:
+                        if use_muon_pp and p.ndim >= 2 and p.numel() >= 2:
                             grad_f32 = newton_schulz(grad_f32)
-                        elif group["use_orthograd"] and p.ndim >= 1:
+                        elif group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
                             grad_f32 = orthograd(p_f32, grad_f32)
 
                         #Make a fp32 copy of exp_avg_sq_f32
@@ -3141,6 +3149,12 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         else:
                             state["exp_avg_sq"].copy_(exp_avg_sq_f32)
                     else:
+                        if group["debug"] and p.numel() >= 2 and apply_spam_clipping:
+                            grad_f32 = grad.float()
+                            spam_grad_clipping_logging(grad=grad_f32, second_moment=state["exp_avg_sq"].float(), 
+                                                       clip_threshold=group["spam_clipping_threshold"], clip_type=group["spam_clipping_type"],
+                                                         spam_clip_eps=group["spam_clipping_eps"])
+
                         # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
                         # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
                         # thus, by calling p.detach(), DTensor won't have .grad anymore, which is ok since we
@@ -3179,6 +3193,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             use_orthograd=group["use_orthograd"],
                             spam_clipping_threshold = group["spam_clipping_threshold"],
                             spam_clipping_type = group["spam_clipping_type"],
+                            spam_clipping_eps = group["spam_clipping_eps"],
                             use_focus=group["use_focus"],
                             focus_gamma=group["focus_gamma"],
                             focus_beta=group["focus_beta"],
@@ -3201,12 +3216,19 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
 
                 if group["weight_decay"] > 0 and group['stable_weight_decay']:
                     swd_second_moment_mean_sqrt = math.sqrt(swd_second_moment_group_sum / swd_param_size_sum)
+                    if group["debug"]:
+                        print("swd_second_moment_mean_sqrt=" + str(swd_second_moment_mean_sqrt))
+
                     if swd_second_moment_mean_sqrt > 0:
-                        group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(swd_second_moment_mean_sqrt, device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
+                        group['swd_second_moment_mean_sqrt'].fill_(swd_second_moment_mean_sqrt)
                     else:
-                        group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(1.0, device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
+                        group['swd_second_moment_mean_sqrt'].fill_(1.0)
+
+                    if group["debug"]:
+                        print("resulting_stable_weight_decay_multiplier=" + str(1.0 / group['swd_second_moment_mean_sqrt']))
                     
         return loss
+
 
 def get_rms(tensor:torch.tensor):
     return tensor.norm().div(math.sqrt(tensor.numel()))
@@ -3247,6 +3269,7 @@ def single_param_ADOPTAOScheduleFree(
     use_orthograd: bool,
     spam_clipping_threshold: float,
     spam_clipping_type: CLIP_TYPE,
+    spam_clipping_eps: float,
     use_focus: bool,
     focus_gamma: float,
     focus_beta: float,
@@ -3299,15 +3322,15 @@ def single_param_ADOPTAOScheduleFree(
         else:
             previous_grad.copy_(temp_grad_f32)
 
-    if use_muon_pp and p.ndim >= 2:
+    if use_muon_pp and p.ndim >= 2 and p.numel() >= 2:
         grad_f32 = newton_schulz(grad_f32)
-    elif use_orthograd and p.ndim >= 1:
+    elif use_orthograd and p.ndim >= 1 and p.numel() >= 2:
         grad_f32 = orthograd(p_f32, grad_f32)
 
-    if spam_clipping_threshold != 0 and apply_spam_clipping:
-        grad_f32 = spam_grad_clipping(grad_f32, exp_avg_sq_f32, spam_clipping_threshold, spam_clipping_type)
+    if spam_clipping_threshold != 0 and apply_spam_clipping and p.numel() >= 2:
+        grad_f32 = spam_grad_clipping(grad=grad_f32, second_moment=exp_avg_sq_f32, clip_threshold=spam_clipping_threshold, clip_type=spam_clipping_type, spam_clip_eps=spam_clipping_eps)
 
-    if adaptive_clip > 0:
+    if adaptive_clip > 0 and p.numel() >= 2:
         grad_f32 = agc(p=y_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
     if eps_floor is not None and eps_floor < eps:
@@ -3515,15 +3538,17 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         atan2_denom: bool = False,
         use_orthograd: bool = False,
         use_spam_clipping: bool = False,
-        spam_clipping_threshold: float = 500.0,
+        spam_clipping_threshold: float = 100.0,
         spam_clipping_start_step: int = 10,
         spam_clipping_type: CLIP_TYPE = 'unit',
+        spam_clipping_eps: float = 1e-12,
         use_spam_momentum_reset: bool = False,
         spam_momentum_reset_warmup_steps: int = 10,
         spam_momentum_reset_interval_steps: int = 30,
         use_focus: bool = False,
         focus_gamma: float = 0.2,
         focus_beta: float = 0.9,
+        debug: bool = False,
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -3564,10 +3589,12 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             spam_clipping_type=spam_clipping_type,
             spam_clipping_threshold=spam_clipping_threshold,
             spam_clipping_start_step=spam_clipping_start_step,
+            spam_clipping_eps=spam_clipping_eps,
             use_spam_momentum_reset=use_spam_momentum_reset,
             spam_momentum_reset_warmup_steps=spam_momentum_reset_warmup_steps,
             spam_momentum_reset_interval_steps=spam_momentum_reset_interval_steps,
             use_focus=use_focus,
             focus_gamma=focus_gamma,
             focus_beta=focus_beta,
+            debug=debug,
         )
