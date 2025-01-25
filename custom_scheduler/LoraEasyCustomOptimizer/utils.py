@@ -30,7 +30,7 @@ def unit_norm(x: torch.Tensor, norm: float = 2.0) -> torch.Tensor:
     else:
         dim = tuple(range(1, x_len))
 
-    return torch.norm(x, p=norm, dim=dim, keepdim=keep_dim)
+    return x.norm(p=norm, dim=dim, keepdim=keep_dim)
 
 def unit_norm_logging(x: torch.Tensor, norm: float = 2.0):
     r"""Get norm of unit."""
@@ -164,7 +164,7 @@ def spam_grad_clipping(grad: torch.Tensor,
                        spam_clip_eps: float = 1e-16) -> torch.Tensor:
     if clip_type == 'unit':
         # Calculate the clipping condition
-        second_momentum_threshold = second_moment.mul(clip_threshold).clamp_(min=spam_clip_eps)
+        second_momentum_threshold = second_moment.mul(clip_threshold).add_(min=spam_clip_eps)
         second_momentum_threshold_sqrt = torch.sqrt(second_momentum_threshold)
         sign_grad = grad.sign()
 
@@ -196,7 +196,7 @@ def spam_grad_clipping_logging(grad: torch.Tensor,
                                spam_clip_eps: float = 1e-16) -> torch.Tensor:
     if clip_type == 'unit':
         # Calculate the clipping condition
-        second_momentum_threshold = second_moment.mul(clip_threshold).clamp_(min=spam_clip_eps)
+        second_momentum_threshold = second_moment.mul(clip_threshold).add_(min=spam_clip_eps)
         second_momentum_threshold_sqrt = torch.sqrt(second_momentum_threshold)
         
         # Check where scaling will occur
@@ -209,7 +209,7 @@ def spam_grad_clipping_logging(grad: torch.Tensor,
             scaled_values = second_momentum_threshold_sqrt[scaling_mask]
             
             # Add small epsilon to prevent division by zero
-            scaling_ratios = scaled_values / (original_values.clamp_(min=spam_clip_eps))
+            scaling_ratios = scaled_values / (original_values.add_(min=spam_clip_eps))
             
             # Add more detailed logging
             logging.info(
