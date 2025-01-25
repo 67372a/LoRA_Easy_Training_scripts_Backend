@@ -5,7 +5,7 @@ from typing import Callable, Dict, Optional, Tuple, Union, List, Literal
 import torch
 from torch.optim import Optimizer
 import math
-import inspect
+import logging
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
@@ -13,7 +13,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError
 from .utils import (copy_stochastic_, NORM_TYPE, agc, newton_schulz, 
                     STATE_PRECISION, orthograd, schedule_beta_tc, 
                     spam_grad_clipping, CLIP_TYPE, clean_dict_params,
-                    CosineDecay, spam_grad_clipping_logging)
+                    CosineDecay, spam_grad_clipping_logging, unit_norm_logging)
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
@@ -2889,10 +2889,10 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("atan2_denom", False)
             group.setdefault("use_orthograd", False)
             group.setdefault("use_spam_clipping", False)
-            group.setdefault("spam_clipping_threshold", 100.0)
+            group.setdefault("spam_clipping_threshold", 50.0)
             group.setdefault("spam_clipping_start_step", 10)
             group.setdefault("spam_clipping_type", 'unit')
-            group.setdefault("spam_clipping_eps", '1e-12')
+            group.setdefault("spam_clipping_eps", '1e-16')
             group.setdefault("use_spam_momentum_reset", False)
             group.setdefault("spam_momentum_reset_warmup_steps", 10)
             group.setdefault("spam_momentum_reset_interval_steps", 30)
@@ -3154,6 +3154,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             spam_grad_clipping_logging(grad=grad_f32, second_moment=state["exp_avg_sq"].float(), 
                                                        clip_threshold=group["spam_clipping_threshold"], clip_type=group["spam_clipping_type"],
                                                          spam_clip_eps=group["spam_clipping_eps"])
+                            
+                        if group["debug"] and p.numel() >= 2 and group["adaptive_clip"]:
+                            unit_norm_logging(grad.float())
 
                         # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
                         # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
@@ -3217,7 +3220,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                 if group["weight_decay"] > 0 and group['stable_weight_decay']:
                     swd_second_moment_mean_sqrt = math.sqrt(swd_second_moment_group_sum / swd_param_size_sum)
                     if group["debug"]:
-                        print("swd_second_moment_mean_sqrt=" + str(swd_second_moment_mean_sqrt))
+                        logging.info(f"swd_second_moment_mean_sqrt={str(swd_second_moment_mean_sqrt)}")
 
                     if swd_second_moment_mean_sqrt > 0:
                         group['swd_second_moment_mean_sqrt'].fill_(swd_second_moment_mean_sqrt)
@@ -3225,7 +3228,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         group['swd_second_moment_mean_sqrt'].fill_(1.0)
 
                     if group["debug"]:
-                        print("resulting_stable_weight_decay_multiplier=" + str(1.0 / group['swd_second_moment_mean_sqrt']))
+                        logging.info(f"resulting_stable_weight_decay_multiplier= {str(1.0 / group['swd_second_moment_mean_sqrt'])}")
                     
         return loss
 
@@ -3538,10 +3541,10 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         atan2_denom: bool = False,
         use_orthograd: bool = False,
         use_spam_clipping: bool = False,
-        spam_clipping_threshold: float = 100.0,
+        spam_clipping_threshold: float = 50.0,
         spam_clipping_start_step: int = 10,
         spam_clipping_type: CLIP_TYPE = 'unit',
-        spam_clipping_eps: float = 1e-12,
+        spam_clipping_eps: float = 1e-16,
         use_spam_momentum_reset: bool = False,
         spam_momentum_reset_warmup_steps: int = 10,
         spam_momentum_reset_interval_steps: int = 30,

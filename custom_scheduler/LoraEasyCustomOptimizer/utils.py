@@ -30,7 +30,26 @@ def unit_norm(x: torch.Tensor, norm: float = 2.0) -> torch.Tensor:
     else:
         dim = tuple(range(1, x_len))
 
-    return x.norm(p=norm, dim=dim, keepdim=keep_dim)
+    return torch.norm(x, p=norm, dim=dim, keepdim=keep_dim)
+
+def unit_norm_logging(x: torch.Tensor, norm: float = 2.0):
+    r"""Get norm of unit."""
+    keep_dim: bool = True
+    dim: Optional[Union[int, Tuple[int, ...]]] = None
+
+    x_len: int = len(x.shape)
+    if x_len <= 1:
+        keep_dim = False
+    elif x_len in (2, 3):
+        dim = 1
+    elif x_len == 4:
+        dim = (1, 2, 3)
+    else:
+        dim = tuple(range(1, x_len))
+
+    logging.info(f"unit_norm shape={str(x.shape)}")
+    logging.info(f"unit_norm norms={str(torch.norm(x, p=norm, dim=dim, keepdim=keep_dim))}")
+
 
 def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     # thanks to Nerogar for fast stochastic pytorch implementation
@@ -138,7 +157,11 @@ def schedule_beta_tc(t_beta: Optional[float], step: int, beta_initial: float, be
     )
 
 @torch.no_grad()
-def spam_grad_clipping(grad: torch.Tensor, second_moment: torch.Tensor, clip_threshold: float, clip_type: CLIP_TYPE = 'unit', spam_clip_eps: float = 1e-12) -> torch.Tensor:
+def spam_grad_clipping(grad: torch.Tensor, 
+                       second_moment: torch.Tensor, 
+                       clip_threshold: float, 
+                       clip_type: CLIP_TYPE = 'unit', 
+                       spam_clip_eps: float = 1e-16) -> torch.Tensor:
     if clip_type == 'unit':
         # Calculate the clipping condition
         second_momentum_threshold = second_moment.mul(clip_threshold).add_(spam_clip_eps)
@@ -166,7 +189,11 @@ def spam_grad_clipping(grad: torch.Tensor, second_moment: torch.Tensor, clip_thr
         # Apply scaling to gradient
         return grad * scale
     
-def spam_grad_clipping_logging(grad: torch.Tensor, second_moment: torch.Tensor, clip_threshold: float, clip_type: str = 'unit', spam_clip_eps: float = 1e-12) -> torch.Tensor:
+def spam_grad_clipping_logging(grad: torch.Tensor, 
+                               second_moment: torch.Tensor, 
+                               clip_threshold: float, 
+                               clip_type: str = 'unit', 
+                               spam_clip_eps: float = 1e-16) -> torch.Tensor:
     if clip_type == 'unit':
         # Calculate the clipping condition
         second_momentum_threshold = second_moment.mul(clip_threshold).add_(spam_clip_eps)
