@@ -2867,6 +2867,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
     def __setstate__(self, state):
         super().__setstate__(state)
         for group in self.param_groups:
+            device = group["params"][0].device
+
             group.setdefault("adaptive_clip", 1.0)
             group.setdefault("adaptive_clip_eps", 1e-3)
             group.setdefault("adaptive_clip_type", 'layer')
@@ -2880,7 +2882,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("weight_decouple", False)
             group.setdefault("r", 0.0)
             group.setdefault("weight_lr_power", 2.0)
-            group.setdefault("swd_second_moment_mean_sqrt", torch.tensor(1.0, dtype=torch.float32))
+            group.setdefault("swd_second_moment_mean_sqrt", torch.tensor(1.0, dtype=torch.float32, device=device))
             group.setdefault("train_mode", False)
             group.setdefault("fisher", False)
             group.setdefault("update_strategy", 'unmodified')
@@ -2898,7 +2900,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("spam_momentum_reset_interval_steps", 30)
             group.setdefault("spam_momentum_reset_warmup_scheduler", CosineDecay(0.99, group.get("spam_momentum_reset_warmup_steps")))
             group.setdefault("spam_momentum_reset_warmup_scheduler_current_step", group.get("spam_momentum_reset_warmup_steps"))
-            group.setdefault("spam_warmup_scaling_factor", torch.tensor(1.0, dtype=torch.float32))
+            group.setdefault("spam_warmup_scaling_factor", torch.tensor(1.0, dtype=torch.float32, device=device))
             group.setdefault("beta2_warmup_initial", 0.9)
             group.setdefault("beta2_warmup_steps", 1)
             group.setdefault("step", 0)
@@ -3034,7 +3036,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     group['step'] = 1
 
                 if 'swd_second_moment_mean_sqrt' not in group:
-                    group['swd_second_moment_mean_sqrt'] = torch.tensor(1.0, dtype=torch.float32)
+                    device = group["params"][0].device
+                    group['swd_second_moment_mean_sqrt'] = torch.tensor(1.0, dtype=torch.float32, device=device)
 
                 swd_param_size_sum = 0
                 swd_second_moment_group_sum = 0.0

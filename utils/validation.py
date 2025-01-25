@@ -39,7 +39,7 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
     output_args = {}
 
     for key, value in args.items():
-        if not value:
+        if value is None or (isinstance(value, str) and value.strip() == '') :
             passed_validation = False
             errors.append(f"No data filled in for {key}")
             continue
@@ -84,7 +84,7 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
                 passed_validation = False
                 errors.append("Keep Tokens Separator is an empty string")
                 continue
-            if not val:
+            if value is None or (isinstance(value, str) and value.strip() == ''):
                 continue
             if isinstance(val, str):
                 if val.lower() == "true":
@@ -131,14 +131,14 @@ def validate_dataset_args(args: dict) -> tuple[bool, list[str], dict]:
     output_args = {"general": {}, "subsets": []}
 
     for key, value in args.items():
-        if not value:
+        if value is None or (isinstance(value, str) and value.strip() == ''):
             passed_validation = False
             errors.append(f"No Data filled in for {key}")
             continue
         if key == "subsets":
             continue
         for arg, val in value.items():
-            if not val:
+            if value is None or (isinstance(value, str) and value.strip() == ''):
                 continue
             if arg == "max_token_length" and val == 75:
                 continue
@@ -157,7 +157,7 @@ def validate_dataset_args(args: dict) -> tuple[bool, list[str], dict]:
 def validate_subset(args: dict) -> tuple[bool, list[str], dict]:
     passed_validation = True
     errors = []
-    output_args = {key: value for key, value in args.items() if value}
+    output_args = {key: value for key, value in args.items() if not (value is None or (isinstance(value, str) and value.strip() == '') or (isinstance(value, bool) == False))}
     name = "subset"
     if "name" in output_args:
         name = output_args["name"]
