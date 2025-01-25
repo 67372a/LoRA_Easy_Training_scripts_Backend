@@ -157,7 +157,7 @@ def validate_dataset_args(args: dict) -> tuple[bool, list[str], dict]:
 def validate_subset(args: dict) -> tuple[bool, list[str], dict]:
     passed_validation = True
     errors = []
-    output_args = {key: value for key, value in args.items() if value is not None}
+    output_args = {key: value for key, value in args.items() if value}
     name = "subset"
     if "name" in output_args:
         name = output_args["name"]
