@@ -3155,8 +3155,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         if group["debug"] and p.numel() >= 2 and apply_spam_clipping:
                             grad_f32 = grad.float()
                             spam_grad_clipping_logging(grad=grad_f32, second_moment=state["exp_avg_sq"].float(), 
-                                                       clip_threshold=group["spam_clipping_threshold"], clip_type=group["spam_clipping_type"],
-                                                         spam_clip_eps=group["spam_clipping_eps"])
+                                                       clip_threshold=group["spam_clipping_threshold"], 
+                                                       clip_type=group["spam_clipping_type"],
+                                                       spam_clip_eps=group["spam_clipping_eps"])
 
                         # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
                         # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
@@ -3330,10 +3331,10 @@ def single_param_ADOPTAOScheduleFree(
     elif use_orthograd and p.ndim >= 1 and p.numel() >= 2:
         grad_f32 = orthograd(p_f32, grad_f32)
 
-    if spam_clipping_threshold != 0 and apply_spam_clipping and p.numel() >= 2:
+    if spam_clipping_threshold != 0 and apply_spam_clipping and p.numel() >= 2 and p.ndim >= 1:
         grad_f32 = spam_grad_clipping(grad=grad_f32, second_moment=exp_avg_sq_f32, clip_threshold=spam_clipping_threshold, clip_type=spam_clipping_type, spam_clip_eps=spam_clipping_eps)
 
-    if adaptive_clip > 0 and p.numel() >= 2:
+    if adaptive_clip > 0 and p.numel() >= 2 and p.ndim >= 1:
         grad_f32 = agc(p=y_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
     if eps_floor is not None and eps_floor < eps:
