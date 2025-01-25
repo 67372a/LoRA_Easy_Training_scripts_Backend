@@ -39,7 +39,8 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
     output_args = {}
 
     for key, value in args.items():
-        if not value:
+        if (value is None or 
+            (isinstance(value, str) and value.strip() == '')):
             passed_validation = False
             errors.append(f"No data filled in for {key}")
             continue
@@ -84,7 +85,9 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
                 passed_validation = False
                 errors.append("Keep Tokens Separator is an empty string")
                 continue
-            if not value:
+            if (value is None or 
+                (isinstance(value, str) and value.strip() == '') or 
+                (isinstance(value, bool) and value == False)):
                 continue
             if isinstance(val, str):
                 if val.lower() == "true":
@@ -131,14 +134,17 @@ def validate_dataset_args(args: dict) -> tuple[bool, list[str], dict]:
     output_args = {"general": {}, "subsets": []}
 
     for key, value in args.items():
-        if not value:
+        if (value is None or 
+                (isinstance(value, str) and value.strip() == '')):
             passed_validation = False
             errors.append(f"No Data filled in for {key}")
             continue
         if key == "subsets":
             continue
         for arg, val in value.items():
-            if not val:
+            if (val is None or 
+                (isinstance(val, str) and val.strip() == '') or 
+                (isinstance(val, bool) and value == False)):
                 continue
             if arg == "max_token_length" and val == 75:
                 continue
