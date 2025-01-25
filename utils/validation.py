@@ -138,7 +138,7 @@ def validate_dataset_args(args: dict) -> tuple[bool, list[str], dict]:
         if key == "subsets":
             continue
         for arg, val in value.items():
-            if value is None or (isinstance(value, str) and value.strip() == ''):
+            if val is None or (isinstance(value, str) and value.strip() == ''):
                 continue
             if arg == "max_token_length" and val == 75:
                 continue
