@@ -3154,9 +3154,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             spam_grad_clipping_logging(grad=grad_f32, second_moment=state["exp_avg_sq"].float(), 
                                                        clip_threshold=group["spam_clipping_threshold"], clip_type=group["spam_clipping_type"],
                                                          spam_clip_eps=group["spam_clipping_eps"])
-                            
-                        if group["debug"] and p.numel() >= 2 and group["adaptive_clip"]:
-                            unit_norm_logging(grad.float())
 
                         # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
                         # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
