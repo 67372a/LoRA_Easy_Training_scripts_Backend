@@ -2802,9 +2802,13 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams','both'}:
             raise ValueError("Invalid update strategy: {}".format(update_strategy))
         
-        # Override zero to 1e-30
+        # Override zero to tiny
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-30
+            eps_floor = torch.finfo(torch.float32).tiny
+
+        # Override zero to tiny
+        if spam_clipping_eps is not None and spam_clipping_eps <= 0:
+            spam_clipping_eps = torch.finfo(torch.float32).tiny
 
         if block_size is None:
             if state_precision == 'parameter':
@@ -2891,10 +2895,10 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("atan2_denom", False)
             group.setdefault("use_orthograd", False)
             group.setdefault("use_spam_clipping", False)
-            group.setdefault("spam_clipping_threshold", 50.0)
+            group.setdefault("spam_clipping_threshold", 1000.0)
             group.setdefault("spam_clipping_start_step", 10)
-            group.setdefault("spam_clipping_type", 'unit')
-            group.setdefault("spam_clipping_eps", '1e-16')
+            group.setdefault("spam_clipping_type", 'element')
+            group.setdefault("spam_clipping_eps", None)
             group.setdefault("use_spam_momentum_reset", False)
             group.setdefault("spam_momentum_reset_warmup_steps", 10)
             group.setdefault("spam_momentum_reset_interval_steps", 30)
@@ -3138,6 +3142,20 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             grad_f32 = newton_schulz(grad_f32)
                         elif group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
                             grad_f32 = orthograd(p_f32, grad_f32)
+
+                        if group["spam_clipping_threshold"] != 0 and apply_spam_clipping and p.numel() >= 2 and p.ndim >= 1:
+                            grad_f32 = spam_grad_clipping(grad=grad_f32, 
+                                                          second_moment=exp_avg_sq_f32, 
+                                                          clip_threshold=group["spam_clipping_threshold"], 
+                                                          clip_type=group["spam_clipping_type"], 
+                                                          spam_clip_eps=group["spam_clipping_eps"])
+
+                        if group["adaptive_clip"] > 0 and p.numel() >= 2 and p.ndim >= 1:
+                            grad_f32 = agc(p=p_f32, 
+                                           grad=grad_f32, 
+                                           agc_clip_val=group["adaptive_clip"], 
+                                           agc_eps=group["adaptive_clip_eps"], 
+                                           norm_type=group["adaptive_clip_type"])
 
                         #Make a fp32 copy of exp_avg_sq_f32
                         exp_avg_sq_f32 = torch.zeros_like(p.float(), dtype=torch.float32).copy_(state["exp_avg_sq"].float())
@@ -3542,10 +3560,10 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         atan2_denom: bool = False,
         use_orthograd: bool = False,
         use_spam_clipping: bool = False,
-        spam_clipping_threshold: float = 50.0,
+        spam_clipping_threshold: float = 1000.0,
         spam_clipping_start_step: int = 10,
-        spam_clipping_type: CLIP_TYPE = 'unit',
-        spam_clipping_eps: float = 1e-16,
+        spam_clipping_type: CLIP_TYPE = 'element',
+        spam_clipping_eps: Optional[float] = None,
         use_spam_momentum_reset: bool = False,
         spam_momentum_reset_warmup_steps: int = 10,
         spam_momentum_reset_interval_steps: int = 30,

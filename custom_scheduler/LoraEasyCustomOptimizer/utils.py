@@ -9,7 +9,7 @@ OPTIMIZER = Type[Optimizer]
 
 NORM_TYPE = Literal['unit','global','layer']
 
-CLIP_TYPE = Literal['unit','layer']
+CLIP_TYPE = Literal['unit','layer','element']
 
 STATE_PRECISION = Literal['parameter', 'q4bit', 'q8bit', 'qfp8']
 
@@ -76,7 +76,7 @@ def agc(p: torch.Tensor,
         grad: torch.Tensor, 
         agc_clip_val: float, 
         agc_eps: float = 1e-3, 
-        eps: float = 1e-16, 
+        eps: Optional[float] = None, 
         norm_type: NORM_TYPE = 'layer') -> torch.Tensor:
     r"""Clip gradient values in excess of the norm.
         Clip updates to be at most clipping * parameter_norm.
@@ -94,6 +94,10 @@ def agc(p: torch.Tensor,
         associated parameter.
     :param eps: float. simple stop from div by zero, as such should be as small as possible to avoid skewing clipping.
     """
+
+    if eps is None:
+        eps = torch.finfo(torch.float32).tiny
+
     if norm_type in {'global','layer'}:
         # Compute the global norm of the parameters and gradients
         p_norm = torch.norm(p).clamp_(min=agc_eps)
@@ -103,7 +107,7 @@ def agc(p: torch.Tensor,
         max_norm = p_norm * agc_clip_val
 
         # Compute the clipping coefficient
-        clip_coef = max(1, max_norm / g_norm.clamp(min=eps))
+        clip_coef = min(1, max_norm / g_norm.clamp(min=eps))
 
         # Scale the gradients holistically
         grad = grad * clip_coef
@@ -160,9 +164,9 @@ def schedule_beta_tc(t_beta: Optional[float], step: int, beta_initial: float, be
 def spam_grad_clipping(grad: torch.Tensor, 
                        second_moment: torch.Tensor, 
                        clip_threshold: float, 
-                       clip_type: CLIP_TYPE = 'unit', 
-                       spam_clip_eps: float = 1e-16) -> torch.Tensor:
-    if clip_type == 'unit':
+                       clip_type: CLIP_TYPE = 'element', 
+                       spam_clip_eps: float = 1e-37) -> torch.Tensor:
+    if clip_type in {'unit', 'element'}:
         # Calculate the clipping condition
         second_momentum_threshold = second_moment.mul(clip_threshold).add(spam_clip_eps)
         second_momentum_threshold_sqrt = torch.sqrt(second_momentum_threshold)
@@ -192,9 +196,9 @@ def spam_grad_clipping(grad: torch.Tensor,
 def spam_grad_clipping_logging(grad: torch.Tensor, 
                                second_moment: torch.Tensor, 
                                clip_threshold: float, 
-                               clip_type: str = 'unit', 
-                               spam_clip_eps: float = 1e-16) -> torch.Tensor:
-    if clip_type == 'unit':
+                               clip_type: str = 'element', 
+                               spam_clip_eps: float = 1e-37) -> torch.Tensor:
+    if clip_type in {'unit', 'element'}:
         # Calculate the clipping condition
         second_momentum_threshold = second_moment.mul(clip_threshold).add(spam_clip_eps)
         second_momentum_threshold_sqrt = torch.sqrt(second_momentum_threshold)
@@ -348,7 +352,10 @@ def newton_schulz(grad: torch.tensor, steps: int = 6, eps: float = 1e-7) -> torc
     return working_grad.to(dtype=original_type)
 
 # Implementation from: https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/main/orthograd.py
-def orthograd(param: torch.tensor, grad: torch.tensor, eps: float = 1e-30):
+def orthograd(param: torch.tensor, grad: torch.tensor, eps: Optional[float] = None):
+    if eps is None:
+        eps = torch.finfo(torch.float32).tiny
+
     w = param.view(-1)
     og_grad_shape = grad.shape
     grad = grad.view(-1)
