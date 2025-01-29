@@ -2895,13 +2895,13 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("atan2_denom", False)
             group.setdefault("use_orthograd", False)
             group.setdefault("use_spam_clipping", False)
-            group.setdefault("spam_clipping_threshold", 1000.0)
-            group.setdefault("spam_clipping_start_step", 10)
+            group.setdefault("spam_clipping_threshold", 500.0)
+            group.setdefault("spam_clipping_start_step", 20)
             group.setdefault("spam_clipping_type", 'element')
             group.setdefault("spam_clipping_eps", None)
             group.setdefault("use_spam_momentum_reset", False)
-            group.setdefault("spam_momentum_reset_warmup_steps", 10)
-            group.setdefault("spam_momentum_reset_interval_steps", 30)
+            group.setdefault("spam_momentum_reset_warmup_steps", 20)
+            group.setdefault("spam_momentum_reset_interval_steps", 41)
             group.setdefault("spam_momentum_reset_warmup_scheduler", CosineDecay(0.99, group.get("spam_momentum_reset_warmup_steps")))
             group.setdefault("spam_momentum_reset_warmup_scheduler_current_step", group.get("spam_momentum_reset_warmup_steps"))
             group.setdefault("spam_warmup_scaling_factor", torch.tensor(1.0, dtype=torch.float32, device=device))
@@ -3560,13 +3560,13 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         atan2_denom: bool = False,
         use_orthograd: bool = False,
         use_spam_clipping: bool = False,
-        spam_clipping_threshold: float = 1000.0,
-        spam_clipping_start_step: int = 10,
+        spam_clipping_threshold: float = 500.0,
+        spam_clipping_start_step: int = 20,
         spam_clipping_type: CLIP_TYPE = 'element',
         spam_clipping_eps: Optional[float] = None,
         use_spam_momentum_reset: bool = False,
-        spam_momentum_reset_warmup_steps: int = 10,
-        spam_momentum_reset_interval_steps: int = 30,
+        spam_momentum_reset_warmup_steps: int = 20,
+        spam_momentum_reset_interval_steps: int = 41,
         use_focus: bool = False,
         focus_gamma: float = 0.2,
         focus_beta: float = 0.9,
