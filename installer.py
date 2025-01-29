@@ -85,6 +85,21 @@ def setup_venv(venv_pip):
     )
     if PLATFORM == "windows":
         subprocess.check_call("venv\\Scripts\\python.exe ..\\fix_torch.py")
+
+        version = sys.version_info
+        if version.major == 3 and version.minor == 12:
+            subprocess.check_call(
+                f"{venv_pip} install -U --no-deps --force-reinstall https://github.com/woct0rdho/triton-windows/releases/download/v3.1.0-windows.post9/triton-3.1.0-cp312-cp312-win_amd64.whl"
+            )
+        elif version.major == 3 and version.minor == 11:
+            subprocess.check_call(
+                f"{venv_pip} install -U --no-deps --force-reinstall https://github.com/woct0rdho/triton-windows/releases/download/v3.1.0-windows.post9/triton-3.1.0-cp311-cp311-win_amd64.whl"
+            )
+        elif version.major == 3 and version.minor == 10:
+            subprocess.check_call(
+                f"{venv_pip} install -U --no-deps --force-reinstall https://github.com/woct0rdho/triton-windows/releases/download/v3.1.0-windows.post9/triton-3.1.0-cp310-cp310-win_amd64.whl"
+            )
+        
     subprocess.check_call(
         f"{venv_pip} install -U --no-deps xformers==0.0.28.post3 --index-url https://download.pytorch.org/whl/cu124",
         shell=PLATFORM == "linux",
@@ -98,6 +113,9 @@ def setup_venv(venv_pip):
         f"{venv_pip} install -U --force-reinstall --no-deps ../installables/lycoris_lora-3.1.1.post1-py3-none-any.whl",
         shell=PLATFORM == "linux",
     )
+
+
+
     
     subprocess.check_call(f"{venv_pip} install -U -r requirements.txt", shell=PLATFORM == "linux")
     subprocess.check_call(f"{venv_pip} install -U ../custom_scheduler/.", shell=PLATFORM == "linux")
