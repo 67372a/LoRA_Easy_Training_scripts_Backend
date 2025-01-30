@@ -3143,20 +3143,13 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         elif group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
                             grad_f32 = orthograd(p_f32, grad_f32)
 
-                        if group["spam_clipping_threshold"] != 0 and apply_spam_clipping and p.numel() >= 2 and p.ndim >= 1:
-                            grad_f32 = spam_grad_clipping(grad=grad_f32, 
-                                                          second_moment=exp_avg_sq_f32, 
-                                                          clip_threshold=group["spam_clipping_threshold"], 
-                                                          clip_type=group["spam_clipping_type"], 
-                                                          spam_clip_eps=group["spam_clipping_eps"])
-
                         if group["adaptive_clip"] > 0 and p.numel() >= 2 and p.ndim >= 1:
                             grad_f32 = agc(p=p_f32, 
                                            grad=grad_f32, 
                                            agc_clip_val=group["adaptive_clip"], 
                                            agc_eps=group["adaptive_clip_eps"], 
                                            norm_type=group["adaptive_clip_type"])
-
+                            
                         #Make a fp32 copy of exp_avg_sq_f32
                         exp_avg_sq_f32 = torch.zeros_like(p.float(), dtype=torch.float32).copy_(state["exp_avg_sq"].float())
                         exp_avg_sq_f32.add_(grad_f32.square())
