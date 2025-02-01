@@ -2807,7 +2807,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             eps_floor = torch.finfo(torch.float32).tiny
 
         # Override zero to tiny
-        if spam_clipping_eps is not None and spam_clipping_eps <= 0:
+        if spam_clipping_eps is None or spam_clipping_eps <= 0:
             spam_clipping_eps = torch.finfo(torch.float32).tiny
 
         if block_size is None:
@@ -3095,7 +3095,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         state["sf_lr_max"] = torch.tensor(-1.0, device=p.device, dtype=torch.float32)
                         state["sf_weight_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
                         if group["use_focus"]:
-                            state["pbar"] = torch.zeros_like(p)
+                            state["pbar"] = self._new_buffer(p, True)
                         if mars_gamma > 0:
                             state["previous_grad"] = self._new_buffer(p, True)
 
@@ -3290,7 +3290,7 @@ def single_param_ADOPTAOScheduleFree(
     focus_beta: float,
     apply_spam_clipping: bool,
     reset_momentum: bool,
-    spam_warmup_scaling_factor: torch.tensor,
+    spam_warmup_scaling_factor: torch.Tensor,
     adopt_clip: torch.Tensor,
     sf_checkpoint: torch.Tensor,
     sf_adaptive_y_lr: torch.Tensor,
@@ -3409,8 +3409,9 @@ def single_param_ADOPTAOScheduleFree(
         update.mul_(1 / rms)
 
     if use_focus:
-        pbar.mul_(focus_beta).add_(y_f32, alpha=1.0 - focus_beta)
-        update = update + focus_gamma * (y_f32 - pbar_hat)
+        # Compute update
+        pbar_f32.mul_(focus_beta).add_(y_f32, alpha=1.0 - focus_beta)
+        update = torch.sign(update) + focus_gamma * torch.sign(y_f32 - pbar_hat)
 
     if update_strategy in {'cautious','grams','both'}:
         y_update = (y_f32 - z_f32).mul_(sf_checkpoint).add_(update, alpha=-sf_adaptive_y_lr)
