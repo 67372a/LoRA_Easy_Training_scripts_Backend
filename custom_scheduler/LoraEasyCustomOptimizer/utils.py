@@ -166,6 +166,9 @@ def spam_grad_clipping(grad: torch.Tensor,
                        clip_threshold: float, 
                        clip_type: CLIP_TYPE = 'element', 
                        spam_clip_eps: float = 1e-37) -> torch.Tensor:
+    if spam_clip_eps is None or spam_clip_eps == 0:
+        spam_clip_eps = torch.finfo(torch.float32).tiny
+    
     if clip_type in {'unit', 'element'}:
         # Calculate the clipping condition
         second_momentum_threshold = second_moment.mul(clip_threshold).add(spam_clip_eps)
@@ -198,6 +201,9 @@ def spam_grad_clipping_logging(grad: torch.Tensor,
                                clip_threshold: float, 
                                clip_type: str = 'element', 
                                spam_clip_eps: float = 1e-37) -> torch.Tensor:
+    if spam_clip_eps is None or spam_clip_eps == 0:
+        spam_clip_eps = torch.finfo(torch.float32).tiny
+
     if clip_type in {'unit', 'element'}:
         # Calculate the clipping condition
         second_momentum_threshold = second_moment.mul(clip_threshold).add(spam_clip_eps)
