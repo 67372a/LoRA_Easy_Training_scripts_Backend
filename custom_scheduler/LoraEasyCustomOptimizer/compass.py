@@ -5,10 +5,11 @@
 
 import torch
 from torch.optim import Optimizer
-from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz, create_factored_dims, get_denom, update_second_moment, STATE_PRECISION, UPDATE_STRATEGY
+from .utils import schedule_beta_tc, orthograd, CosineDecay, CLIP_TYPE, copy_stochastic_, agc, NORM_TYPE, newton_schulz, create_factored_dims, get_denom, update_second_moment, STATE_PRECISION, UPDATE_STRATEGY, spam_grad_clipping_logging, spam_grad_clipping
 import math
 from torch.nn.functional import softplus
 from typing import Optional, Literal
+import logging
 
 from bitsandbytes.functional import quantize_blockwise, dequantize_blockwise
 from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
@@ -1751,6 +1752,9 @@ class CompassADOPTMARS(BaseOptimizer):
 
         return loss
 
+def get_rms(tensor:torch.tensor):
+    return tensor.norm().div(math.sqrt(tensor.numel()))
+
 class _CompassBase(Optimizer):
     def __init__(
         self,
@@ -1775,6 +1779,22 @@ class _CompassBase(Optimizer):
         use_muon_pp,
         compass_second_moment_smoothing,
         update_strategy,
+        stable_update,
+        stable_update_clip_threshold,
+        use_orthograd,
+        use_spam_clipping,
+        spam_clipping_type,
+        spam_clipping_threshold,
+        spam_clipping_start_step,
+        spam_clipping_eps,
+        use_spam_momentum_reset,
+        spam_momentum_reset_warmup_steps,
+        spam_momentum_reset_interval_steps,
+        use_focus,
+        focus_gamma,
+        focus_beta,
+        debug,
+        use_exadam,
         *,
         block_size,
         min_quant_size,
@@ -1788,16 +1808,20 @@ class _CompassBase(Optimizer):
             raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
         if not 0.0 <= betas[1] < 1.0:
             raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
-        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams'}:
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams','both'}:
             raise ValueError("Invalid update strategy: {}".format(update_strategy))
         
         # If cautious true, override update strategy to cautious
         if cautious:
             update_strategy = 'cautious'
-        
-        # Override zero to 1e-37, as zero and float32.tiny NaNs
+
+        # Override zero to tiny
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = 1e-37
+            eps_floor = torch.finfo(torch.float32).tiny
+
+        # Override zero to tiny
+        if spam_clipping_eps is None or spam_clipping_eps <= 0:
+            spam_clipping_eps = torch.finfo(torch.float32).tiny
 
         if block_size is None:
             if state_precision == 'parameter':
@@ -1832,6 +1856,22 @@ class _CompassBase(Optimizer):
             use_muon_pp=use_muon_pp,
             compass_second_moment_smoothing=compass_second_moment_smoothing,
             update_strategy=update_strategy,
+            stable_update=stable_update,
+            stable_update_clip_threshold=stable_update_clip_threshold,
+            use_orthograd=use_orthograd,
+            use_spam_clipping=use_spam_clipping,
+            spam_clipping_threshold=spam_clipping_threshold,
+            spam_clipping_start_step=spam_clipping_start_step,
+            spam_clipping_type=spam_clipping_type,
+            spam_clipping_eps=spam_clipping_eps,
+            use_spam_momentum_reset=use_spam_momentum_reset,
+            spam_momentum_reset_warmup_steps=spam_momentum_reset_warmup_steps,
+            spam_momentum_reset_interval_steps=spam_momentum_reset_interval_steps,
+            use_focus=use_focus,
+            focus_gamma=focus_gamma,
+            focus_beta=focus_beta,
+            debug=debug,
+            use_exadam=use_exadam,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -1841,6 +1881,8 @@ class _CompassBase(Optimizer):
     def __setstate__(self, state):
         super().__setstate__(state)
         for group in self.param_groups:
+            device = group["params"][0].device
+
             group.setdefault("amp_fac", 2.0)
             group.setdefault("cautious", False)
             group.setdefault("adaptive_clip", 1.0)
@@ -1856,8 +1898,28 @@ class _CompassBase(Optimizer):
             group.setdefault("weight_decouple", True)
             group.setdefault("stable_weight_decay", False)
             group.setdefault("compass_second_moment_smoothing", True)
-            group.setdefault("swd_second_moment_mean_sqrt", None)
+            group.setdefault("swd_second_moment_mean_sqrt", torch.tensor(1.0, dtype=torch.float32, device=device))
             group.setdefault("update_strategy", 'unmodified')
+            group.setdefault("stable_update", False)
+            group.setdefault("stable_update_clip_threshold", 1.0)
+            group.setdefault("use_orthograd", False)
+            group.setdefault("use_spam_clipping", False)
+            group.setdefault("spam_clipping_threshold", 500.0)
+            group.setdefault("spam_clipping_start_step", 20)
+            group.setdefault("spam_clipping_type", 'element')
+            group.setdefault("spam_clipping_eps", None)
+            group.setdefault("use_spam_momentum_reset", False)
+            group.setdefault("spam_momentum_reset_warmup_steps", 20)
+            group.setdefault("spam_momentum_reset_interval_steps", 41)
+            group.setdefault("spam_momentum_reset_warmup_scheduler", CosineDecay(0.99, group.get("spam_momentum_reset_warmup_steps")))
+            group.setdefault("spam_momentum_reset_warmup_scheduler_current_step", group.get("spam_momentum_reset_warmup_steps"))
+            group.setdefault("spam_warmup_scaling_factor", torch.tensor(1.0, dtype=torch.float32, device=device))
+            group.setdefault("step", 0)
+            group.setdefault("use_focus", False)
+            group.setdefault("focus_gamma", 0.1)
+            group.setdefault("focus_beta", 0.9)
+            group.setdefault("debug", False)
+            group.setdefault("use_exadam", False)
 
 
     # bring your own function to create zero-filled subclass
@@ -1909,14 +1971,39 @@ class _CompassBase(Optimizer):
         # thus, it is safe to disable cache limit without the risk of always re-compiling.
         with torch._dynamo.utils.disable_cache_limit():
             for group in self.param_groups:
+                if 'step' in group:
+                    group['step'] += 1
+                else:
+                    group['step'] = 1
+
+                if 'swd_second_moment_mean_sqrt' not in group:
+                    device = group["params"][0].device
+                    group['swd_second_moment_mean_sqrt'] = torch.tensor(1.0, dtype=torch.float32, device=device)
+
                 swd_param_size_sum = 0
                 swd_second_moment_group_sum = 0.0
-                adaptive_clip = group["adaptive_clip"]
-                adaptive_clip_eps = group["adaptive_clip_eps"]
-                adaptive_clip_type = group["adaptive_clip_type"]
                 mars_gamma = group["mars_gamma"]
                 beta1 = group["betas"][0]
                 use_muon_pp = group["use_muon_pp"]
+
+                if group["use_spam_momentum_reset"]:
+                    group["spam_warmup_scaling_factor"].fill_(1 - group["spam_momentum_reset_warmup_scheduler"].get_dr(group["spam_momentum_reset_warmup_scheduler_current_step"]))
+                    group["spam_momentum_reset_warmup_scheduler_current_step"] += 1
+                else:
+                    group["spam_warmup_scaling_factor"].fill_(1.0)
+
+                if group["use_spam_momentum_reset"] and group['step'] % group["spam_momentum_reset_interval_steps"] == 0:
+                    reset_momentum = True
+                else:
+                    reset_momentum = False
+
+                apply_spam_clipping = False
+                if group["use_spam_clipping"] and group["step"] >= group["spam_clipping_start_step"]:
+                    if group["use_spam_momentum_reset"]:
+                        if group["spam_momentum_reset_warmup_scheduler_current_step"] % group["spam_momentum_reset_interval_steps"] >= group["spam_clipping_start_step"]:
+                            apply_spam_clipping = True
+                    else:
+                        apply_spam_clipping = True
 
                 for p in group["params"]:
                     if p.grad is None:
@@ -1933,29 +2020,33 @@ class _CompassBase(Optimizer):
                         state["step"] = torch.tensor(0.0)
                         if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
                             state["swd_second_moment_parameter_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
-                            if group.get("swd_second_moment_mean_sqrt", None) is None:
-                                group["swd_second_moment_mean_sqrt"] = torch.tensor(1.0, device=p.device, dtype=torch.float32)
                         state["exp_avg"] = self._new_buffer(p, True)
                         state["exp_avg_sq"] = self._new_buffer(p, False)
+                        if group["use_focus"]:
+                            state["pbar"] = self._new_buffer(p, True)
                         if mars_gamma > 0:
                             state["previous_grad"] = self._new_buffer(p, True)
-                            state["previous_grad"].copy_(p.grad.float())
+
+                            if state["previous_grad"].dtype == torch.bfloat16:
+                                state["previous_grad"].copy_(_fp32_to_bf16_sr(p.grad.float()))
+                            else:
+                                state["previous_grad"].copy_(p.grad.float())
 
 
-                    state["step"] += 1
-
-                    if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
-
-                        swd_param_size_sum += p.numel()
+                    state["step"] = state["step"].add_(1)
 
                     if not isinstance(group["lr"], torch.Tensor):
                         raise RuntimeError(
                             "lr was changed to a non-Tensor object. If you want to update lr, please use "
                             "optim.param_groups[0]['lr'].fill_(new_lr)"
                         )
-                        
+
+                    if group["weight_decay"] > 0 and group['stable_weight_decay']:
+                        swd_param_size_sum += p.numel()
+
                     if group["adopt"] and state["step"] == 1:
                         grad_f32 = grad.float()
+                        p_f32 = p.float()
 
                         if mars_gamma > 0:
                             # MARS Calculate cₜ (gradient with correction term)
@@ -1968,11 +2059,17 @@ class _CompassBase(Optimizer):
                             else:
                                 state["previous_grad"].copy_(temp_grad_f32)
 
-                        if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+                        if use_muon_pp and p.ndim >= 2 and p.numel() >= 2:
                             grad_f32 = newton_schulz(grad_f32)
+                        elif group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
+                            grad_f32 = orthograd(p_f32, grad_f32)
 
-                        if adaptive_clip > 0:
-                            grad_f32 = agc(p=p.float(), grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
+                        if group["adaptive_clip"] > 0 and p.numel() >= 2 and p.ndim >= 1:
+                            grad_f32 = agc(p=p_f32, 
+                                           grad=grad_f32, 
+                                           agc_clip_val=group["adaptive_clip"], 
+                                           agc_eps=group["adaptive_clip_eps"], 
+                                           norm_type=group["adaptive_clip_type"])
                         
                         #Make a fp32 copy of exp_avg_sq_f32
                         exp_avg_sq_f32 = torch.zeros_like(p.float(), dtype=torch.float32).copy_(state["exp_avg_sq"].float())
@@ -1983,6 +2080,13 @@ class _CompassBase(Optimizer):
                         else:
                             state["exp_avg_sq"].copy_(exp_avg_sq_f32)
                     else:
+                        if group["debug"] and p.numel() >= 2 and apply_spam_clipping:
+                            grad_f32 = grad.float()
+                            spam_grad_clipping_logging(grad=grad_f32, second_moment=state["exp_avg_sq"].float(), 
+                                                       clip_threshold=group["spam_clipping_threshold"], 
+                                                       clip_type=group["spam_clipping_type"],
+                                                       spam_clip_eps=group["spam_clipping_eps"])
+
                         # without calling p.detach(), torch.compile() will have issues with FSDP2 in some cases
                         # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
                         # thus, by calling p.detach(), DTensor won't have .grad anymore, which is ok since we
@@ -1994,6 +2098,7 @@ class _CompassBase(Optimizer):
                             exp_avg=state["exp_avg"],
                             exp_avg_sq=state["exp_avg_sq"],
                             previous_grad=state["previous_grad"] if mars_gamma > 0 else None,
+                            pbar=state["pbar"] if group["use_focus"] else None,
                             lr=group["lr"],
                             beta1=group["betas"][0],
                             beta2=group["betas"][1],
@@ -2014,19 +2119,42 @@ class _CompassBase(Optimizer):
                             use_muon_pp=group["use_muon_pp"],
                             compass_second_moment_smoothing=group["compass_second_moment_smoothing"],
                             update_strategy=group["update_strategy"],
+                            stable_update=group["stable_update"],
+                            stable_update_clip_threshold=group["stable_update_clip_threshold"],
+                            use_orthograd=group["use_orthograd"],
+                            spam_clipping_threshold = group["spam_clipping_threshold"],
+                            spam_clipping_type = group["spam_clipping_type"],
+                            spam_clipping_eps = group["spam_clipping_eps"],
+                            use_focus=group["use_focus"],
+                            focus_gamma=group["focus_gamma"],
+                            focus_beta=group["focus_beta"],
+                            apply_spam_clipping = apply_spam_clipping,
+                            reset_momentum = reset_momentum,
+                            use_exadam=group["use_exadam"],
+                            spam_warmup_scaling_factor = group["spam_warmup_scaling_factor"],
                             swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] else None,
                             swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] else None,
                         )
 
-                        if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                        if group["weight_decay"] > 0 and group['stable_weight_decay']:
                             swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
 
-                if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
+                if group["use_spam_momentum_reset"] and group['step'] % group["spam_momentum_reset_interval_steps"] == 0:
+                    group["spam_momentum_reset_warmup_scheduler_current_step"] = 0
+                    group["spam_momentum_reset_warmup_scheduler"] = CosineDecay(0.99, group["spam_momentum_reset_warmup_steps"])
+
+                if group["weight_decay"] > 0 and group['stable_weight_decay']:
                     swd_second_moment_mean_sqrt = math.sqrt(swd_second_moment_group_sum / swd_param_size_sum)
+                    if group["debug"]:
+                        logging.info(f"swd_second_moment_mean_sqrt={str(swd_second_moment_mean_sqrt)}")
+
                     if swd_second_moment_mean_sqrt > 0:
-                        group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(swd_second_moment_mean_sqrt, device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
+                        group['swd_second_moment_mean_sqrt'].fill_(swd_second_moment_mean_sqrt)
                     else:
-                        group['swd_second_moment_mean_sqrt'].copy_(torch.tensor(1.0, device=group['swd_second_moment_mean_sqrt'].device, dtype=torch.float32))
+                        group['swd_second_moment_mean_sqrt'].fill_(1.0)
+
+                    if group["debug"]:
+                        logging.info(f"resulting_stable_weight_decay_multiplier= {str(1.0 / group['swd_second_moment_mean_sqrt'])}")
 
         return loss
 
@@ -2040,6 +2168,7 @@ def single_param_compass(
     exp_avg: torch.Tensor,
     exp_avg_sq: torch.Tensor,
     previous_grad: Optional[torch.Tensor],
+    pbar: Optional[torch.Tensor],
     lr: torch.Tensor,
     beta1: float,
     beta2: float,
@@ -2060,6 +2189,19 @@ def single_param_compass(
     use_muon_pp: bool,
     compass_second_moment_smoothing: bool,
     update_strategy: UPDATE_STRATEGY,
+    stable_update: bool,
+    stable_update_clip_threshold: float,
+    use_orthograd: bool,
+    spam_clipping_threshold: float,
+    spam_clipping_type: CLIP_TYPE,
+    spam_clipping_eps: float,
+    use_focus: bool,
+    focus_gamma: float,
+    focus_beta: float,
+    apply_spam_clipping: bool,
+    reset_momentum: bool,
+    use_exadam: bool,
+    spam_warmup_scaling_factor: torch.Tensor,
     swd_second_moment_mean_sqrt: torch.Tensor,
     swd_second_moment_parameter_sum: torch.Tensor,
 ):
@@ -2067,17 +2209,27 @@ def single_param_compass(
     p_f32 = p.float()
     grad_f32 = grad.float()
 
+    beta1_t: float = beta1**step
     bias_correction1: float = 1.0
     if debias_beta1:
-        bias_correction1 = 1 - beta1**step
+        bias_correction1 = 1 - beta1_t
 
+    beta2_t: float = beta2**step
     bias_correction2: float = 1.0
+    current_beta2 = beta2
     if debias_beta2:
-        bias_correction2 = 1 - beta2**step
+        bias_correction2 = 1.0 - beta2_t
 
     #Make a fp32 copies of state
     exp_avg_sq_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(exp_avg_sq.float())
     exp_avg_f32 = torch.zeros_like(p_f32, dtype=torch.float32).copy_(exp_avg.float())
+
+    if use_focus:
+        pbar_f32 = torch.zeros_like(pbar, dtype=torch.float32).copy_(pbar.float())
+
+    if reset_momentum:
+        exp_avg_f32 = torch.zeros_like(exp_avg_f32)
+        exp_avg_sq_f32 = torch.zeros_like(exp_avg_sq_f32)
 
     if mars_gamma > 0:
         # MARS Calculate cₜ (gradient with correction term)
@@ -2090,10 +2242,15 @@ def single_param_compass(
         else:
             previous_grad.copy_(temp_grad_f32)
 
-    if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
+    if use_muon_pp and p.ndim >= 2 and p.numel() >= 2:
         grad_f32 = newton_schulz(grad_f32)
+    elif use_orthograd and p.ndim >= 1 and p.numel() >= 2:
+        grad_f32 = orthograd(p_f32, grad_f32)
 
-    if adaptive_clip > 0:
+    if spam_clipping_threshold != 0 and apply_spam_clipping and p.numel() >= 2 and p.ndim >= 1:
+        grad_f32 = spam_grad_clipping(grad=grad_f32, second_moment=exp_avg_sq_f32, clip_threshold=spam_clipping_threshold, clip_type=spam_clipping_type, spam_clip_eps=spam_clipping_eps)
+
+    if adaptive_clip > 0 and p.numel() >= 2 and p.ndim >= 1:
         grad_f32 = agc(p=p_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
     if eps_floor is not None and eps_floor < eps:
@@ -2103,7 +2260,17 @@ def single_param_compass(
         curr_eps = eps
 
     if adopt:
-        adopt_denom = exp_avg_sq_f32.div(bias_correction2).sqrt().add_(curr_eps)
+        if use_exadam:
+            # Compute the new debiasing terms
+            d1: torch.Tensor = 1 + (exp_avg_sq_f32.div(exp_avg_sq_f32 + curr_eps)) * beta2_t
+            d2: torch.Tensor = 1 + (exp_avg_f32.pow(2).div(exp_avg_f32.pow(2) + curr_eps)) * beta1_t
+
+            v_tilde: torch.Tensor = exp_avg_sq_f32.div(bias_correction2) * d2
+
+        if use_exadam:
+            adopt_denom = v_tilde.sqrt().add_(curr_eps)
+        else:
+            adopt_denom = exp_avg_sq_f32.div(bias_correction2).sqrt().add_(curr_eps)
         adopt_clip: float = (step-1)**0.25
         if compass_second_moment_smoothing:
             scaled_adopt_clip = adopt_clip * adopt_denom
@@ -2111,67 +2278,128 @@ def single_param_compass(
 
             unnormed_exp_avg_f32 = exp_avg_f32.mul(beta1).add_(grad_f32, alpha=1.0 - beta1)
             exp_avg_f32.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
-            update = normed_grad.add(exp_avg_f32, alpha=amp_fac)
+
+            if use_exadam:
+                # Bias-corrected gradient
+                normed_grad = normed_grad.div(bias_correction1) * d1
+                m_tilde: torch.Tensor = exp_avg_f32.div(bias_correction1) * d1
+                update = normed_grad.add(m_tilde, alpha=amp_fac)
+            else:
+                update = normed_grad.add(normed_grad, alpha=amp_fac)
 
             unnormed_update = grad_f32.add(unnormed_exp_avg_f32, alpha=amp_fac)
-            exp_avg_sq_f32.mul_(beta2).addcmul_(unnormed_update, unnormed_update, value=1.0 - beta2)
+            if use_exadam:
+                # Bias-corrected gradient
+                unnormed_update = grad_f32.div(bias_correction1) * d1
+                m_tilde: torch.Tensor = unnormed_exp_avg_f32.div(bias_correction1) * d1
+                unnormed_update = grad_f32.add(m_tilde, alpha=amp_fac)
+            else:
+                unnormed_update = grad_f32.add(unnormed_exp_avg_f32, alpha=amp_fac)
+
+            exp_avg_sq_f32.mul_(current_beta2).addcmul_(unnormed_update, unnormed_update, value=1.0 - current_beta2)
 
             update_grad = grad_f32
             de_nom = adopt_denom
         else:
             normed_grad = grad_f32.div(adopt_denom).clamp(-adopt_clip, adopt_clip)
             exp_avg_f32.mul_(beta1).add_(normed_grad, alpha=1 - beta1)
-            update = normed_grad.add(exp_avg_f32, alpha=amp_fac)
-            exp_avg_sq_f32.mul_(beta2).addcmul_(grad_f32, grad_f32, value=1 - beta2)
+
+            if use_exadam:
+                # Bias-corrected gradient
+                normed_grad = normed_grad.div(bias_correction1) * d1
+                m_tilde: torch.Tensor = exp_avg_f32.div(bias_correction1) * d1
+                update = normed_grad.add(m_tilde, alpha=amp_fac)
+            else:
+                update = normed_grad.add(exp_avg_f32, alpha=amp_fac)
+
+            exp_avg_sq_f32.mul_(current_beta2).addcmul_(grad_f32, grad_f32, value=1 - current_beta2)
             
             update_grad = normed_grad
             de_nom = torch.tensor(1.0, device=p.device, dtype=torch.float32)
     else:
         exp_avg_f32.mul_(beta1).add_(grad_f32, alpha=1 - beta1)
-        update = grad_f32.add(exp_avg_f32, alpha=amp_fac)
+
+        if use_exadam:
+            # Compute the new debiasing terms
+            d1: torch.Tensor = 1 + (exp_avg_sq_f32.div(exp_avg_sq_f32 + curr_eps)) * beta2_t
+            d2: torch.Tensor = 1 + (exp_avg_f32.pow(2).div(exp_avg_f32.pow(2) + curr_eps)) * beta1_t
+
+            v_tilde: torch.Tensor = exp_avg_sq_f32.div(bias_correction2) * d2
+
+            # Bias-corrected gradient
+            grad_f32 = grad_f32.div(bias_correction1) * d1
+            m_tilde: torch.Tensor = exp_avg_f32.div(bias_correction1) * d1
+            update = grad_f32.add(m_tilde, alpha=amp_fac)
+        else:
+            update = grad_f32.add(exp_avg_f32, alpha=amp_fac)
 
         if compass_second_moment_smoothing:
-            exp_avg_sq_f32.mul_(beta2).addcmul_(update, update, value=1 - beta2)
+            exp_avg_sq_f32.mul_(current_beta2).addcmul_(update, update, value=1 - current_beta2)
         else:
-            exp_avg_sq_f32.mul_(beta2).addcmul_(grad_f32, grad_f32, value=1 - beta2)
+            exp_avg_sq_f32.mul_(current_beta2).addcmul_(grad_f32, grad_f32, value=1 - current_beta2)
 
         update_grad = grad_f32
-        de_nom = exp_avg_sq_f32.div(bias_correction2).sqrt().add_(curr_eps)
+        if use_exadam:
+            de_nom = v_tilde.sqrt().add_(curr_eps)
+        else:
+            de_nom = exp_avg_sq_f32.div(bias_correction2).sqrt().add_(curr_eps)
+
+    update = update.mul(spam_warmup_scaling_factor)
 
     if weight_decay > 0 and stable_weight_decay:
         swd_second_moment_parameter_sum.copy_(exp_avg_sq_f32.div(bias_correction2).sum())
 
+    if stable_update:
+        rms = get_rms(update).div(stable_update_clip_threshold).clamp_min(1)
+        update.mul_(1 / rms)
+
+    if use_focus:
+        # Compute update
+        pbar_f32.mul_(focus_beta).add_(p_f32, alpha=1.0 - focus_beta)
+        # Compute bias-corrected pbar
+        pbar_hat = pbar / (1.0 - focus_beta ** step)
+        update = torch.sign(update) + focus_gamma * torch.sign(p_f32 - pbar_hat)
+
     if exp_avg.dtype == torch.bfloat16:
         exp_avg.copy_(_fp32_to_bf16_sr(exp_avg_f32))
         exp_avg_sq.copy_(_fp32_to_bf16_sr(exp_avg_sq_f32))
+        if use_focus:
+            pbar.copy_(_fp32_to_bf16_sr(pbar_f32))
     else:
         exp_avg.copy_(exp_avg_f32)
         exp_avg_sq.copy_(exp_avg_sq_f32)
+        if use_focus:
+            pbar.copy_(pbar_f32)
 
     if update_strategy in {'cautious','grams'}:
-        if update_strategy == 'cautious':
+        if update_strategy in {'cautious','both'}:
             mask = (update * update_grad > 0).to(update_grad.dtype)
             mask.div_(mask.mean().clamp_(min=1e-3))
-        elif update_strategy == 'grams':
+            update = update * mask
+        if update_strategy in {'grams','both'}:
             update.copy_(torch.sign(update_grad) * update.abs())
-            mask = 1.0
+
+    if weight_decay > 0 and stable_weight_decay:
+        swd_scaling = 1.0 / swd_second_moment_mean_sqrt
     else:
-        mask = 1.0
+        swd_scaling = 1.0
 
     # Weight decay
-    if weight_decay > 0 and weight_decouple:
-        if stable_weight_decay:
-            swd_scaling = 1.0 / swd_second_moment_mean_sqrt
-        else:
-            swd_scaling = 1.0
-
+    if weight_decay > 0 and weight_decouple and not use_focus:
         p_f32.mul_(1.0 - weight_decay * lr * swd_scaling)
-    elif weight_decay > 0:
-        update.add_(p_f32, alpha=weight_decay)
+    elif weight_decay > 0 and not use_focus:
+        update.add_(p_f32, alpha=weight_decay * swd_scaling)
 
-    step_size = lr / bias_correction1
+    if use_exadam:
+        step_size = lr * torch.log(torch.sqrt(step + 1) * math.sqrt(2))
+    else:
+        step_size = lr / bias_correction1
 
-    p_f32.addcdiv_(update * mask, de_nom, value=-step_size)
+    p_f32.addcdiv_(update, de_nom, value=-step_size)
+
+    # Weight decay
+    if weight_decay > 0 and use_focus:
+        p_f32.add_(pbar_hat, alpha=-lr * weight_decay * swd_scaling)
 
     if p.dtype == torch.bfloat16:
         p.copy_(_fp32_to_bf16_sr(p_f32))
@@ -2267,6 +2495,22 @@ class CompassAO(_CompassBase):
         use_muon_pp: bool = False,
         compass_second_moment_smoothing: bool = True,
         update_strategy: UPDATE_STRATEGY = 'unmodifed',
+        stable_update: bool = False,
+        stable_update_clip_threshold: float = 1.0,
+        use_orthograd: bool = False,
+        use_spam_clipping: bool = False,
+        spam_clipping_threshold: float = 500.0,
+        spam_clipping_start_step: int = 20,
+        spam_clipping_type: CLIP_TYPE = 'element',
+        spam_clipping_eps: Optional[float] = None,
+        use_spam_momentum_reset: bool = False,
+        spam_momentum_reset_warmup_steps: int = 20,
+        spam_momentum_reset_interval_steps: int = 41,
+        use_focus: bool = False,
+        focus_gamma: float = 0.2,
+        focus_beta: float = 0.9,
+        debug: bool = False,
+        use_exadam: bool = False,
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -2298,4 +2542,20 @@ class CompassAO(_CompassBase):
             block_size=block_size,
             min_quant_size=min_quant_size,
             state_precision=state_precision,
+            stable_update=stable_update,
+            stable_update_clip_threshold=stable_update_clip_threshold,
+            use_orthograd=use_orthograd,
+            use_spam_clipping=use_spam_clipping,
+            spam_clipping_type=spam_clipping_type,
+            spam_clipping_threshold=spam_clipping_threshold,
+            spam_clipping_start_step=spam_clipping_start_step,
+            spam_clipping_eps=spam_clipping_eps,
+            use_spam_momentum_reset=use_spam_momentum_reset,
+            spam_momentum_reset_warmup_steps=spam_momentum_reset_warmup_steps,
+            spam_momentum_reset_interval_steps=spam_momentum_reset_interval_steps,
+            use_focus=use_focus,
+            focus_gamma=focus_gamma,
+            focus_beta=focus_beta,
+            debug=debug,
+            use_exadam=use_exadam,
         )
