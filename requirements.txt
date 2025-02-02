@@ -9,5 +9,5 @@ scipy==1.15.1
 came-pytorch==0.1.3
 pytorch_optimizer==3.3.4
 wheel==0.45.1
-triton==3.1.0; platform_system == "Linux"
-prodigy-plus-schedule-free==1.8.51
+triton==3.2.0; platform_system == "Linux"
+prodigy-plus-schedule-free==1.9.0
