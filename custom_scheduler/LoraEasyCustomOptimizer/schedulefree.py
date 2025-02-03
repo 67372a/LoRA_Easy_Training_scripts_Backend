@@ -3320,8 +3320,6 @@ def single_param_ADOPTAOScheduleFree(
 
     if use_focus:
         pbar_f32 = torch.zeros_like(pbar, dtype=torch.float32).copy_(pbar.float())
-        # Compute bias-corrected pbar
-        pbar_hat = pbar / (1.0 - focus_beta ** step)
 
     if reset_momentum:
         exp_avg_sq_f32 = torch.zeros_like(exp_avg_sq_f32)
@@ -3411,6 +3409,8 @@ def single_param_ADOPTAOScheduleFree(
     if use_focus:
         # Compute update
         pbar_f32.mul_(focus_beta).add_(y_f32, alpha=1.0 - focus_beta)
+        # Compute bias-corrected pbar
+        pbar_hat = pbar / (1.0 - focus_beta ** step)
         update = torch.sign(update) + focus_gamma * torch.sign(y_f32 - pbar_hat)
 
     if update_strategy in {'cautious','grams','both'}:
