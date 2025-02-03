@@ -109,7 +109,7 @@ def setup_venv(venv_pip):
         shell=PLATFORM == "linux",
     )
     subprocess.check_call(
-        f"{venv_pip} install -U --no-deps torchao==0.8.0 --index-url https://download.pytorch.org/whl/cu124",
+        f"{venv_pip} install -U --no-deps torchao --index-url https://download.pytorch.org/whl/cu124",
         shell=PLATFORM == "linux",
     )
     
