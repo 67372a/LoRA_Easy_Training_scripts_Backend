@@ -2494,7 +2494,7 @@ class CompassAO(_CompassBase):
         mars_gamma: float = 0.0,
         use_muon_pp: bool = False,
         compass_second_moment_smoothing: bool = True,
-        update_strategy: UPDATE_STRATEGY = 'unmodifed',
+        update_strategy: UPDATE_STRATEGY = 'unmodified',
         stable_update: bool = False,
         stable_update_clip_threshold: float = 1.0,
         use_orthograd: bool = False,
