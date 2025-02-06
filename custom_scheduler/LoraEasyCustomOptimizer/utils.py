@@ -95,7 +95,10 @@ def agc(p: torch.Tensor,
     :param eps: float. simple stop from div by zero, as such should be as small as possible to avoid skewing clipping.
     """
 
-    if eps is None:
+    if agc_eps is None or eps == 0.0:
+        agc_eps = torch.finfo(torch.float32).tiny    
+
+    if eps is None or eps == 0.0:
         eps = torch.finfo(torch.float32).tiny
 
     if norm_type in {'global','layer'}:
@@ -359,7 +362,7 @@ def newton_schulz(grad: torch.tensor, steps: int = 6, eps: float = 1e-7) -> torc
 
 # Implementation from: https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/main/orthograd.py
 def orthograd(param: torch.tensor, grad: torch.tensor, eps: Optional[float] = None):
-    if eps is None:
+    if eps is None or eps == 0.0:
         eps = torch.finfo(torch.float32).tiny
 
     w = param.view(-1)
