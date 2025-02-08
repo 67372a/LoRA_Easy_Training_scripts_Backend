@@ -3421,7 +3421,7 @@ def single_param_ADOPTAOScheduleFree(
             mask.div_(mask.mean().clamp_(min=1e-3))
             y_update.mul_(mask)
         if update_strategy in {'grams','both'}:
-            y_update.copy_(torch.sign(update) * y_update.abs())
+            y_update.abs_().mul_(update.sign())
         y_f32.add_(y_update, alpha=-1)
     else:
         # These operations update y in-place,
