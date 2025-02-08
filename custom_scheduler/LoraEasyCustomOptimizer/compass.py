@@ -2507,7 +2507,7 @@ class CompassAO(_CompassBase):
         spam_momentum_reset_warmup_steps: int = 20,
         spam_momentum_reset_interval_steps: int = 41,
         use_focus: bool = False,
-        focus_gamma: float = 0.2,
+        focus_gamma: float = 0.1,
         focus_beta: float = 0.9,
         debug: bool = False,
         use_exadam: bool = False,
