@@ -1976,8 +1976,9 @@ class _CompassBase(Optimizer):
                 else:
                     group['step'] = 1
 
+                device = group["params"][0].device
+
                 if 'swd_second_moment_mean_sqrt' not in group:
-                    device = group["params"][0].device
                     group['swd_second_moment_mean_sqrt'] = torch.tensor(1.0, dtype=torch.float32, device=device)
 
                 swd_param_size_sum = 0
@@ -1985,6 +1986,9 @@ class _CompassBase(Optimizer):
                 mars_gamma = group["mars_gamma"]
                 beta1 = group["betas"][0]
                 use_muon_pp = group["use_muon_pp"]
+
+                if 'spam_warmup_scaling_factor' not in group:
+                    group["spam_warmup_scaling_factor"] = torch.tensor(1.0, dtype=torch.float32, device=device)
 
                 if group["use_spam_momentum_reset"]:
                     group["spam_warmup_scaling_factor"].fill_(1 - group["spam_momentum_reset_warmup_scheduler"].get_dr(group["spam_momentum_reset_warmup_scheduler_current_step"]))
@@ -2017,7 +2021,7 @@ class _CompassBase(Optimizer):
 
                     # State initialization
                     if len(state) == 0:
-                        state["step"] = torch.tensor(0.0)
+                        state["step"] = torch.tensor(0, device=p.device, dtype=torch.int32)
                         if group["weight_decay"] > 0 and group['weight_decouple'] and group['stable_weight_decay']:
                             state["swd_second_moment_parameter_sum"] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
                         state["exp_avg"] = self._new_buffer(p, True)
