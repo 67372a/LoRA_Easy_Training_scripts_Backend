@@ -5,7 +5,7 @@
 
 import torch
 from torch.optim import Optimizer
-from .utils import schedule_beta_tc, orthograd, CosineDecay, CLIP_TYPE, copy_stochastic_, agc, NORM_TYPE, newton_schulz, create_factored_dims, get_denom, update_second_moment, STATE_PRECISION, UPDATE_STRATEGY, spam_grad_clipping_logging, spam_grad_clipping
+from .utils import schedule_beta_tc, orthograd, CosineDecay, CLIP_TYPE, copy_stochastic_, agc, NORM_TYPE, create_factored_dims, get_denom, update_second_moment, STATE_PRECISION, UPDATE_STRATEGY, spam_grad_clipping_logging, spam_grad_clipping
 import math
 from torch.nn.functional import softplus
 from typing import Optional, Literal
@@ -1152,11 +1152,6 @@ class CompassADOPT(BaseOptimizer):
             Valid values: layer, unit (default: layer).
         cautious (bool)
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
-        use_muon_pp (boolean):
-            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
-            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
-            May not work well with small batch sizes or finetuning.
-            (default: False)
         factor_second_moment (bool):
             Stores the second moment, i.e. ema_sq / exponential moving average squared, at the row/column level 
             instead of per parameter saving vram at the cost of lower precision (Default: False)
@@ -1184,7 +1179,6 @@ class CompassADOPT(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         cautious: bool = False,
-        use_muon_pp: bool = False,
         factor_second_moment: bool = False,
         debias_beta1: bool = True,
         debias_beta2: bool = True,
@@ -1214,7 +1208,6 @@ class CompassADOPT(BaseOptimizer):
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
             'cautious': cautious,
-            'use_muon_pp': use_muon_pp,
             'factor_second_moment':factor_second_moment,
             'debias_beta1': debias_beta1,
             'debias_beta2': debias_beta2,
@@ -1286,7 +1279,6 @@ class CompassADOPT(BaseOptimizer):
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
             amp_fac = group["amp_fac"]
-            use_muon_pp = group["use_muon_pp"]
             compass_second_moment_smoothing = group["compass_second_moment_smoothing"]
 
             lr: float = group['lr']
@@ -1350,9 +1342,6 @@ class CompassADOPT(BaseOptimizer):
                     if not group['factor_second_moment']:
                         exp_avg_sq = exp_avg_sq.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
-
-                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    grad = newton_schulz(grad)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -1462,11 +1451,6 @@ class CompassADOPTMARS(BaseOptimizer):
             Valid values: layer, unit (default: layer).
         cautious (bool)
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
-        use_muon_pp (boolean):
-            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
-            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
-            May not work well with small batch sizes or finetuning.
-            (default: False)
         factor_second_moment (bool):
             Stores the second moment, i.e. ema_sq / exponential moving average squared, at the row/column level 
             instead of per parameter saving vram at the cost of lower precision (Default: False)
@@ -1497,7 +1481,6 @@ class CompassADOPTMARS(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         cautious: bool = True,
-        use_muon_pp: bool = False,
         factor_second_moment: bool = False,
         gamma: float = 0.025,
         debias_beta1: bool = True,
@@ -1528,7 +1511,6 @@ class CompassADOPTMARS(BaseOptimizer):
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
             'cautious': cautious,
-            'use_muon_pp': use_muon_pp,
             'factor_second_moment':factor_second_moment,
             'gamma':gamma,
             'debias_beta1': debias_beta1,
@@ -1602,7 +1584,6 @@ class CompassADOPTMARS(BaseOptimizer):
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
             amp_fac = group["amp_fac"]
-            use_muon_pp = group["use_muon_pp"]
             gamma = group["gamma"]
             compass_second_moment_smoothing = group["compass_second_moment_smoothing"]
 
@@ -1672,9 +1653,6 @@ class CompassADOPTMARS(BaseOptimizer):
                 
                 # MARS Calculate cₜ (gradient with correction term)
                 c_t = (grad - previous_grad).mul_(gamma * (beta1 / (1.0 - beta1))).add_(grad)
-
-                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -1776,7 +1754,6 @@ class _CompassBase(Optimizer):
         debias_beta2,
         adopt,
         mars_gamma,
-        use_muon_pp,
         compass_second_moment_smoothing,
         update_strategy,
         stable_update,
@@ -1853,7 +1830,6 @@ class _CompassBase(Optimizer):
             debias_beta2=debias_beta2,
             adopt=adopt,
             mars_gamma=mars_gamma,
-            use_muon_pp=use_muon_pp,
             compass_second_moment_smoothing=compass_second_moment_smoothing,
             update_strategy=update_strategy,
             stable_update=stable_update,
@@ -1894,7 +1870,6 @@ class _CompassBase(Optimizer):
             group.setdefault("mars_gamma", 0.0)
             group.setdefault("eps2", 1e-3)
             group.setdefault("eps_floor", None)
-            group.setdefault("use_muon_pp", False)
             group.setdefault("weight_decouple", True)
             group.setdefault("stable_weight_decay", False)
             group.setdefault("compass_second_moment_smoothing", True)
@@ -1985,7 +1960,6 @@ class _CompassBase(Optimizer):
                 swd_second_moment_group_sum = 0.0
                 mars_gamma = group["mars_gamma"]
                 beta1 = group["betas"][0]
-                use_muon_pp = group["use_muon_pp"]
 
                 if 'spam_warmup_scaling_factor' not in group:
                     group["spam_warmup_scaling_factor"] = torch.tensor(1.0, dtype=torch.float32, device=device)
@@ -2063,8 +2037,6 @@ class _CompassBase(Optimizer):
                             else:
                                 state["previous_grad"].copy_(temp_grad_f32)
 
-                        if use_muon_pp and p.ndim >= 2 and p.numel() >= 2:
-                            grad_f32 = newton_schulz(grad_f32)
                         elif group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
                             grad_f32 = orthograd(p_f32, grad_f32)
 
@@ -2120,7 +2092,6 @@ class _CompassBase(Optimizer):
                             debias_beta2=group["debias_beta2"],
                             adopt=group["adopt"],
                             mars_gamma=group["mars_gamma"],
-                            use_muon_pp=group["use_muon_pp"],
                             compass_second_moment_smoothing=group["compass_second_moment_smoothing"],
                             update_strategy=group["update_strategy"],
                             stable_update=group["stable_update"],
@@ -2190,7 +2161,6 @@ def single_param_compass(
     debias_beta2: bool,
     adopt: bool,
     mars_gamma: float,
-    use_muon_pp: bool,
     compass_second_moment_smoothing: bool,
     update_strategy: UPDATE_STRATEGY,
     stable_update: bool,
@@ -2246,9 +2216,7 @@ def single_param_compass(
         else:
             previous_grad.copy_(temp_grad_f32)
 
-    if use_muon_pp and p.ndim >= 2 and p.numel() >= 2:
-        grad_f32 = newton_schulz(grad_f32)
-    elif use_orthograd and p.ndim >= 1 and p.numel() >= 2:
+    if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
         grad_f32 = orthograd(p_f32, grad_f32)
 
     if spam_clipping_threshold != 0 and apply_spam_clipping and p.numel() >= 2 and p.ndim >= 1:
@@ -2451,11 +2419,6 @@ class CompassAO(_CompassBase):
         update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
             Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
             and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified)
-        use_muon_pp (boolean):
-            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
-            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
-            May not work well with small batch sizes or finetuning.
-            (default: False)
         mars_gamma (float):
             Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
             larger values apply more correction, and will require higher LRs to offset. Zero disables. (default: 0.0)
@@ -2496,7 +2459,6 @@ class CompassAO(_CompassBase):
         debias_beta2: bool = True,
         adopt: bool = False,
         mars_gamma: float = 0.0,
-        use_muon_pp: bool = False,
         compass_second_moment_smoothing: bool = True,
         update_strategy: UPDATE_STRATEGY = 'unmodified',
         stable_update: bool = False,
@@ -2540,7 +2502,6 @@ class CompassAO(_CompassBase):
             debias_beta2=debias_beta2,
             adopt=adopt,
             mars_gamma=mars_gamma,
-            use_muon_pp=use_muon_pp,
             compass_second_moment_smoothing=compass_second_moment_smoothing,
             update_strategy=update_strategy,
             block_size=block_size,

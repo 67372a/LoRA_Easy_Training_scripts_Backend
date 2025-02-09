@@ -325,41 +325,6 @@ def update_second_moment(second_moment: torch.tensor, grad: torch.tensor, beta2:
 
     return second_moment
 
-# From: https://github.com/KellerJordan/Muon/blob/master/muon.py
-@torch.no_grad()
-def newton_schulz(grad: torch.tensor, steps: int = 6, eps: float = 1e-7) -> torch.tensor:
-    # Inline reshaping step within the method itself.
-    original_shape = None
-    original_type = grad.dtype
-    working_grad = grad.clone()
-    if len(working_grad.shape) > 2:
-        original_shape = working_grad.shape
-        working_grad = working_grad.view(working_grad.size(0), -1)
-    a, b, c = (3.4445, -4.7750,  2.0315)
-    X = working_grad.bfloat16()
-    if original_type in {torch.float32}:
-        copy_stochastic_(X, working_grad)
-    if working_grad.size(0) > working_grad.size(1):
-        X = X.T
-
-    # Ensure spectral norm is at most 1
-    X = X / (X.norm() + eps)
-    # Perform the NS iterations
-    for _ in range(steps):
-        A = X @ X.T
-        B = b * A + c * A @ A # adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
-        X = a * X + B @ X
-
-    if working_grad.size(0) > working_grad.size(1):
-        X = X.T
-    if X is not working_grad:
-        working_grad = working_grad.copy_(X)
-        del X
-    if original_shape is not None:
-        working_grad = working_grad.view(*original_shape)
-
-    return working_grad.to(dtype=original_type)
-
 # Implementation from: https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/main/orthograd.py
 def orthograd(param: torch.tensor, grad: torch.tensor, eps: Optional[float] = None):
     if eps is None or eps == 0.0:

@@ -1,5 +1,5 @@
 import torch
-from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz, create_factored_dims, get_denom, update_second_moment
+from .utils import copy_stochastic_, agc, NORM_TYPE, create_factored_dims, get_denom, update_second_moment
 import math
 from typing import Optional, Literal
 
@@ -313,11 +313,6 @@ class RMSPropADOPT(BaseOptimizer):
             Valid values: layer, unit (default: layer).
         cautious (bool)
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
-        use_muon_pp (boolean):
-            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
-            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
-            May not work well with small batch sizes or finetuning.
-            (default: False)
         factor_second_moment (bool):
             Stores the second moment, i.e. ema_sq / exponential moving average squared, at the row/column level 
             instead of per parameter saving vram at the cost of lower precision (Default: False)
@@ -339,7 +334,6 @@ class RMSPropADOPT(BaseOptimizer):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        use_muon_pp: bool = False,
         factor_second_moment: bool = False,
         debias_beta: bool = True,
         **kwargs,
@@ -365,8 +359,6 @@ class RMSPropADOPT(BaseOptimizer):
             'adaptive_clip':adaptive_clip,
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
-            'use_muon_pp': use_muon_pp,
-
             'factor_second_moment':factor_second_moment,
             'debias_beta':debias_beta,
         }
@@ -435,7 +427,6 @@ class RMSPropADOPT(BaseOptimizer):
             eps = group["eps"]
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
-            use_muon_pp = group["use_muon_pp"]
 
             if group["debias_beta"]:
                 bias_correction_sqrt: float = math.sqrt(self.debias(beta, group['step']))
@@ -487,9 +478,6 @@ class RMSPropADOPT(BaseOptimizer):
                     if not group['factor_second_moment']:
                         exp_avg_sq = exp_avg_sq.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
-
-                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    grad = newton_schulz(grad)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -572,11 +560,6 @@ class RMSPropADOPTMARS(BaseOptimizer):
             Valid values: layer, unit (default: layer).
         cautious (bool)
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
-        use_muon_pp (boolean):
-            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
-            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
-            May not work well with small batch sizes or finetuning.
-            (default: False)
         factor_second_moment (bool):
             Stores the second moment, i.e. ema_sq / exponential moving average squared, at the row/column level 
             instead of per parameter saving vram at the cost of lower precision (Default: False)
@@ -601,7 +584,6 @@ class RMSPropADOPTMARS(BaseOptimizer):
         adaptive_clip: float = 1.0,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
-        use_muon_pp: bool = False,
         factor_second_moment: bool = False,
         debias_beta: bool = True,
         gamma: float = 0.025,
@@ -628,7 +610,6 @@ class RMSPropADOPTMARS(BaseOptimizer):
             'adaptive_clip':adaptive_clip,
             'adaptive_clip_eps':adaptive_clip_eps,
             'adaptive_clip_type':adaptive_clip_type,
-            'use_muon_pp': use_muon_pp,
             'factor_second_moment':factor_second_moment,
             'debias_beta':debias_beta,
             'gamma':gamma,
@@ -699,7 +680,6 @@ class RMSPropADOPTMARS(BaseOptimizer):
             eps = group["eps"]
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
-            use_muon_pp = group["use_muon_pp"]
             gamma = group["gamma"]
 
             if group["debias_beta"]:
@@ -761,9 +741,6 @@ class RMSPropADOPTMARS(BaseOptimizer):
                 # MARS Calculate cₜ (gradient with correction term)
                 correction = gamma * grad_diff
                 c_t = grad + correction
-
-                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)

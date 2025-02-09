@@ -1,6 +1,6 @@
 # FMARSCrop from https://github.com/Clybius/Personalized-Optimizers by Clybius
 import torch
-from .utils import copy_stochastic_, agc, NORM_TYPE, newton_schulz, UPDATE_STRATEGY,orthograd
+from .utils import copy_stochastic_, agc, NORM_TYPE, UPDATE_STRATEGY,orthograd
 import math
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
@@ -105,11 +105,6 @@ class FMARSCrop(BaseOptimizer):
             larger values apply more correction, and will require higher LRs to offset. (default: 0.0005)
         debias_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: True)
-        use_muon_pp (boolean):
-            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
-            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
-            May not work well with small batch sizes or finetuning.
-            (default: False)
     """
 
     def __init__(
@@ -135,7 +130,6 @@ class FMARSCrop(BaseOptimizer):
         adaptive_clip_type: NORM_TYPE = 'global',
         stable_weight_decay: bool = False,
         debias_beta2: bool = True,
-        use_muon_pp: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -168,7 +162,6 @@ class FMARSCrop(BaseOptimizer):
             'stable_weight_decay': stable_weight_decay,
             'debias_beta2':debias_beta2,
             'weight_decouple':weight_decouple,
-            'use_muon_pp': use_muon_pp,
         }
 
         super().__init__(params, defaults)
@@ -228,7 +221,6 @@ class FMARSCrop(BaseOptimizer):
             adaptive_clip_eps = group["adaptive_clip_eps"]
             stable_weight_decay = group["stable_weight_decay"]
             weight_decouple = group['weight_decouple']
-            use_muon_pp = group['use_muon_pp']
 
             clip_lambda = (step - 1)**0.25
 
@@ -273,9 +265,6 @@ class FMARSCrop(BaseOptimizer):
                 # Calculate cₜ (gradient with correction term)
                 correction = (gamma * (beta1 / (1.0 - beta1))) * prev_grad
                 c_t = grad + correction
-
-                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -457,11 +446,6 @@ class FMARSCropV2ExMachina(BaseOptimizer):
             Apply bias correction to fim. (Default: True)
         debias_beta3 (bool):
             Apply bias correction to diff fim. (Default: False)
-        use_muon_pp (boolean):
-            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
-            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
-            May not work well with small batch sizes or finetuning.
-            (default: False)
     """
 
     def __init__(
@@ -488,7 +472,6 @@ class FMARSCropV2ExMachina(BaseOptimizer):
         debias_beta1: bool = False,
         debias_beta2: bool = True,
         debias_beta3: bool = False,
-        use_muon_pp: bool = False,
         update_strategy: UPDATE_STRATEGY = 'cautious',
         **kwargs,
     ):
@@ -530,7 +513,6 @@ class FMARSCropV2ExMachina(BaseOptimizer):
             'debias_beta2':debias_beta2,
             'debias_beta3':debias_beta3,
             'weight_decouple':weight_decouple,
-            'use_muon_pp': use_muon_pp,
             'update_strategy': update_strategy,
         }
 
@@ -590,7 +572,6 @@ class FMARSCropV2ExMachina(BaseOptimizer):
             adaptive_clip_eps = group["adaptive_clip_eps"]
             stable_weight_decay = group["stable_weight_decay"]
             weight_decouple = group['weight_decouple']
-            use_muon_pp = group['use_muon_pp']
 
             clip_lambda = (step - 1)**0.25
 
@@ -647,9 +628,6 @@ class FMARSCropV2ExMachina(BaseOptimizer):
                 prev_grad = prev_grad.add(grad)
                 # Calculate cₜ (gradient with correction term)
                 c_t = prev_grad.mul(gamma * (beta1 / (1.0 - beta1))).add_(grad)
-
-                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -826,11 +804,6 @@ class FMARSCropV2(BaseOptimizer):
             Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: True).
         debias_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: True)
-        use_muon_pp (boolean):
-            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
-            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
-            May not work well with small batch sizes or finetuning.
-            (default: False)
     """
 
     def __init__(
@@ -853,7 +826,6 @@ class FMARSCropV2(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         cautious: bool = True,
         debias_beta2: bool = True,
-        use_muon_pp: bool = False,
     ):
 
         # Override zero to 1e-36, as zero and float32.tiny NaNs
@@ -878,7 +850,6 @@ class FMARSCropV2(BaseOptimizer):
             adaptive_clip_eps = adaptive_clip_eps,
             cautious = cautious,
             debias_beta2 = debias_beta2,
-            use_muon_pp = use_muon_pp,
         )
 
         super(FMARSCropV2, self).__init__(params, defaults)
@@ -926,7 +897,6 @@ class FMARSCropV2(BaseOptimizer):
             eps2 = group["eps2"]
             eps_floor = group["eps_floor"]
             debias_beta2 = group["debias_beta2"]
-            use_muon_pp = group["use_muon_pp"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -964,9 +934,6 @@ class FMARSCropV2(BaseOptimizer):
                 # Calculate cₜ (gradient with correction term)
                 correction = (gamma * (beta1 / (1 - beta1))) * prev_grad
                 c_t = grad + correction
-
-                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t = newton_schulz(c_t)
 
                 # Gradient clipping (if necessary)
                 if group["adaptive_clip"] > 0.0:
@@ -1407,11 +1374,6 @@ class FMARSCropV3ExMachina(BaseOptimizer):
             Apply bias correction to fim. (Default: True)
         debias_beta3 (bool):
             Apply bias correction to diff fim. (Default: False)
-        use_muon_pp (boolean):
-            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
-            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
-            May not work well with small batch sizes or finetuning.
-            (default: False)
     """
 
     def __init__(
@@ -1437,7 +1399,6 @@ class FMARSCropV3ExMachina(BaseOptimizer):
         stable_weight_decay: bool = False,
         debias_beta1: bool = False,
         debias_beta2: bool = False,
-        use_muon_pp: bool = False,
         update_strategy: UPDATE_STRATEGY = 'cautious',
         stable_update: bool = False,
         atan2_denom: bool = False,
@@ -1481,7 +1442,6 @@ class FMARSCropV3ExMachina(BaseOptimizer):
             'debias_beta1':debias_beta1,
             'debias_beta2':debias_beta2,
             'weight_decouple':weight_decouple,
-            'use_muon_pp': use_muon_pp,
             'update_strategy': update_strategy,
             'stable_update': stable_update,
             'atan2_denom': atan2_denom,
@@ -1543,7 +1503,6 @@ class FMARSCropV3ExMachina(BaseOptimizer):
             adaptive_clip_eps = group["adaptive_clip_eps"]
             stable_weight_decay = group["stable_weight_decay"]
             weight_decouple = group['weight_decouple']
-            use_muon_pp = group['use_muon_pp']
 
             bias_correction1: float = self.debias(beta1, group['step'])
 
@@ -1594,8 +1553,6 @@ class FMARSCropV3ExMachina(BaseOptimizer):
                 # Calculate cₜ (gradient with correction term)
                 c_t = prev_grad.mul(gamma * (beta2 / (1.0 - beta2))).add_(grad)
 
-                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t = newton_schulz(c_t)
                 elif group["use_orthograd"] and p.ndim >= 2:
                     c_t = orthograd(p_fp32, c_t)
 

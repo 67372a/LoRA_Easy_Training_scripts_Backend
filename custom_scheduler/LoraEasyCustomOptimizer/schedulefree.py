@@ -10,7 +10,7 @@ import logging
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
-from .utils import (copy_stochastic_, NORM_TYPE, agc, newton_schulz, 
+from .utils import (copy_stochastic_, NORM_TYPE, agc, 
                     STATE_PRECISION, orthograd, schedule_beta_tc, 
                     spam_grad_clipping, CLIP_TYPE, clean_dict_params,
                     CosineDecay, spam_grad_clipping_logging, unit_norm_logging)
@@ -2465,11 +2465,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             Required clipping fisher applies to the natual gradient and natural weights. (default: 1.0)
         debias_beta2 (bool):
             Apply bias correction to denominator of updates (adaptive LR). (Default: False)
-        use_muon_pp (boolean):
-            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
-            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
-            May not work well with small batch sizes or finetuning.
-            (default: False)
     """
 
     def __init__(
@@ -2492,7 +2487,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         fisher_clip: float = 1.0,
         gamma: float = 0.025,
         debias_beta2: bool = False,
-        use_muon_pp: bool = False,
         weight_decay_lr_max: Optional[float] = None,
         **kwargs,
     ):
@@ -2529,7 +2523,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             'fisher_clip':fisher_clip,
             'gamma': gamma,
             'debias_beta2':debias_beta2,
-            'use_muon_pp':use_muon_pp,
             'weight_decay_lr_decouple':weight_decay_lr_decouple,
             'weight_decay_lr_max':weight_decay_lr_max,
         }
@@ -2646,7 +2639,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             eps_floor = group["eps_floor"]
             fisher_clip = group["fisher_clip"]
             gamma = group["gamma"]
-            use_muon_pp = group["use_muon_pp"]
             weight_decay_lr_decouple = group["weight_decay_lr_decouple"]
             weight_decay_lr_max = group["weight_decay_lr_max"]
             weight_decay = group["weight_decay"]
@@ -2681,9 +2673,6 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
             
                 # MARS Calculate cₜ (gradient with correction term)
                 c_t = (grad - previous_grad).mul_(gamma * (beta1 / (1.0 - beta1))).add_(grad)
-
-                if use_muon_pp and p.ndim >= 2 and p.size(0) < 10000:
-                    c_t = newton_schulz(c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
@@ -2765,7 +2754,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         beta2_warmup_initial,
         beta2_warmup_steps,
         mars_gamma,
-        use_muon_pp,
         r,
         weight_lr_power,
         fisher,
@@ -2841,7 +2829,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             beta2_warmup_initial=beta2_warmup_initial,
             beta2_warmup_steps=beta2_warmup_steps,
             mars_gamma=mars_gamma,
-            use_muon_pp=use_muon_pp,
             r=r,
             weight_lr_power=weight_lr_power,
             fisher=fisher,
@@ -2880,7 +2867,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("mars_gamma", 0.0)
             group.setdefault("eps2", 1e-3)
             group.setdefault("eps_floor", None)
-            group.setdefault("use_muon_pp", False)
             group.setdefault("weight_decay", 0.0)
             group.setdefault("stable_weight_decay", False)
             group.setdefault("weight_decouple", False)
@@ -3047,7 +3033,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                 swd_second_moment_group_sum = 0.0
                 mars_gamma = group["mars_gamma"]
                 beta1 = group["betas"][0]
-                use_muon_pp = group["use_muon_pp"]
                 fisher = group["fisher"]
 
                 if group["use_spam_momentum_reset"]:
@@ -3127,20 +3112,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         grad_f32 = grad.float()
                         p_f32 = p.float()
 
-                        if mars_gamma > 0:
-                            # MARS Calculate cₜ (gradient with correction term)
-                            previous_grad_f32 = torch.zeros_like(grad_f32, dtype=torch.float32).copy_(state["previous_grad"].float())
-                            temp_grad_f32 = grad_f32.clone().detach()
-                            grad_f32 = (grad_f32 - previous_grad_f32).mul_(mars_gamma * (beta1 / (1.0 - beta1))).add_(grad_f32)
-
-                            if state["previous_grad"].dtype == torch.bfloat16:
-                                state["previous_grad"].copy_(_fp32_to_bf16_sr(temp_grad_f32))
-                            else:
-                                state["previous_grad"].copy_(temp_grad_f32)
-
-                        if use_muon_pp and p.ndim >= 2 and p.numel() >= 2:
-                            grad_f32 = newton_schulz(grad_f32)
-                        elif group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
+                        if group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
                             grad_f32 = orthograd(p_f32, grad_f32)
 
                         if group["adaptive_clip"] > 0 and p.numel() >= 2 and p.ndim >= 1:
@@ -3150,8 +3122,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                                            agc_eps=group["adaptive_clip_eps"], 
                                            norm_type=group["adaptive_clip_type"])
                             
-                        #Make a fp32 copy of exp_avg_sq_f32
-                        exp_avg_sq_f32 = torch.zeros_like(p.float(), dtype=torch.float32).copy_(state["exp_avg_sq"].float())
+                        exp_avg_sq_f32 = state["exp_avg_sq"].float()
                         exp_avg_sq_f32.add_(grad_f32.square())
 
                         if fisher:
@@ -3199,7 +3170,6 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                             beta2_warmup_initial=group["beta2_warmup_initial"],
                             beta2_warmup_steps=group["beta2_warmup_steps"],
                             mars_gamma=group["mars_gamma"],
-                            use_muon_pp=group["use_muon_pp"],
                             fisher=group["fisher"],
                             update_strategy=group["update_strategy"],
                             stable_update=group["stable_update"],
@@ -3275,7 +3245,6 @@ def single_param_ADOPTAOScheduleFree(
     beta2_warmup_initial: float,
     beta2_warmup_steps: int,
     mars_gamma: float,
-    use_muon_pp: bool,
     fisher: bool,
     update_strategy: UPDATE_STRATEGY,
     stable_update: bool,
@@ -3335,9 +3304,7 @@ def single_param_ADOPTAOScheduleFree(
         else:
             previous_grad.copy_(temp_grad_f32)
 
-    if use_muon_pp and p.ndim >= 2 and p.numel() >= 2:
-        grad_f32 = newton_schulz(grad_f32)
-    elif use_orthograd and p.ndim >= 1 and p.numel() >= 2:
+    if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
         grad_f32 = orthograd(p_f32, grad_f32)
 
     if spam_clipping_threshold != 0 and apply_spam_clipping and p.numel() >= 2 and p.ndim >= 1:
@@ -3487,11 +3454,6 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             the direction of the gradient, while layer only scales down the magnitude of the entire gradient proportionally.
             Traditional adaptive clipping uses unit-wise, while this implementation also supports layer.
             Valid values: layer, unit (default: layer).
-        use_muon_pp (boolean):
-            Experimental. Perform orthogonalisation on the gradient before it is used for updates ala Shampoo/SOAP/Muon.
-            (https://github.com/KellerJordan/Muon/blob/master/muon.py). Not suitable for all training scenarios.
-            May not work well with small batch sizes or finetuning.
-            (default: False)
         mars_gamma (float):
             Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
             larger values apply more correction, and will require higher LRs to offset. Zero disables. (default: 0.0)
@@ -3544,7 +3506,6 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         beta2_warmup_initial: float = 0.9,
         beta2_warmup_steps: int = 0,
         mars_gamma: float = 0.0,
-        use_muon_pp: bool = False,
         r: float = 0.0,
         weight_lr_power: float = 2.0,
         fisher: float = False,
@@ -3589,7 +3550,6 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             beta2_warmup_initial=beta2_warmup_initial,
             beta2_warmup_steps=beta2_warmup_steps,
             mars_gamma=mars_gamma,
-            use_muon_pp=use_muon_pp,
             r=r,
             weight_lr_power=weight_lr_power,
             fisher=fisher,
