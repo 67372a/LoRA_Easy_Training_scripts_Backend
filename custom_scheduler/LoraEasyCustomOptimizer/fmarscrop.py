@@ -1553,7 +1553,7 @@ class FMARSCropV3ExMachina(BaseOptimizer):
                 # Calculate cₜ (gradient with correction term)
                 c_t = prev_grad.mul(gamma * (beta2 / (1.0 - beta2))).add_(grad)
 
-                elif group["use_orthograd"] and p.ndim >= 2:
+                if group["use_orthograd"] and p.ndim >= 2:
                     c_t = orthograd(p_fp32, c_t)
 
                 if adaptive_clip > 0.0:

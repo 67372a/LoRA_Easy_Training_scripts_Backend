@@ -2037,7 +2037,7 @@ class _CompassBase(Optimizer):
                             else:
                                 state["previous_grad"].copy_(temp_grad_f32)
 
-                        elif group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
+                        if group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
                             grad_f32 = orthograd(p_f32, grad_f32)
 
                         if group["adaptive_clip"] > 0 and p.numel() >= 2 and p.ndim >= 1:
