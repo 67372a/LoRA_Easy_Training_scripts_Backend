@@ -107,7 +107,7 @@ def agc(p: torch.Tensor,
         g_norm = torch.norm(grad)
 
         # Compute the maximum allowed norm for the gradients
-        max_norm = p_norm * agc_clip_val
+        max_norm = (p_norm * agc_clip_val).clamp(min=eps)
 
         # Compute the clipping coefficient
         clip_coef = min(1, max_norm / g_norm.clamp(min=eps))
@@ -120,7 +120,7 @@ def agc(p: torch.Tensor,
         p_norm = unit_norm(p).clamp_(min=agc_eps)
         g_norm = unit_norm(grad)
 
-        max_norm = p_norm * agc_clip_val
+        max_norm = (p_norm * agc_clip_val).clamp(min=eps)
 
         clipped_grad = grad * (max_norm / g_norm.clamp_(min=eps))
 
