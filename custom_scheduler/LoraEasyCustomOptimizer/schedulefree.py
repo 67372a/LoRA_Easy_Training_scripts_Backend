@@ -3458,9 +3458,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             Scaling value for the MARS style correction of the gradient, 0.025 or 0.05 are recommended by the paper, 
             larger values apply more correction, and will require higher LRs to offset. Zero disables. (default: 0.0)
         debias_beta2 (bool):
-            Apply bias correction to denominator of updates (adaptive LR). (Default: True)
-        compass_second_moment_smoothing (bool):
-            Updates the second moment (i.e. ema / fim) with the Compass smoothed gradient. (Default: True)
+            Apply bias correction to denominator of updates (adaptive LR). (Default: False)
         block_size (int):
             Controls the block sized used during quantization, will be automatically determined by state_precision if not set. 
             Advise not setting unless you have a clear reason to. (Default: None)
