@@ -72,6 +72,11 @@ class Compass(BaseOptimizer):
         update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
             Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
             and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified)
+        use_orthograd (boolean):
+            Experimental. Updates weights using the component of the gradient that is orthogonal to the current 
+            weight direction, as described in "Grokking at the Edge of Numerical Stability" (https://arxiv.org/pdf/2501.04697).
+            Can help prevent overfitting and improve generalisation.
+            (default: False)
     """
 
     def __init__(
@@ -97,6 +102,7 @@ class Compass(BaseOptimizer):
         degenerated_to_sgd: bool = False,
         cautious: bool = False,
         update_strategy: UPDATE_STRATEGY = 'unmodified',
+        use_orthograd: bool = False,
         **kwargs,
     ):
         
@@ -128,6 +134,7 @@ class Compass(BaseOptimizer):
             'cautious':cautious,
             'update_strategy': update_strategy,
             'stable_weight_decay': stable_weight_decay,
+            'use_orthograd': use_orthograd,
         }
 
         self.clip = clip
@@ -240,6 +247,9 @@ class Compass(BaseOptimizer):
                     p_fp32 = p.clone().to(torch.float32)
                     ema = ema.to(torch.float32)
                     ema_squared = ema_squared.to(torch.float32)
+
+                if group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
+                    grad = orthograd(p_fp32, grad)
 
                 # center the gradient vector
                 if centralization != 0 and grad.dim() > 1:
