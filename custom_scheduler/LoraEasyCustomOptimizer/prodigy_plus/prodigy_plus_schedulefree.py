@@ -3,6 +3,7 @@
 # Currently no customizations
 import torch
 from .core_optimiser import CoreOptimiser
+from ..utils import (agc)
 
 class ProdigyPlusExMachinaScheduleFree(CoreOptimiser):
     r"""
@@ -154,41 +155,69 @@ class ProdigyPlusExMachinaScheduleFree(CoreOptimiser):
             bfloat16 training performance close to that of float32.
             (default: True)
     """
-    def __init__(self, params, lr=1.0,
-                 betas=(0.9, 0.99), beta3=None,
+    def __init__(self, params, 
+                 lr=1.0,
+                 betas=(0.9, 0.99), 
+                 beta3=None,
                  weight_decay=0.0,
                  weight_decay_by_lr=True,
                  use_bias_correction=False,
-                 d0=1e-6, d_coef=1.0,
+                 d0=1e-6, 
+                 d_coef=1.0,
                  prodigy_steps=0,
                  prodigy_penalty_term=0.8,
                  use_speed=False,
                  eps=1e-8,
+                 eps_floor=None,
                  split_groups=True,
                  split_groups_mean=True,
                  factored=True,
                  factored_fp32=True,
                  fused_back_pass=False,
                  use_stableadamw=True,
+                 stableadamw_clip_threshold=1.0,
                  use_muon_pp=False,
                  use_cautious=False,
                  use_grams=False,
                  use_adopt=False,
                  use_orthograd=False,
                  use_focus=False,
-                 stochastic_rounding=True):
+                 stochastic_rounding=True,
+                 adaptive_clip=0.0,
+                 adaptive_clip_eps=0.0,
+                 adaptive_clip_type='layer'):
 
-        super().__init__(params=params, lr=lr, betas=betas, beta3=beta3,
-                         weight_decay=weight_decay, weight_decay_by_lr=weight_decay_by_lr,
+        super().__init__(params=params, 
+                         lr=lr, 
+                         betas=betas, 
+                         beta3=beta3,
+                         weight_decay=weight_decay, 
+                         weight_decay_by_lr=weight_decay_by_lr,
                          use_bias_correction=use_bias_correction,
-                         d0=d0, d_coef=d_coef, prodigy_steps=prodigy_steps, use_speed=use_speed,
+                         d0=d0, 
+                         d_coef=d_coef, 
+                         prodigy_steps=prodigy_steps, 
+                         use_speed=use_speed,
                          prodigy_penalty_term=prodigy_penalty_term,
-                         eps=eps, split_groups=split_groups,
-                         split_groups_mean=split_groups_mean, factored=factored, factored_fp32=factored_fp32,
-                         fused_back_pass=fused_back_pass, use_stableadamw=use_stableadamw,
-                         use_muon_pp=use_muon_pp, use_cautious=use_cautious, use_grams=use_grams, 
-                         use_adopt=use_adopt, use_orthograd=use_orthograd, use_focus=use_focus, 
-                         stochastic_rounding=stochastic_rounding)
+                         eps=eps,
+                         eps_floor=eps_floor, 
+                         split_groups=split_groups,
+                         split_groups_mean=split_groups_mean, 
+                         factored=factored, 
+                         factored_fp32=factored_fp32,
+                         fused_back_pass=fused_back_pass, 
+                         use_stableadamw=use_stableadamw,
+                         stableadamw_clip_threshold=stableadamw_clip_threshold,
+                         use_muon_pp=use_muon_pp, 
+                         use_cautious=use_cautious, 
+                         use_grams=use_grams, 
+                         use_adopt=use_adopt, 
+                         use_orthograd=use_orthograd, 
+                         use_focus=use_focus, 
+                         stochastic_rounding=stochastic_rounding,
+                         adaptive_clip=adaptive_clip,
+                         adaptive_clip_eps=adaptive_clip_eps,
+                         adaptive_clip_type=adaptive_clip_type)
 
     @torch.no_grad()
     def eval(self):
@@ -290,6 +319,17 @@ class ProdigyPlusExMachinaScheduleFree(CoreOptimiser):
             y, z = (p.float(), z_state.float()) if stochastic else (p, z_state)
 
             grad = self.orthograd(z_state, p.grad) if group['use_orthograd'] else p.grad.to(dtype=torch.float32, copy=True)
+
+            # Prodigy works best with unscaled gradients during early steps.
+            if not group['use_speed'] and group['d'] <= group['d0']:
+                if group["adaptive_clip"] > 0.0 and p.numel() >= 2 and p.ndim >= 1:
+                    grad = agc(p=y, 
+                                    grad=grad, 
+                                    agc_clip_val=group["adaptive_clip"], 
+                                    agc_eps=group["adaptive_clip_eps"], 
+                                    norm_type=group["adaptive_clip_type"])
+
+
             dlr = self.get_dlr(group)
 
             if group['use_bias_correction']:
@@ -329,7 +369,14 @@ class ProdigyPlusExMachinaScheduleFree(CoreOptimiser):
                     if group['use_bias_correction'] and rho_t <= 4.0:
                         update = grad
                     else:
-                        update = self.update_(grad, denom, group, y)
+                        eps_floor = group['eps_floor']
+                        eps = group['eps']
+
+                        if eps is not None and eps_floor is not None and eps_floor < eps:
+                            rms_grad = grad.pow(2).mean().sqrt_()
+                            eps = max(min(eps, 1e-2 * rms_grad), eps_floor) # Set a floor for eps to avoid NaN
+
+                        update = self.update_(grad, denom, group, y, eps)
                     del denom
 
             if update is not None:

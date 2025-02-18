@@ -14,19 +14,24 @@ class CoreOptimiser(torch.optim.Optimizer):
                  prodigy_penalty_term=0.8,
                  use_speed=False,
                  eps=1e-8,
+                 eps_floor=None,
                  split_groups=True,
                  split_groups_mean=True,
                  factored=True,
                  factored_fp32=True,
                  fused_back_pass=False,
                  use_stableadamw=True,
+                 stableadamw_clip_threshold=1.0,
                  use_muon_pp=False,
                  use_cautious=False,
                  use_grams=False,
                  use_adopt=False,
                  use_orthograd=False,
                  use_focus=False,
-                 stochastic_rounding=True):
+                 stochastic_rounding=True,
+                 adaptive_clip=0.0,
+                 adaptive_clip_eps=0.0,
+                 adaptive_clip_type='layer'):
 
         if not 0.0 < d0:
             raise ValueError("Invalid d0 value: {}".format(d0))
@@ -51,10 +56,19 @@ class CoreOptimiser(torch.optim.Optimizer):
             if use_stableadamw:
                 print(f"[{self.__class__.__name__}] 'use_stableadamw' has been disabled (mutually exclusive with Adam-atan2).")
                 use_stableadamw = False
+        elif eps_floor is not None:
+            print(f"[{self.__class__.__name__}] 'eps_floor' is set, adaptive eps enabled.")
+            if eps_floor <= 0:
+                print(f"[{self.__class__.__name__}] 'eps_floor' is less than or equal to zero, adjusting to float32 tiny, i.e. ~1e-38.")
+                eps_floor = torch.finfo(torch.float32).tiny
 
         if use_cautious and use_grams:
             print(f"[{self.__class__.__name__}] 'use_grams' has been disabled (mutually exclusive with 'use_cautious').")
             use_grams = False
+
+        if adaptive_clip > 0 and (adaptive_clip_eps is None or adaptive_clip_eps <= 0):
+            print(f"[{self.__class__.__name__}] 'adaptive_clip_eps' is None or less than or equal to zero, adjusting to float32 tiny, i.e. ~1e-38.")
+            adaptive_clip_eps = torch.finfo(torch.float32).tiny
 
         if use_focus:
             if factored:
@@ -69,10 +83,15 @@ class CoreOptimiser(torch.optim.Optimizer):
 
         defaults = dict(lr=lr, betas=betas, beta3=beta3,
                         eps=eps,
+                        eps_floor=eps_floor,
                         weight_decay=weight_decay,
                         weight_decay_by_lr=weight_decay_by_lr,
-                        d=d0, d_prev=d0, d0=d0, d_coef=d_coef,
-                        k=1, train_mode=True,
+                        d=d0, 
+                        d_prev=d0, 
+                        d0=d0, 
+                        d_coef=d_coef,
+                        k=1, 
+                        train_mode=True,
                         weight_sum=0,
                         prodigy_steps=prodigy_steps,
                         prodigy_penalty_term=prodigy_penalty_term,
@@ -83,13 +102,17 @@ class CoreOptimiser(torch.optim.Optimizer):
                         factored=factored,
                         factored_fp32=factored_fp32,
                         use_stableadamw=use_stableadamw,
+                        stableadamw_clip_threshold=stableadamw_clip_threshold,
                         use_muon_pp=use_muon_pp,
                         use_cautious=use_cautious,
                         use_grams=use_grams,
                         use_adopt=use_adopt,
                         use_orthograd=use_orthograd,
                         use_focus=use_focus,
-                        stochastic_rounding=stochastic_rounding)
+                        stochastic_rounding=stochastic_rounding,
+                        adaptive_clip=adaptive_clip,
+                        adaptive_clip_eps=adaptive_clip_eps,
+                        adaptive_clip_type=adaptive_clip_type)
 
         super().__init__(params, defaults)
 
@@ -471,7 +494,7 @@ class CoreOptimiser(torch.optim.Optimizer):
                 p0 = state.pop('p0')
                 del p0
 
-    def update_(self, num, denom, group, w):
+    def update_(self, num, denom, group, w, eps):
         if group['use_focus']:
             # FOCUS: First Order Concentrated Updating Scheme: https://arxiv.org/pdf/2501.12243
             gamma = 0.1
@@ -482,8 +505,6 @@ class CoreOptimiser(torch.optim.Optimizer):
             denom = denom.sub_(w).sign_().mul_(-gamma)
             update = num.sign_().add_(denom)
         else:
-            eps = group['eps']
-
             if eps is None:
                 # Approximate scaling for a regular Adam-style update.
                 b = self.get_clip_threshold(group)
@@ -564,7 +585,7 @@ class CoreOptimiser(torch.optim.Optimizer):
         if not group['use_speed'] and group['d'] <= group['d0']:
             return 50
 
-        return 1
+        return group["stableadamw_clip_threshold"]
 
     def try_hook_kohya_fbp(self):
         self.kohya_original_patch_adafactor_fused = None
