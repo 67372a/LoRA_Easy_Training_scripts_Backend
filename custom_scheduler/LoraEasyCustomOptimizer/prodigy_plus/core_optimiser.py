@@ -4,14 +4,16 @@ import torch
 from statistics import harmonic_mean
 
 class CoreOptimiser(torch.optim.Optimizer):
-    def __init__(self, params, lr=1.0,
-                 betas=(0.9, 0.99), beta3=None,
+    def __init__(self, params, 
+                 lr=1.0,
+                 betas=(0.9, 0.99), 
+                 beta3=None,
                  weight_decay=0.0,
                  weight_decay_by_lr=True,
                  use_bias_correction=False,
                  d0=1e-6, d_coef=1.0,
                  prodigy_steps=0,
-                 prodigy_penalty_term=0.8,
+                 prodigy_penalty_term=True,
                  use_speed=False,
                  eps=1e-8,
                  eps_floor=None,
@@ -373,8 +375,9 @@ class CoreOptimiser(torch.optim.Optimizer):
             if d > d0:
                 # Force Prodigy to be extremely confident before increasing the LR when gradient
                 # and weights drift.
-                if not group['use_speed'] and penalty_term > 0:
-                    d_numerator_item = -(abs(d_numerator_item) ** penalty_term)
+                if penalty_term:
+                    d_numerator = min(d_numerator, d_numerator_item)
+                    d_numerator_item = 0
             else:
                 # Prevent the accumulation of negative values in the numerator in early training.
                 # We still allow negative updates once progress starts being made, as this is 

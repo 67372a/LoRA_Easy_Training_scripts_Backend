@@ -81,10 +81,11 @@ class ProdigyPlusExMachinaScheduleFree(CoreOptimiser):
             Freeze Prodigy stepsize adjustments after a certain optimiser step and releases all state memory required
             by Prodigy.
             (default: 0)
-        prodigy_penalty_term (float):
-            The power to raise negative numerator updates by. Lower values will force Prodigy to be more confident before
-            raising the learning rate after early training, however, this can prevent some models from learning. Set to 0 to disable.
-            (default: 0.8)
+        prodigy_penalty_term (boolean):
+            Reset the Prodigy numerator when a negative update is applied. This forces Prodigy to be more confident before
+            raising the learning rate after early training, however, it may prevent the model from learning in some scenarios,
+            such as fine-tuning. Ignored if use_speed is True.
+            (default: True)
         use_speed (boolean):
             Highly experimental. Signed Prodigy with ExponEntial D. This decouples the adaptive stepsize calculations from 
             the magnitude of the weights and gradient. This can provide faster, more accurate LRs in some scenarios, 
@@ -165,7 +166,7 @@ class ProdigyPlusExMachinaScheduleFree(CoreOptimiser):
                  d0=1e-6, 
                  d_coef=1.0,
                  prodigy_steps=0,
-                 prodigy_penalty_term=0.8,
+                 prodigy_penalty_term=True,
                  use_speed=False,
                  eps=1e-8,
                  eps_floor=None,
