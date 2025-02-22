@@ -94,23 +94,23 @@ def setup_venv(venv_pip):
         version = sys.version_info
         if version.major == 3 and version.minor == 13:
             subprocess.check_call(
-                f"{venv_pip} install -U --no-deps --force-reinstall https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post9/triton-3.2.0-cp313-cp313-win_amd64.whl"
+                f"{venv_pip} install -U --no-deps --force-reinstall https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post10/triton-3.2.0-cp313-cp313-win_amd64.whl"
             )
         elif version.major == 3 and version.minor == 12:
             subprocess.check_call(
-                f"{venv_pip} install -U --no-deps --force-reinstall https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post9/triton-3.2.0-cp312-cp312-win_amd64.whl"
+                f"{venv_pip} install -U --no-deps --force-reinstall https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post10/triton-3.2.0-cp312-cp312-win_amd64.whl"
             )
         elif version.major == 3 and version.minor == 11:
             subprocess.check_call(
-                f"{venv_pip} install -U --no-deps --force-reinstall https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post9/triton-3.2.0-cp311-cp311-win_amd64.whl"
+                f"{venv_pip} install -U --no-deps --force-reinstall https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post10/triton-3.2.0-cp311-cp311-win_amd64.whl"
             )
         elif version.major == 3 and version.minor == 10:
             subprocess.check_call(
-                f"{venv_pip} install -U --no-deps --force-reinstall https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post9/triton-3.2.0-cp310-cp310-win_amd64.whl"
+                f"{venv_pip} install -U --no-deps --force-reinstall https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post10/triton-3.2.0-cp310-cp310-win_amd64.whl"
             )
         
     subprocess.check_call(
-        f"{venv_pip} install -U --no-deps xformers==0.0.29.post2 --index-url https://download.pytorch.org/whl/cu124",
+        f"{venv_pip} install -U --no-deps xformers==0.0.29.post3 --index-url https://download.pytorch.org/whl/cu124",
         shell=PLATFORM == "linux",
     )
     subprocess.check_call(
