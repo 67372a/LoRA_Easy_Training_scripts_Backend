@@ -6,6 +6,7 @@ import torch
 from torch.optim import Optimizer
 import math
 import logging
+from collections import defaultdict
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
@@ -2888,6 +2889,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("use_spam_momentum_reset", False)
             group.setdefault("spam_momentum_reset_warmup_steps", 20)
             group.setdefault("spam_momentum_reset_interval_steps", 41)
+            #Mark CosineDecay as safe for deserialization
+            torch.serialization.add_safe_globals([CosineDecay, torch.optim.SGD, defaultdict, dict, torch.optim.lr_scheduler.CosineAnnealingLR])
             group.setdefault("spam_momentum_reset_warmup_scheduler", CosineDecay(0.99, group.get("spam_momentum_reset_warmup_steps")))
             group.setdefault("spam_momentum_reset_warmup_scheduler_current_step", group.get("spam_momentum_reset_warmup_steps"))
             group.setdefault("spam_warmup_scaling_factor", torch.tensor(1.0, dtype=torch.float32, device=device))
