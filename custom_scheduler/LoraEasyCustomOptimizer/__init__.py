@@ -24,7 +24,7 @@ from LoraEasyCustomOptimizer.schedulefree import (
     FADOPTScheduleFree, ADOPTMARSScheduleFree, FADOPTMARSScheduleFree, ADOPTAOScheduleFree
     )
 
-from LoraEasyCustomOptimizer.clybius_experiments import MomentusCaution
+from LoraEasyCustomOptimizer.clybius_experiments import (MomentusCaution, REMASTER)
 from LoraEasyCustomOptimizer.sgd import SGDSaI
 from LoraEasyCustomOptimizer.shampoo import ScalableShampoo
 from LoraEasyCustomOptimizer.adam import AdamW8bitAO, AdamW4bitAO, AdamWfp8AO
@@ -76,6 +76,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     MomentusCaution,
     ProdigyPlusScheduleFree,
     ProdigyPlusExMachinaScheduleFree,
+    REMASTER,
     RMSProp,
     RMSPropADOPT,
     RMSPropADOPTMARS,
