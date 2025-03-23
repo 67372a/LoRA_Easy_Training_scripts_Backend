@@ -35,7 +35,7 @@ class SCION(BaseOptimizer):
         momentum: float = 0.1,
         constraint: bool = False,
         lmo_type: LMO_TYPE = 'spectral',
-        scale: float = 1.0,
+        scale: float = 50.0,
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
         use_orthograd: bool = False,
