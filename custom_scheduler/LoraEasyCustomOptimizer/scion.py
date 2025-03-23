@@ -132,7 +132,7 @@ class SCION(BaseOptimizer):
 
                 d = state['d']
 
-                if p.dtype in torch.bfloat16:
+                if p.dtype == torch.bfloat16:
                     grad = grad.to(torch.float32)
                     p_fp32 = p.to(torch.float32)
                     d = d.to(torch.float32)

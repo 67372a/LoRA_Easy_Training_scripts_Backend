@@ -391,7 +391,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
 
-                if p.dtype in torch.bfloat16:
+                if p.dtype == torch.bfloat16:
                     grad = grad.to(torch.float32)
                     p_fp32 = p.to(torch.float32)
                     exp_avg, exp_avg_sq = exp_avg.to(torch.float32), exp_avg_sq.to(torch.float32)
