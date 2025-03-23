@@ -145,8 +145,11 @@ class SCION(BaseOptimizer):
 
                 d.mul_(1.0 - group['momentum']).add_(grad, alpha=group['momentum'])
 
-                update = self.get_lmo_direction(d, group['lmo_type'])
-                update.mul_(group['scale'])
+                if grad.ndim > 0:
+                    update = self.get_lmo_direction(d, group['lmo_type'])
+                    update.mul_(group['scale'])
+                else:
+                    update = grad
 
                 if update_strategy in {'cautious','grams'}:
                     if update_strategy in {'cautious','both'}:
