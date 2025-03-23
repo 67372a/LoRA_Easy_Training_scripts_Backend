@@ -16,7 +16,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParamete
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 from pytorch_optimizer.optimizer.gradient_centralization import centralize_gradient
-from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
+from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm, get_global_gradient_norm
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
@@ -1195,6 +1195,11 @@ class CompassADOPT(BaseOptimizer):
         compass_second_moment_smoothing: bool = True,
         use_orthograd: bool = False,
         update_strategy: UPDATE_STRATEGY = 'unmodified',
+        use_adagc: bool = False,
+        adagc_beta: float = 0.98,
+        adagc_lambda_abs: float = 1.0,
+        adagc_lambda_rel: float = 1.05,
+        adagc_warmup_steps: int = 100,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1233,6 +1238,11 @@ class CompassADOPT(BaseOptimizer):
             'compass_second_moment_smoothing': compass_second_moment_smoothing,
             'use_orthograd': use_orthograd,
             'update_strategy': update_strategy,
+            'use_adagc': use_adagc,
+            'adagc_beta': adagc_beta,
+            'adagc_lambda_abs': adagc_lambda_abs,
+            'adagc_lambda_rel': adagc_lambda_rel,
+            'adagc_warmup_steps': adagc_warmup_steps,
         }
         super().__init__(params, defaults)
 
@@ -1303,6 +1313,7 @@ class CompassADOPT(BaseOptimizer):
             compass_second_moment_smoothing = group["compass_second_moment_smoothing"]
             use_orthograd = group["use_orthograd"]
             update_strategy = group["update_strategy"]
+            use_adagc = group["use_adagc"]
 
             lr: float = group['lr']
 
@@ -1334,6 +1345,7 @@ class CompassADOPT(BaseOptimizer):
 
                 if len(state) == 0:
                     state['exp_avg'] = torch.zeros_like(p)
+                    state['adagc_gamma'] = torch.empty((1,), device=grad.device, dtype=torch.float32)
                     factored_dims = create_factored_dims(
                         grad.shape,
                         factored=group['factor_second_moment'],
@@ -1357,6 +1369,7 @@ class CompassADOPT(BaseOptimizer):
                         state['exp_avg_sq'] = torch.zeros_like(p)
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                adagc_gamma = state['adagc_gamma']
 
                 # unpack
                 if p.dtype in {torch.float16, torch.bfloat16}:
@@ -1368,6 +1381,28 @@ class CompassADOPT(BaseOptimizer):
 
                 if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
                     grad = orthograd(p_fp32, grad)
+
+                if use_adagc:
+                    if group['step'] < group['adagc_warmup_steps']:
+                        if eps_floor is not None and eps_floor < eps:
+                            rms_grad = grad.pow(2).mean().sqrt_()
+                            adagc_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
+                        else:
+                            adagc_eps = eps
+
+                        grad_norm = get_global_gradient_norm(self.param_groups).add_(adagc_eps)
+
+                        h_t = min(group['adagc_lambda_abs'] / grad_norm, 1.0)
+                        grad = grad.mul(h_t)
+
+                        g_hat_norm = grad.norm()
+
+                        adagc_gamma.copy_(g_hat_norm if group['step'] == 1 else min(adagc_gamma, g_hat_norm))
+                    else:
+                        h_t = min(group['adagc_lambda_rel'] * adagc_gamma / grad.norm(), 1.0)
+                        grad = grad.mul(h_t)
+
+                        adagc_gamma.mul_(group['adagc_beta']).add_(grad.norm(), alpha=1.0 - group['adagc_beta'])
 
                 if adaptive_clip is not None and adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
