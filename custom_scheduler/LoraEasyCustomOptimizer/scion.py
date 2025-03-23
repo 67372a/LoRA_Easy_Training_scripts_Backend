@@ -39,7 +39,7 @@ class SCION(BaseOptimizer):
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
         use_orthograd: bool = False,
-        adaptive_clip: float = 1.0,
+        adaptive_clip: Optional[float] = None,
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         update_strategy: UPDATE_STRATEGY = 'unmodified',
