@@ -219,15 +219,16 @@ class StableSPAM(BaseOptimizer):
                     fixed_decay=False,
                 )
 
-                max_grad = torch.max(grad.abs())
+                if grad.ndim >= 1:
+                    max_grad = torch.max(grad.abs())
 
-                m_max_t.lerp_(max_grad, weight=1.0 - self.theta)
+                    m_max_t.lerp_(max_grad, weight=1.0 - self.theta)
 
-                m_max_hat = m_max_t / theta_t
+                    m_max_hat = m_max_t / theta_t
 
-                mask = grad.abs() > m_max_hat
-                if mask.sum() > 0:
-                    grad[mask].div_(max_grad).mul_(m_max_hat)
+                    mask = grad.abs() > m_max_hat
+                    if mask.sum() > 0:
+                        grad[mask].div_(max_grad).mul_(m_max_hat)
 
                 grad_norm = torch.norm(grad)
 
