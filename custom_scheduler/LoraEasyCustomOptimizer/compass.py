@@ -1193,6 +1193,8 @@ class CompassADOPT(BaseOptimizer):
         debias_beta1: bool = True,
         debias_beta2: bool = True,
         compass_second_moment_smoothing: bool = True,
+        use_orthograd: bool = False,
+        update_strategy: UPDATE_STRATEGY = 'unmodified',
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1203,6 +1205,13 @@ class CompassADOPT(BaseOptimizer):
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
+
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams','both'}:
+            raise ValueError("Invalid update strategy: {}".format(update_strategy))
+        
+        # If cautious true, override update strategy to cautious
+        if cautious:
+            update_strategy = 'cautious'
 
         defaults: DEFAULTS = {
             'lr': lr,
@@ -1222,6 +1231,8 @@ class CompassADOPT(BaseOptimizer):
             'debias_beta1': debias_beta1,
             'debias_beta2': debias_beta2,
             'compass_second_moment_smoothing': compass_second_moment_smoothing,
+            'use_orthograd': use_orthograd,
+            'update_strategy': update_strategy,
         }
         super().__init__(params, defaults)
 
@@ -1290,6 +1301,8 @@ class CompassADOPT(BaseOptimizer):
             eps_floor = group["eps_floor"]
             amp_fac = group["amp_fac"]
             compass_second_moment_smoothing = group["compass_second_moment_smoothing"]
+            use_orthograd = group["use_orthograd"]
+            update_strategy = group["update_strategy"]
 
             lr: float = group['lr']
 
@@ -1353,7 +1366,10 @@ class CompassADOPT(BaseOptimizer):
                         exp_avg_sq = exp_avg_sq.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
-                if adaptive_clip > 0.0:
+                if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
+                    grad = orthograd(p_fp32, grad)
+
+                if adaptive_clip is not None and adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
@@ -1380,13 +1396,13 @@ class CompassADOPT(BaseOptimizer):
 
                         exp_avg_sq = update_second_moment(exp_avg_sq, unnormed_update, beta2)
 
-                        cautious_grad = grad
+                        update_grad = grad
                     else:
                         normed_grad = grad.div(de_nom).clamp(-adopt_clip, adopt_clip)
                         exp_avg.mul_(beta1).add_(normed_grad, alpha=1.0 - beta1)
                         update = normed_grad.add(exp_avg, alpha=amp_fac)
                         exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2)
-                        cautious_grad = normed_grad
+                        update_grad = normed_grad
 
                     # Weight decay calculated at y
                     if group["weight_decay"] != 0 and group['weight_decouple']:
@@ -1399,12 +1415,13 @@ class CompassADOPT(BaseOptimizer):
                     elif group["weight_decay"] != 0:
                         update.add_(p_fp32, alpha=group["weight_decay"])
 
-                    if group["cautious"]:
-                        # compute norm gradient
-                        mask = (update * cautious_grad > 0).to(cautious_grad.dtype)
-                        mask.div_(mask.mean().clamp_(min=1e-3))
-                    else:
-                        mask = 1.0
+                    if update_strategy in {'cautious','grams'}:
+                        if update_strategy in {'cautious','both'}:
+                            mask = (update * update_grad > 0).to(update_grad.dtype)
+                            mask.div_(mask.mean().clamp_(min=1e-3))
+                            update = update * mask
+                        if update_strategy in {'grams','both'}:
+                            update.copy_(torch.sign(update_grad) * update.abs())
 
                     if compass_second_moment_smoothing:
                         p_fp32.addcdiv_(update * mask, de_nom, value=-step_size)
@@ -1786,6 +1803,7 @@ class _CompassBase(Optimizer):
         block_size,
         min_quant_size,
         state_precision,
+        torch_compile,
     ) -> None:
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -1863,6 +1881,7 @@ class _CompassBase(Optimizer):
         self.block_size = block_size
         self.min_quant_size = min_quant_size
         self.state_precision = state_precision
+        self.torch_compile = torch_compile
 
     def __setstate__(self, state):
         super().__setstate__(state)
@@ -2077,49 +2096,94 @@ class _CompassBase(Optimizer):
                         # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
                         # thus, by calling p.detach(), DTensor won't have .grad anymore, which is ok since we
                         # are passing grad separately anyway.
-                        torch.compile(single_param_compass, fullgraph=True, dynamic=False)(
-                            p=p.detach(),
-                            grad=grad,
-                            step=state["step"],
-                            exp_avg=state["exp_avg"],
-                            exp_avg_sq=state["exp_avg_sq"],
-                            previous_grad=state["previous_grad"] if mars_gamma > 0 else None,
-                            pbar=state["pbar"] if group["use_focus"] else None,
-                            lr=group["lr"],
-                            beta1=group["betas"][0],
-                            beta2=group["betas"][1],
-                            weight_decay=group["weight_decay"],
-                            weight_decouple=group["weight_decouple"],
-                            stable_weight_decay=group["stable_weight_decay"],
-                            eps=group["eps"],
-                            eps2=group["eps2"],
-                            eps_floor=group["eps_floor"],
-                            amp_fac=group["amp_fac"],
-                            adaptive_clip=group["adaptive_clip"],
-                            adaptive_clip_eps=group["adaptive_clip_eps"],
-                            adaptive_clip_type=group["adaptive_clip_type"],
-                            debias_beta1=group["debias_beta1"],
-                            debias_beta2=group["debias_beta2"],
-                            adopt=group["adopt"],
-                            mars_gamma=group["mars_gamma"],
-                            compass_second_moment_smoothing=group["compass_second_moment_smoothing"],
-                            update_strategy=group["update_strategy"],
-                            stable_update=group["stable_update"],
-                            stable_update_clip_threshold=group["stable_update_clip_threshold"],
-                            use_orthograd=group["use_orthograd"],
-                            spam_clipping_threshold = group["spam_clipping_threshold"],
-                            spam_clipping_type = group["spam_clipping_type"],
-                            spam_clipping_eps = group["spam_clipping_eps"],
-                            use_focus=group["use_focus"],
-                            focus_gamma=group["focus_gamma"],
-                            focus_beta=group["focus_beta"],
-                            apply_spam_clipping = apply_spam_clipping,
-                            reset_momentum = reset_momentum,
-                            use_exadam=group["use_exadam"],
-                            spam_warmup_scaling_factor = group["spam_warmup_scaling_factor"],
-                            swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] else None,
-                            swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] else None,
-                        )
+                        if self.torch_compile:
+                            torch.compile(single_param_compass, fullgraph=True, dynamic=False)(
+                                p=p.detach(),
+                                grad=grad,
+                                step=state["step"],
+                                exp_avg=state["exp_avg"],
+                                exp_avg_sq=state["exp_avg_sq"],
+                                previous_grad=state["previous_grad"] if mars_gamma > 0 else None,
+                                pbar=state["pbar"] if group["use_focus"] else None,
+                                lr=group["lr"],
+                                beta1=group["betas"][0],
+                                beta2=group["betas"][1],
+                                weight_decay=group["weight_decay"],
+                                weight_decouple=group["weight_decouple"],
+                                stable_weight_decay=group["stable_weight_decay"],
+                                eps=group["eps"],
+                                eps2=group["eps2"],
+                                eps_floor=group["eps_floor"],
+                                amp_fac=group["amp_fac"],
+                                adaptive_clip=group["adaptive_clip"],
+                                adaptive_clip_eps=group["adaptive_clip_eps"],
+                                adaptive_clip_type=group["adaptive_clip_type"],
+                                debias_beta1=group["debias_beta1"],
+                                debias_beta2=group["debias_beta2"],
+                                adopt=group["adopt"],
+                                mars_gamma=group["mars_gamma"],
+                                compass_second_moment_smoothing=group["compass_second_moment_smoothing"],
+                                update_strategy=group["update_strategy"],
+                                stable_update=group["stable_update"],
+                                stable_update_clip_threshold=group["stable_update_clip_threshold"],
+                                use_orthograd=group["use_orthograd"],
+                                spam_clipping_threshold = group["spam_clipping_threshold"],
+                                spam_clipping_type = group["spam_clipping_type"],
+                                spam_clipping_eps = group["spam_clipping_eps"],
+                                use_focus=group["use_focus"],
+                                focus_gamma=group["focus_gamma"],
+                                focus_beta=group["focus_beta"],
+                                apply_spam_clipping = apply_spam_clipping,
+                                reset_momentum = reset_momentum,
+                                use_exadam=group["use_exadam"],
+                                spam_warmup_scaling_factor = group["spam_warmup_scaling_factor"],
+                                swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] else None,
+                                swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] else None,
+                            )
+                        else:
+                            single_param_compass(
+                                p=p.detach(),
+                                grad=grad,
+                                step=state["step"],
+                                exp_avg=state["exp_avg"],
+                                exp_avg_sq=state["exp_avg_sq"],
+                                previous_grad=state["previous_grad"] if mars_gamma > 0 else None,
+                                pbar=state["pbar"] if group["use_focus"] else None,
+                                lr=group["lr"],
+                                beta1=group["betas"][0],
+                                beta2=group["betas"][1],
+                                weight_decay=group["weight_decay"],
+                                weight_decouple=group["weight_decouple"],
+                                stable_weight_decay=group["stable_weight_decay"],
+                                eps=group["eps"],
+                                eps2=group["eps2"],
+                                eps_floor=group["eps_floor"],
+                                amp_fac=group["amp_fac"],
+                                adaptive_clip=group["adaptive_clip"],
+                                adaptive_clip_eps=group["adaptive_clip_eps"],
+                                adaptive_clip_type=group["adaptive_clip_type"],
+                                debias_beta1=group["debias_beta1"],
+                                debias_beta2=group["debias_beta2"],
+                                adopt=group["adopt"],
+                                mars_gamma=group["mars_gamma"],
+                                compass_second_moment_smoothing=group["compass_second_moment_smoothing"],
+                                update_strategy=group["update_strategy"],
+                                stable_update=group["stable_update"],
+                                stable_update_clip_threshold=group["stable_update_clip_threshold"],
+                                use_orthograd=group["use_orthograd"],
+                                spam_clipping_threshold = group["spam_clipping_threshold"],
+                                spam_clipping_type = group["spam_clipping_type"],
+                                spam_clipping_eps = group["spam_clipping_eps"],
+                                use_focus=group["use_focus"],
+                                focus_gamma=group["focus_gamma"],
+                                focus_beta=group["focus_beta"],
+                                apply_spam_clipping = apply_spam_clipping,
+                                reset_momentum = reset_momentum,
+                                use_exadam=group["use_exadam"],
+                                spam_warmup_scaling_factor = group["spam_warmup_scaling_factor"],
+                                swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] else None,
+                                swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] else None,
+                            )
 
                         if group["weight_decay"] > 0 and group['stable_weight_decay']:
                             swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
@@ -2491,6 +2555,7 @@ class CompassAO(_CompassBase):
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
         state_precision: STATE_PRECISION = 'parameter',
+        torch_compile: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -2533,4 +2598,5 @@ class CompassAO(_CompassBase):
             focus_beta=focus_beta,
             debug=debug,
             use_exadam=use_exadam,
+            torch_compile=torch_compile,
         )

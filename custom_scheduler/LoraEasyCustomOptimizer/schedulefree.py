@@ -2779,6 +2779,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         block_size,
         min_quant_size,
         state_precision,
+        torch_compile,
     ) -> None:
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -2855,6 +2856,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         self.block_size = block_size
         self.min_quant_size = min_quant_size
         self.state_precision = state_precision
+        self.torch_compile = torch_compile
 
     def __setstate__(self, state):
         super().__setstate__(state)
@@ -2981,7 +2983,10 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     for p in group['params']:
                         state = self.state[p]
                         if 'z' in state:
-                            torch.compile(self._eval, fullgraph=True, dynamic=False)(p=p, z=state["z"], beta1=group['betas'][0])
+                            if self.torch_compile:
+                                torch.compile(self._eval, fullgraph=True, dynamic=False)(p=p, z=state["z"], beta1=group['betas'][0])
+                            else:
+                                self._eval(p=p, z=state["z"], beta1=group['betas'][0])
                     self.train_mode = False
 
     @staticmethod
@@ -3004,7 +3009,10 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                     for p in group['params']:
                         state = self.state[p]
                         if 'z' in state:
-                            torch.compile(self._train, fullgraph=True, dynamic=False)(p=p, z=state["z"], beta1=group['betas'][0])
+                            if self.torch_compile:
+                                torch.compile(self._train, fullgraph=True, dynamic=False)(p=p, z=state["z"], beta1=group['betas'][0])
+                            else:
+                                self._train(p=p, z=state["z"], beta1=group['betas'][0])
                     self.train_mode = True
 
     @torch.no_grad()
@@ -3148,52 +3156,101 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         # https://github.com/pytorch/ao/issues/652#issuecomment-2285040894
                         # thus, by calling p.detach(), DTensor won't have .grad anymore, which is ok since we
                         # are passing grad separately anyway.
-                        torch.compile(single_param_ADOPTAOScheduleFree, fullgraph=True, dynamic=False)(
-                            p=p.detach(),
-                            grad=grad,
-                            step=state["step"],
-                            z=state["z"],
-                            exp_avg_sq=state["exp_avg_sq"],
-                            previous_grad=state["previous_grad"] if mars_gamma > 0 else None,
-                            pbar=state["pbar"] if group["use_focus"] else None,
-                            lr=group["lr"],
-                            beta1=group["betas"][0],
-                            beta2=group["betas"][1],
-                            weight_decay=group["weight_decay"],
-                            weight_decouple=group["weight_decouple"],
-                            stable_weight_decay=group["stable_weight_decay"],
-                            eps=group["eps"],
-                            eps2=group["eps2"],
-                            eps_floor=group["eps_floor"],
-                            adaptive_clip=group["adaptive_clip"],
-                            adaptive_clip_eps=group["adaptive_clip_eps"],
-                            adaptive_clip_type=group["adaptive_clip_type"],
-                            debias_beta2=group["debias_beta2"],
-                            use_beta2_warmup=group["use_beta2_warmup"],
-                            beta2_warmup_initial=group["beta2_warmup_initial"],
-                            beta2_warmup_steps=group["beta2_warmup_steps"],
-                            mars_gamma=group["mars_gamma"],
-                            fisher=group["fisher"],
-                            update_strategy=group["update_strategy"],
-                            stable_update=group["stable_update"],
-                            stable_update_clip_threshold=group["stable_update_clip_threshold"],
-                            atan2_denom=group["atan2_denom"],
-                            use_orthograd=group["use_orthograd"],
-                            spam_clipping_threshold = group["spam_clipping_threshold"],
-                            spam_clipping_type = group["spam_clipping_type"],
-                            spam_clipping_eps = group["spam_clipping_eps"],
-                            use_focus=group["use_focus"],
-                            focus_gamma=group["focus_gamma"],
-                            focus_beta=group["focus_beta"],
-                            apply_spam_clipping = apply_spam_clipping,
-                            reset_momentum = reset_momentum,
-                            spam_warmup_scaling_factor = group["spam_warmup_scaling_factor"],
-                            adopt_clip=adopt_clip,
-                            sf_checkpoint=checkpoint,
-                            sf_adaptive_y_lr=adaptive_y_lr,
-                            swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] and group["weight_decay"] > 0 else None,
-                            swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] and group["weight_decay"] > 0 else None,
-                        )
+                        if self.torch_compile:
+                            torch.compile(single_param_ADOPTAOScheduleFree, fullgraph=True, dynamic=False)(
+                                p=p.detach(),
+                                grad=grad,
+                                step=state["step"],
+                                z=state["z"],
+                                exp_avg_sq=state["exp_avg_sq"],
+                                previous_grad=state["previous_grad"] if mars_gamma > 0 else None,
+                                pbar=state["pbar"] if group["use_focus"] else None,
+                                lr=group["lr"],
+                                beta1=group["betas"][0],
+                                beta2=group["betas"][1],
+                                weight_decay=group["weight_decay"],
+                                weight_decouple=group["weight_decouple"],
+                                stable_weight_decay=group["stable_weight_decay"],
+                                eps=group["eps"],
+                                eps2=group["eps2"],
+                                eps_floor=group["eps_floor"],
+                                adaptive_clip=group["adaptive_clip"],
+                                adaptive_clip_eps=group["adaptive_clip_eps"],
+                                adaptive_clip_type=group["adaptive_clip_type"],
+                                debias_beta2=group["debias_beta2"],
+                                use_beta2_warmup=group["use_beta2_warmup"],
+                                beta2_warmup_initial=group["beta2_warmup_initial"],
+                                beta2_warmup_steps=group["beta2_warmup_steps"],
+                                mars_gamma=group["mars_gamma"],
+                                fisher=group["fisher"],
+                                update_strategy=group["update_strategy"],
+                                stable_update=group["stable_update"],
+                                stable_update_clip_threshold=group["stable_update_clip_threshold"],
+                                atan2_denom=group["atan2_denom"],
+                                use_orthograd=group["use_orthograd"],
+                                spam_clipping_threshold = group["spam_clipping_threshold"],
+                                spam_clipping_type = group["spam_clipping_type"],
+                                spam_clipping_eps = group["spam_clipping_eps"],
+                                use_focus=group["use_focus"],
+                                focus_gamma=group["focus_gamma"],
+                                focus_beta=group["focus_beta"],
+                                apply_spam_clipping = apply_spam_clipping,
+                                reset_momentum = reset_momentum,
+                                spam_warmup_scaling_factor = group["spam_warmup_scaling_factor"],
+                                adopt_clip=adopt_clip,
+                                sf_checkpoint=checkpoint,
+                                sf_adaptive_y_lr=adaptive_y_lr,
+                                swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] and group["weight_decay"] > 0 else None,
+                                swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] and group["weight_decay"] > 0 else None,
+                            )
+                        else:
+                            single_param_ADOPTAOScheduleFree(
+                                p=p.detach(),
+                                grad=grad,
+                                step=state["step"],
+                                z=state["z"],
+                                exp_avg_sq=state["exp_avg_sq"],
+                                previous_grad=state["previous_grad"] if mars_gamma > 0 else None,
+                                pbar=state["pbar"] if group["use_focus"] else None,
+                                lr=group["lr"],
+                                beta1=group["betas"][0],
+                                beta2=group["betas"][1],
+                                weight_decay=group["weight_decay"],
+                                weight_decouple=group["weight_decouple"],
+                                stable_weight_decay=group["stable_weight_decay"],
+                                eps=group["eps"],
+                                eps2=group["eps2"],
+                                eps_floor=group["eps_floor"],
+                                adaptive_clip=group["adaptive_clip"],
+                                adaptive_clip_eps=group["adaptive_clip_eps"],
+                                adaptive_clip_type=group["adaptive_clip_type"],
+                                debias_beta2=group["debias_beta2"],
+                                use_beta2_warmup=group["use_beta2_warmup"],
+                                beta2_warmup_initial=group["beta2_warmup_initial"],
+                                beta2_warmup_steps=group["beta2_warmup_steps"],
+                                mars_gamma=group["mars_gamma"],
+                                fisher=group["fisher"],
+                                update_strategy=group["update_strategy"],
+                                stable_update=group["stable_update"],
+                                stable_update_clip_threshold=group["stable_update_clip_threshold"],
+                                atan2_denom=group["atan2_denom"],
+                                use_orthograd=group["use_orthograd"],
+                                spam_clipping_threshold = group["spam_clipping_threshold"],
+                                spam_clipping_type = group["spam_clipping_type"],
+                                spam_clipping_eps = group["spam_clipping_eps"],
+                                use_focus=group["use_focus"],
+                                focus_gamma=group["focus_gamma"],
+                                focus_beta=group["focus_beta"],
+                                apply_spam_clipping = apply_spam_clipping,
+                                reset_momentum = reset_momentum,
+                                spam_warmup_scaling_factor = group["spam_warmup_scaling_factor"],
+                                adopt_clip=adopt_clip,
+                                sf_checkpoint=checkpoint,
+                                sf_adaptive_y_lr=adaptive_y_lr,
+                                swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] and group["weight_decay"] > 0 else None,
+                                swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] and group["weight_decay"] > 0 else None,
+                            )
+                        
 
                         if group["weight_decay"] > 0 and group['stable_weight_decay']:
                             swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
@@ -3531,6 +3588,7 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
         state_precision: STATE_PRECISION = 'parameter',
+        torch_compile: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -3574,4 +3632,5 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             focus_gamma=focus_gamma,
             focus_beta=focus_beta,
             debug=debug,
+            torch_compile=torch_compile,
         )
