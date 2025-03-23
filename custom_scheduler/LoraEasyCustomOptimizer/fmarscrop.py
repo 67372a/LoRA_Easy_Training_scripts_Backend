@@ -4,7 +4,7 @@ from .utils import copy_stochastic_, agc, NORM_TYPE, UPDATE_STRATEGY,orthograd
 import math
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.types import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 from torch.optim import Optimizer
 
 # From pytorch_optimizer: https://github.com/kozistr/pytorch_optimizer

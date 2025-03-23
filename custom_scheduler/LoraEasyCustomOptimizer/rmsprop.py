@@ -5,7 +5,7 @@ from typing import Optional, Literal
 
 from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.types import CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import CLOSURE, DEFAULTS, LOSS, PARAMETERS
 
 CLIP_LOC = Literal['gradient', 'update', 'both']
 
