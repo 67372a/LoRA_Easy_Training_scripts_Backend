@@ -3308,7 +3308,7 @@ def single_param_ADOPTAOScheduleFree(
             previous_grad.copy_(temp_grad_f32)
 
     if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
-        grad_f32 = orthograd(p_f32, grad_f32)
+        grad_f32 = orthograd(y_f32, grad_f32)
 
     if spam_clipping_threshold != 0 and apply_spam_clipping and p.numel() >= 2 and p.ndim >= 1:
         grad_f32 = spam_grad_clipping(grad=grad_f32, second_moment=exp_avg_sq_f32, clip_threshold=spam_clipping_threshold, clip_type=spam_clipping_type, spam_clip_eps=spam_clipping_eps)
