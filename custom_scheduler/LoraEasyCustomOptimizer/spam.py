@@ -231,6 +231,7 @@ class StableSPAM(BaseOptimizer):
 
                 grad_norm = torch.norm(grad)
 
+
                 m_norm_t, v_norm_t = state['m_norm_t'], state['v_norm_t']
                 m_norm_t.lerp_(grad_norm, weight=1.0 - self.gamma1 * scale)
                 v_norm_t.lerp_(grad_norm.pow(2), weight=1.0 - self.gamma2)
@@ -238,9 +239,9 @@ class StableSPAM(BaseOptimizer):
                 m_norm_hat = m_norm_t / (1.0 - (self.gamma1 * scale) ** group['step'])
                 v_norm_hat = v_norm_t / (1.0 - self.gamma2 ** group['step'])
 
-                c_norm_t = m_norm_hat.div_(v_norm_hat.sqrt_().add_(curr_eps))
+                c_norm_t = m_norm_hat.div_(v_norm_hat.sqrt().add_(curr_eps))
 
-                grad.div_(grad_norm).mul_(c_norm_t)
+                grad.div_(grad_norm).mul_(c_norm_t.item())
 
                 if self.update_proj_gap > 0 and self.total_step % self.update_proj_gap == 0:
                     state['exp_avg'] = torch.zeros_like(grad)
@@ -259,6 +260,8 @@ class StableSPAM(BaseOptimizer):
                         update = exp_avg * mask
                     if update_strategy in {'grams','both'}:
                         update.copy_(torch.sign(grad) * exp_avg.abs())
+                else:
+                    update = exp_avg
 
                 p_fp32.addcdiv_(update, de_nom, value=-step_size)
 
