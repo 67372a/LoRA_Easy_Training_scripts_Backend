@@ -184,6 +184,14 @@ class AdaGC(BaseOptimizer):
 
                 update = (exp_avg / bias_correction1) / exp_avg_sq.sqrt().div_(bias_correction2_sq).add_(curr_eps)
 
+                if update_strategy in {'cautious','grams'}:
+                    if update_strategy in {'cautious','both'}:
+                        mask = (update * grad > 0).to(grad.dtype)
+                        mask.div_(mask.mean().clamp_(min=1e-3))
+                        update = update * mask
+                    if update_strategy in {'grams','both'}:
+                        update.copy_(torch.sign(grad) * update.abs())
+
                 p_fp32.add_(update, alpha=-group['lr'])
 
                 if p.dtype == torch.bfloat16:
