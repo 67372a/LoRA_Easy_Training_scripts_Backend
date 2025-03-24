@@ -1459,9 +1459,9 @@ class CompassADOPT(BaseOptimizer):
                             update.copy_(torch.sign(update_grad) * update.abs())
 
                     if compass_second_moment_smoothing:
-                        p_fp32.addcdiv_(update * mask, de_nom, value=-step_size)
+                        p_fp32.addcdiv_(update, de_nom, value=-step_size)
                     else:
-                        p_fp32.add_(update * mask, alpha=-step_size)
+                        p_fp32.add_(update, alpha=-step_size)
 
                 if group["weight_decay"] != 0 and group['weight_decouple'] and group['stable_weight_decay']:
                     exp_avg_sq_sum += exp_avg_sq.sum()
