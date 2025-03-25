@@ -77,8 +77,6 @@ class StableSPAM(BaseOptimizer):
         weight_decay: float = 0.0,
         update_proj_gap: int = 1000,
         eps: float = 1e-8,
-        eps2: float = 1e-2,
-        eps_floor: Optional[float] = None,
         use_orthograd: bool = False,
         update_strategy: UPDATE_STRATEGY = 'unmodified',
         **kwargs,
@@ -90,8 +88,8 @@ class StableSPAM(BaseOptimizer):
         self.validate_non_negative(eps, 'eps')
 
         # Override zero to tiny
-        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = torch.finfo(torch.float32).tiny
+        if eps <= 0:
+            eps = torch.finfo(torch.float32).tiny
 
         if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams', 'both'}:
             raise ValueError("Invalid update strategy: {}".format(update_strategy))
@@ -110,8 +108,6 @@ class StableSPAM(BaseOptimizer):
             'betas': betas, 
             'weight_decay': weight_decay, 
             'eps': eps,
-            'eps2': eps2,
-            'eps_floor': eps_floor, 
             'use_orthograd': use_orthograd,
             'update_strategy': update_strategy,
             **kwargs}
@@ -147,7 +143,7 @@ class StableSPAM(BaseOptimizer):
             beta1, beta2 = group['betas']
             beta1 *= scale
 
-            eps, eps2, eps_floor = group['eps'], group['eps2'], group['eps_floor']
+            eps = group['eps'], group['eps2'], group['eps_floor']
             use_orthograd = group['use_orthograd']
             update_strategy  = group['update_strategy']
 
@@ -182,12 +178,6 @@ class StableSPAM(BaseOptimizer):
                 if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
                     grad = orthograd(p_fp32, grad)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
-
                 self.apply_weight_decay(
                     p_fp32,
                     grad=grad,
@@ -220,7 +210,7 @@ class StableSPAM(BaseOptimizer):
                 m_norm_hat = m_norm_t / (1.0 - (self.gamma1 * scale) ** state['step'])
                 v_norm_hat = v_norm_t / (1.0 - self.gamma2 ** state['step'])
 
-                c_norm_t = m_norm_hat / (torch.sqrt(v_norm_hat) + curr_eps)
+                c_norm_t = m_norm_hat / (torch.sqrt(v_norm_hat) + eps)
 
                 if grad_norm > 0:
                     grad = grad / grad_norm * c_norm_t
@@ -241,7 +231,7 @@ class StableSPAM(BaseOptimizer):
                 exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
-                de_nom = exp_avg_sq.sqrt().div_(bias_correction2_sq).add_(curr_eps)
+                de_nom = exp_avg_sq.sqrt().div_(bias_correction2_sq).add_(eps)
 
                 if update_strategy in {'cautious','grams'}:
                     if update_strategy in {'cautious','both'}:
@@ -249,7 +239,7 @@ class StableSPAM(BaseOptimizer):
                         mask.div_(mask.mean().clamp_(min=1e-3))
                         update = exp_avg * mask
                     if update_strategy in {'grams','both'}:
-                        update.copy_(torch.sign(grad) * exp_avg.abs())
+                        update = torch.sign(grad) * exp_avg.abs()
                 else:
                     update = exp_avg
 
