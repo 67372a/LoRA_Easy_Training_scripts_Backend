@@ -149,9 +149,6 @@ class StableSPAM(BaseOptimizer):
 
             eps, eps2, eps_floor = group['eps'], group['eps2'], group['eps_floor']
             use_orthograd = group['use_orthograd']
-            adaptive_clip = group['adaptive_clip']
-            adaptive_clip_eps = group['adaptive_clip_eps']
-            adaptive_clip_type = group['adaptive_clip_type']
             update_strategy  = group['update_strategy']
 
             for p in group['params']:
@@ -231,8 +228,8 @@ class StableSPAM(BaseOptimizer):
                 state["m_norm_t"], state["v_norm_t"]= m_norm_t, v_norm_t
 
                 if self.update_proj_gap > 0 and self.total_step % self.update_proj_gap == 0:
-                    state['exp_avg'] = torch.zeros_like(grad)
-                    state['exp_avg_sq'] = torch.zeros_like(grad)
+                    exp_avg = torch.zeros_like(grad)
+                    exp_avg_sq = torch.zeros_like(grad)
                     state['step'] = 1
 
                 bias_correction1: float = self.debias(beta1, state['step'])
