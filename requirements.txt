@@ -10,4 +10,4 @@ pytorch_optimizer==3.5.0
 wheel==0.45.1
 triton==3.2.0; platform_system == "Linux"
 triton-windows==3.2.0.post17; platform_system == "Windows"
-prodigy-plus-schedule-free==1.9.0
+prodigy-plus-schedule-free==1.9.1

@@ -80,9 +80,6 @@ class StableSPAM(BaseOptimizer):
         eps2: float = 1e-2,
         eps_floor: Optional[float] = None,
         use_orthograd: bool = False,
-        adaptive_clip: Optional[float] = None,
-        adaptive_clip_eps: float = 1e-3,
-        adaptive_clip_type: NORM_TYPE = 'layer',
         update_strategy: UPDATE_STRATEGY = 'unmodified',
         **kwargs,
     ):
@@ -116,9 +113,6 @@ class StableSPAM(BaseOptimizer):
             'eps2': eps2,
             'eps_floor': eps_floor, 
             'use_orthograd': use_orthograd,
-            'adaptive_clip': adaptive_clip,
-            'adaptive_clip_eps': adaptive_clip_eps,
-            'adaptive_clip_type': adaptive_clip_type,
             'update_strategy': update_strategy,
             **kwargs}
         super().__init__(params, defaults)
@@ -129,15 +123,15 @@ class StableSPAM(BaseOptimizer):
     @torch.no_grad()
     def reset(self):
         for group in self.param_groups:
-            group['step'] = 0
             for p in group['params']:
                 state = self.state[p]
 
                 state['exp_avg'] = torch.zeros_like(p)
                 state['exp_avg_sq'] = torch.zeros_like(p)
-                state['m_norm_t'] = torch.zeros(1, device=p.device, dtype=torch.float32)
-                state['v_norm_t'] = torch.zeros(1, device=p.device, dtype=torch.float32)
-                state['m_max_t'] = torch.zeros(1, device=p.device, dtype=torch.float32)
+                state['m_norm_t'] = 0.0
+                state['v_norm_t'] = 0.0
+                state['m_max_t'] = 0.0
+                state['step'] = 0
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
@@ -150,11 +144,6 @@ class StableSPAM(BaseOptimizer):
         scale: float = self.warmup.get_death_rate(self.total_step) if self.warmup is not None else 1.0
 
         for group in self.param_groups:
-            if 'step' not in group:
-                group['step'] = 1
-            else:
-                group['step'] += 1
-
             beta1, beta2 = group['betas']
             beta1 *= scale
 
@@ -164,14 +153,6 @@ class StableSPAM(BaseOptimizer):
             adaptive_clip_eps = group['adaptive_clip_eps']
             adaptive_clip_type = group['adaptive_clip_type']
             update_strategy  = group['update_strategy']
-
-            bias_correction1: float = self.debias(beta1, group['step'])
-            bias_correction2: float = self.debias(beta2, group['step'])
-            bias_correction2_sq: float = math.sqrt(bias_correction2)
-
-            step_size: float = group['lr'] / bias_correction1
-
-            theta_t: float = 1.0 - self.theta ** group['step']
 
             for p in group['params']:
                 if p.grad is None:
@@ -187,9 +168,12 @@ class StableSPAM(BaseOptimizer):
                 if 'exp_avg' not in state:
                     state['exp_avg'] = torch.zeros_like(grad)
                     state['exp_avg_sq'] = torch.zeros_like(grad)
-                    state['m_norm_t'] = torch.zeros(1, device=grad.device, dtype=torch.float32)
-                    state['v_norm_t'] = torch.zeros(1, device=grad.device, dtype=torch.float32)
-                    state['m_max_t'] = torch.zeros(1, device=grad.device, dtype=torch.float32)
+                    state['m_norm_t'] = 0.0
+                    state['v_norm_t'] = 0.0
+                    state['m_max_t'] = 0.0
+                    state['step'] = 0
+
+                state['step'] += 1
 
                 exp_avg, exp_avg_sq, m_max_t = state['exp_avg'], state['exp_avg_sq'], state['m_max_t']
 
@@ -200,9 +184,6 @@ class StableSPAM(BaseOptimizer):
 
                 if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
                     grad = orthograd(p_fp32, grad)
-
-                if adaptive_clip is not None and adaptive_clip > 0 and p.numel() >= 2 and p.ndim >= 1:
-                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()
@@ -219,35 +200,46 @@ class StableSPAM(BaseOptimizer):
                     fixed_decay=False,
                 )
 
-                if grad.ndim >= 1:
-                    max_grad = torch.max(grad.abs())
+                max_grad = torch.max(grad.abs())
 
-                    m_max_t.lerp_(max_grad, weight=1.0 - self.theta)
+                m_max_t = self.theta * m_max_t + (1 - self.theta) * max_grad
+                m_max_t.lerp_(max_grad, weight=1.0 - self.theta)
 
-                    m_max_hat = m_max_t / theta_t
+                m_max_hat = m_max_t / (1.0 - self.theta ** state['step'])
 
-                    mask = grad.abs() > m_max_hat
-                    if mask.sum() > 0:
-                        grad[mask].div_(max_grad).mul_(m_max_hat)
+                mask = grad.abs() > m_max_hat
+                if mask.sum() > 0:
+                    grad[mask] = grad[mask] / max_grad * m_max_hat
+
+                state["m_max_t"] = m_max_t
 
                 grad_norm = torch.norm(grad)
 
-
                 m_norm_t, v_norm_t = state['m_norm_t'], state['v_norm_t']
-                m_norm_t.lerp_(grad_norm, weight=1.0 - self.gamma1 * scale)
-                v_norm_t.lerp_(grad_norm.pow(2), weight=1.0 - self.gamma2)
 
-                m_norm_hat = m_norm_t / (1.0 - (self.gamma1 * scale) ** group['step'])
-                v_norm_hat = v_norm_t / (1.0 - self.gamma2 ** group['step'])
+                m_norm_t = self.gamma1 * scale * m_norm_t + (1 - self.gamma1 * scale) * grad_norm
+                v_norm_t = self.gamma2 * v_norm_t + (1 - self.gamma2) * grad_norm**2
 
-                c_norm_t = m_norm_hat.div_(v_norm_hat.sqrt().add_(curr_eps))
+                m_norm_hat = m_norm_t / (1.0 - (self.gamma1 * scale) ** state['step'])
+                v_norm_hat = v_norm_t / (1.0 - self.gamma2 ** state['step'])
 
-                grad.div_(grad_norm).mul_(c_norm_t.item())
+                c_norm_t = m_norm_hat / (torch.sqrt(v_norm_hat) + curr_eps)
+
+                if grad_norm > 0:
+                    grad = grad / grad_norm * c_norm_t
+
+                state["m_norm_t"], state["v_norm_t"]= m_norm_t, v_norm_t
 
                 if self.update_proj_gap > 0 and self.total_step % self.update_proj_gap == 0:
                     state['exp_avg'] = torch.zeros_like(grad)
                     state['exp_avg_sq'] = torch.zeros_like(grad)
-                    group['step'] = 1
+                    state['step'] = 1
+
+                bias_correction1: float = self.debias(beta1, state['step'])
+                bias_correction2: float = self.debias(beta2, state['step'])
+                bias_correction2_sq: float = math.sqrt(bias_correction2)
+
+                step_size: float = group['lr'] / bias_correction1
 
                 exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
