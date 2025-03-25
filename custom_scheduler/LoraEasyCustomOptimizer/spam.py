@@ -143,7 +143,7 @@ class StableSPAM(BaseOptimizer):
             beta1, beta2 = group['betas']
             beta1 *= scale
 
-            eps = group['eps'], group['eps2'], group['eps_floor']
+            eps = group['eps']
             use_orthograd = group['use_orthograd']
             update_strategy  = group['update_strategy']
 
