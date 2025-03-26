@@ -265,6 +265,8 @@ class SimplifiedAdEMAMix(BaseOptimizer):
     :param weight_decouple: bool. the optimizer uses decoupled weight decay as in AdamW.
     :param fixed_decay: bool. fix weight decay.
     :param eps: float. term added to the denominator to improve numerical stability.
+    :param bias_correction1: bool. whether to use bias_correction in numerator
+    :param bias_correction2: bool. whether to use bias_correction in denominator
     """
 
     def __init__(
@@ -286,6 +288,8 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         update_strategy: UPDATE_STRATEGY = 'unmodified',
+        bias_correction1: bool = False, 
+        bias_correction2: bool = True,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -319,6 +323,8 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             'adaptive_clip_eps': adaptive_clip_eps,
             'adaptive_clip_type': adaptive_clip_type,
             'update_strategy': update_strategy,
+            'bias_correction1': bias_correction1,
+            'bias_correction2': bias_correction2,
         }
 
         super().__init__(params, defaults)
@@ -408,15 +414,6 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                 else:
                     curr_eps = eps
 
-                self.apply_weight_decay(
-                    p=p_fp32,
-                    grad=grad,
-                    lr=group['lr'],
-                    weight_decay=group['weight_decay'],
-                    weight_decouple=group['weight_decouple'],
-                    fixed_decay=group['fixed_decay'],
-                )
-
                 exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
@@ -435,7 +432,21 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                     if update_strategy in {'grams','both'}:
                         update.copy_(torch.sign(grad) * update.abs())
 
-                update.div_(de_nom).div_(math.sqrt(state['den_sum']))
+                update.div_(de_nom).mul_(math.sqrt(state['den_sum']))
+
+                if group['bias_correction1']:
+                    update.div_(state['num_sum'])
+                if group['bias_correction2']:
+                    update.mul_(math.sqrt(state['den_sum']))
+
+                self.apply_weight_decay(
+                    p=p_fp32,
+                    grad=grad,
+                    lr=group['lr'],
+                    weight_decay=group['weight_decay'],
+                    weight_decouple=group['weight_decouple'],
+                    fixed_decay=group['fixed_decay'],
+                )
 
                 p_fp32.add_(update, alpha=-group['lr'])
 
