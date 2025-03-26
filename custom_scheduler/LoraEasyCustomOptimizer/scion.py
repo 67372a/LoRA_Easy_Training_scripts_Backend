@@ -434,7 +434,7 @@ class SCION(BaseOptimizer):
                         fixed_decay=False,
                     )
 
-                if update_strategy in {'cautious','grams'}:
+                if update_strategy in {'cautious','grams','both'}:
                     if update_strategy in {'cautious','both'}:
                         mask = (update * grad > 0).to(grad.dtype)
                         mask.div_(mask.mean().clamp_(min=1e-3))

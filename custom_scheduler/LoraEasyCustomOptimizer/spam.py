@@ -233,7 +233,7 @@ class StableSPAM(BaseOptimizer):
 
                 de_nom = exp_avg_sq.sqrt().div_(bias_correction2_sq).add_(eps)
 
-                if update_strategy in {'cautious','grams'}:
+                if update_strategy in {'cautious','grams','both'}:
                     if update_strategy in {'cautious','both'}:
                         mask = (exp_avg * grad > 0).to(grad.dtype)
                         mask.div_(mask.mean().clamp_(min=1e-3))

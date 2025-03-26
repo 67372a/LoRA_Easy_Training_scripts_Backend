@@ -1450,7 +1450,7 @@ class CompassADOPT(BaseOptimizer):
                     elif group["weight_decay"] != 0:
                         update.add_(p_fp32, alpha=group["weight_decay"])
 
-                    if update_strategy in {'cautious','grams'}:
+                    if update_strategy in {'cautious','grams','both'}:
                         if update_strategy in {'cautious','both'}:
                             mask = (update * update_grad > 0).to(update_grad.dtype)
                             mask.div_(mask.mean().clamp_(min=1e-3))
@@ -2452,7 +2452,7 @@ def single_param_compass(
         if use_focus:
             pbar.copy_(pbar_f32)
 
-    if update_strategy in {'cautious','grams'}:
+    if update_strategy in {'cautious','grams','both'}:
         if update_strategy in {'cautious','both'}:
             mask = (update * update_grad > 0).to(update_grad.dtype)
             mask.div_(mask.mean().clamp_(min=1e-3))
