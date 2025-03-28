@@ -420,6 +420,8 @@ def stable_spam_clipping(state, grad: torch.tensor, step: int, scale: float, eps
             state['ssc_v_norm_t'] = 0.0
             state['ssc_m_max_t'] = 0.0
 
+        m_max_t = state['ssc_m_max_t']
+
         max_grad = torch.max(grad.abs())
 
         m_max_t = theta * m_max_t + (1 - theta) * max_grad
