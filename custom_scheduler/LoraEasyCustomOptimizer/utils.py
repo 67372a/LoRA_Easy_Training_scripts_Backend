@@ -412,3 +412,42 @@ class CosineDecay:
             return self.eta_min
         self.step(current_step)
         return self.sgd.param_groups[0]["lr"]
+    
+@torch.no_grad()
+def stable_spam_clipping(state, grad: torch.tensor, step: int, scale: float, eps: float = 1e-8, gamma1: float = 0.7, gamma2: float = 0.9, theta: float = 0.999):    
+        if 'ssc_m_norm_t' not in state:
+            state['ssc_m_norm_t'] = 0.0
+            state['sscv_norm_t'] = 0.0
+            state['sscm_max_t'] = 0.0
+
+        max_grad = torch.max(grad.abs())
+
+        m_max_t = theta * m_max_t + (1 - theta) * max_grad
+        m_max_t.lerp_(max_grad, weight=1.0 - theta)
+
+        m_max_hat = m_max_t / (1.0 - theta ** step)
+
+        mask = grad.abs() > m_max_hat
+        if mask.sum() > 0:
+            grad[mask] = grad[mask] / max_grad * m_max_hat
+
+        state["ssc_m_max_t"] = m_max_t
+
+        grad_norm = torch.norm(grad)
+
+        m_norm_t, v_norm_t = state['ssc_m_norm_t'], state['ssc_v_norm_t']
+
+        m_norm_t = gamma1 * scale * m_norm_t + (1 - gamma1 * scale) * grad_norm
+        v_norm_t = gamma2 * v_norm_t + (1 - gamma2) * grad_norm**2
+
+        m_norm_hat = m_norm_t / (1.0 - (gamma1 * scale) ** step)
+        v_norm_hat = v_norm_t / (1.0 - gamma2 ** step)
+
+        c_norm_t = m_norm_hat / (torch.sqrt(v_norm_hat) + eps)
+
+        if grad_norm > 0:
+            grad = grad / grad_norm * c_norm_t
+
+        state["ssc_m_norm_t"], state["ssc_v_norm_t"] = m_norm_t, v_norm_t
+
+        return grad

@@ -78,6 +78,7 @@ class StableSPAM(BaseOptimizer):
         update_proj_gap: int = 1000,
         eps: float = 1e-8,
         use_orthograd: bool = False,
+        use_adopt: bool = False,
         update_strategy: UPDATE_STRATEGY = 'unmodified',
         **kwargs,
     ):
@@ -109,6 +110,7 @@ class StableSPAM(BaseOptimizer):
             'weight_decay': weight_decay, 
             'eps': eps,
             'use_orthograd': use_orthograd,
+            'use_adopt':use_adopt,
             'update_strategy': update_strategy,
             **kwargs}
         super().__init__(params, defaults)
@@ -145,6 +147,7 @@ class StableSPAM(BaseOptimizer):
 
             eps = group['eps']
             use_orthograd = group['use_orthograd']
+            use_adopt = group['use_adopt']
             update_strategy  = group['update_strategy']
 
             for p in group['params']:
@@ -167,6 +170,8 @@ class StableSPAM(BaseOptimizer):
                     state['step'] = 0
 
                 state['step'] += 1
+
+                adopt_clip: float = (state['step']-1)**0.25
 
                 exp_avg, exp_avg_sq, m_max_t = state['exp_avg'], state['exp_avg_sq'], state['m_max_t']
 
@@ -226,24 +231,37 @@ class StableSPAM(BaseOptimizer):
                 bias_correction2: float = self.debias(beta2, state['step'])
                 bias_correction2_sq: float = math.sqrt(bias_correction2)
 
-                step_size: float = group['lr'] / bias_correction1
-
-                exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-
-                de_nom = exp_avg_sq.sqrt().div_(bias_correction2_sq).add_(eps)
-
-                if update_strategy in {'cautious','grams','both'}:
-                    if update_strategy in {'cautious','both'}:
-                        mask = (exp_avg * grad > 0).to(grad.dtype)
-                        mask.div_(mask.mean().clamp_(min=1e-3))
-                        update = exp_avg * mask
-                    if update_strategy in {'grams','both'}:
-                        update = torch.sign(grad) * exp_avg.abs()
+                if use_adopt:
+                    step_size: float = group['lr']
                 else:
-                    update = exp_avg
+                    step_size: float = group['lr'] / bias_correction1
 
-                p_fp32.addcdiv_(update, de_nom, value=-step_size)
+                if use_adopt and state['step'] == 1:
+                    exp_avg_sq.addcmul_(grad, grad)
+                else:
+                    exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+
+                    if use_adopt:
+                        de_nom = exp_avg_sq.sqrt().add_(eps)
+                        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                    else:   
+                        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                        de_nom = exp_avg_sq.sqrt().div_(bias_correction2_sq).add_(eps)
+
+                    update = exp_avg.div(de_nom)
+
+                    if use_adopt:
+                        update.clamp_(-adopt_clip, adopt_clip)
+
+                    if update_strategy in {'cautious','grams','both'}:
+                        if update_strategy in {'cautious','both'}:
+                            mask = (update * grad > 0).to(grad.dtype)
+                            mask.div_(mask.mean().clamp_(min=1e-3))
+                            update.mul_(mask)
+                        if update_strategy in {'grams','both'}:
+                            update.copy_(torch.sign(grad) * update.abs())
+
+                    p_fp32.add_(update, alpha=-step_size)
 
                 if p.dtype == torch.bfloat16:
                     copy_stochastic_(state["exp_avg"], exp_avg)
