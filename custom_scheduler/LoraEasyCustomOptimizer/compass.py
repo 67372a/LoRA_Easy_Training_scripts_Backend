@@ -1390,7 +1390,8 @@ class CompassADOPT(BaseOptimizer):
                 if adaptive_clip is not None and adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
-                elif use_stable_spam_clipping:
+                
+                if use_stable_spam_clipping:
                     grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], scale=scale)
 
                 if eps_floor is not None and eps_floor < eps:
