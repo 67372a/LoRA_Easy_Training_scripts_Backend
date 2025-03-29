@@ -414,7 +414,13 @@ class CosineDecay:
         return self.sgd.param_groups[0]["lr"]
     
 @torch.no_grad()
-def stable_spam_clipping(state, grad: torch.tensor, step: int, scale: float, eps: float = 1e-8, gamma1: float = 0.7, gamma2: float = 0.9, theta: float = 0.999):    
+def stable_spam_clipping(state, grad: torch.tensor, 
+                         step: int, 
+                         scale: float, 
+                         eps: float = 1e-8, 
+                         gamma1: float = 0.85, 
+                         gamma2: float = 0.99999, 
+                         gamma3: float = 0.999):    
         if 'ssc_m_norm_t' not in state:
             state['ssc_m_norm_t'] = 0.0
             state['ssc_v_norm_t'] = 0.0
@@ -424,10 +430,10 @@ def stable_spam_clipping(state, grad: torch.tensor, step: int, scale: float, eps
 
         max_grad = torch.max(grad.abs())
 
-        m_max_t = theta * m_max_t + (1 - theta) * max_grad
-        m_max_t.lerp_(max_grad, weight=1.0 - theta)
+        m_max_t = gamma3 * m_max_t + (1 - gamma3) * max_grad
+        m_max_t.lerp_(max_grad, weight=1.0 - gamma3)
 
-        m_max_hat = m_max_t / (1.0 - theta ** step)
+        m_max_hat = m_max_t / (1.0 - gamma3 ** step)
 
         mask = grad.abs() > m_max_hat
         if mask.sum() > 0:

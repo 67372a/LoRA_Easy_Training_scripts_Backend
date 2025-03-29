@@ -56,7 +56,7 @@ class StableSPAM(BaseOptimizer):
     :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
     :param gamma1: float.
     :param gamma2: float.
-    :param theta: float.
+    :param gamma3: float.
     :param t_max: Optional[int]. total number of steps.
     :param eta_min: float. eta_min of CosineDecay.
     :param weight_decay: float. weight decay (L2 penalty).
@@ -69,9 +69,9 @@ class StableSPAM(BaseOptimizer):
         params: PARAMETERS,
         lr: float = 1e-3,
         betas: BETAS = (0.9, 0.999),
-        gamma1: float = 0.7,
-        gamma2: float = 0.9,
-        theta: float = 0.999,
+        gamma1: float = 0.85,
+        gamma2: float = 0.99999,
+        gamma3: float = 0.999,
         t_max: Optional[int] = None,
         eta_min: float = 0.5,
         weight_decay: float = 0.0,
@@ -97,7 +97,7 @@ class StableSPAM(BaseOptimizer):
 
         self.gamma1: float = betas[0] if gamma1 == -1.0 else gamma1
         self.gamma2: float = gamma2
-        self.theta: float = theta
+        self.gamma3: float = gamma3
         self.t_max = t_max
         self.update_proj_gap = update_proj_gap
         self.warmup = CosineDecay(1.0, t_max, eta_min=eta_min) if t_max is not None else None
@@ -194,10 +194,10 @@ class StableSPAM(BaseOptimizer):
 
                 max_grad = torch.max(grad.abs())
 
-                m_max_t = self.theta * m_max_t + (1 - self.theta) * max_grad
-                m_max_t.lerp_(max_grad, weight=1.0 - self.theta)
+                m_max_t = self.gamma3 * m_max_t + (1 - self.gamma3) * max_grad
+                m_max_t.lerp_(max_grad, weight=1.0 - self.gamma3)
 
-                m_max_hat = m_max_t / (1.0 - self.theta ** state['step'])
+                m_max_hat = m_max_t / (1.0 - self.gamma3 ** state['step'])
 
                 mask = grad.abs() > m_max_hat
                 if mask.sum() > 0:
