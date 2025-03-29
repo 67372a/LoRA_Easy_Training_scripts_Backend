@@ -521,8 +521,10 @@ def stable_spam_clipping_tensors(
         m_max_hat = m_max_t / (1.0 - gamma3 ** step)
 
         mask = grad.abs() > m_max_hat
-        if mask.sum() > 0:
-            grad[mask] = grad[mask] / max_grad * m_max_hat
+
+        grad = torch.where(mask.sum() > 0,
+                           grad / max_grad * m_max_hat,
+                           grad)
 
         grad_norm = torch.norm(grad)
 
@@ -539,7 +541,8 @@ def stable_spam_clipping_tensors(
 
         c_norm_t = m_norm_hat / (torch.sqrt(v_norm_hat) + eps)
 
-        if grad_norm > 0:
-            grad = grad / grad_norm * c_norm_t
+        grad = torch.where(grad_norm > 0,
+                           grad / grad_norm * c_norm_t,
+                           grad)
 
         return grad

@@ -1,6 +1,6 @@
 # Source: https://github.com/facebookresearch/schedule_free/blob/main/schedulefree/wrap_schedulefree.py
 # Modified to be an actual optimizer, allowing it to wrap any optimizer and work in Kohya's
-from typing import Callable, Dict, Optional, Tuple, Union, List, Literal
+from typing import Dict, Optional,Literal
 
 import torch
 from torch.optim import Optimizer
@@ -14,7 +14,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError
 from .utils import (copy_stochastic_, NORM_TYPE, agc, 
                     STATE_PRECISION, orthograd, schedule_beta_tc, 
                     spam_grad_clipping, CLIP_TYPE, clean_dict_params,
-                    CosineDecay, spam_grad_clipping_logging, unit_norm_logging)
+                    CosineDecay, spam_grad_clipping_logging, stable_spam_clipping_tensors, SSCCosineDecay)
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
@@ -2774,6 +2774,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
         use_focus,
         focus_gamma,
         focus_beta,
+        use_stable_spam_clipping,
+        ssc_t_max,
         debug,
         *,
         block_size,
@@ -2851,6 +2853,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             focus_gamma=focus_gamma,
             focus_beta=focus_beta,
             debug=debug,
+            use_stable_spam_clipping=use_stable_spam_clipping,
+            ssc_t_max=ssc_t_max,
         )
         super().__init__(params, defaults)
         self.block_size = block_size
@@ -2892,7 +2896,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("spam_momentum_reset_warmup_steps", 20)
             group.setdefault("spam_momentum_reset_interval_steps", 41)
             #Mark CosineDecay as safe for deserialization
-            torch.serialization.add_safe_globals([CosineDecay, torch.optim.SGD, defaultdict, dict, torch.optim.lr_scheduler.CosineAnnealingLR])
+            torch.serialization.add_safe_globals([CosineDecay, torch.optim.SGD, defaultdict, dict, torch.optim.lr_scheduler.CosineAnnealingLR, SSCCosineDecay])
             group.setdefault("spam_momentum_reset_warmup_scheduler", CosineDecay(0.99, group.get("spam_momentum_reset_warmup_steps")))
             group.setdefault("spam_momentum_reset_warmup_scheduler_current_step", group.get("spam_momentum_reset_warmup_steps"))
             group.setdefault("spam_warmup_scaling_factor", torch.tensor(1.0, dtype=torch.float32, device=device))
@@ -2903,6 +2907,9 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
             group.setdefault("focus_gamma", 0.1)
             group.setdefault("focus_beta", 0.9)
             group.setdefault("debug", False)
+            group.setdefault("use_stable_spam_clipping", False)
+            group.setdefault("ssc_t_max", None)
+            group.setdefault("ssc_warmup", SSCCosineDecay(1.0, group['ssc_t_max'], eta_min=0.5) if group['use_stable_spam_clipping'] and group['ssc_t_max'] is not None else None)
             
 
     # bring your own function to create zero-filled subclass
@@ -3045,6 +3052,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                 mars_gamma = group["mars_gamma"]
                 beta1 = group["betas"][0]
                 fisher = group["fisher"]
+                use_stable_spam_clipping = group["use_stable_spam_clipping"]
+                ssc_warmup = group["ssc_warmup"]
 
                 if group["use_spam_momentum_reset"]:
                     group["spam_warmup_scaling_factor"].fill_(1 - group["spam_momentum_reset_warmup_scheduler"].get_dr(group["spam_momentum_reset_warmup_scheduler_current_step"]))
@@ -3099,8 +3108,16 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                                 state["previous_grad"].copy_(_fp32_to_bf16_sr(p.grad.float()))
                             else:
                                 state["previous_grad"].copy_(p.grad.float())
+                        if use_stable_spam_clipping:
+                            state['ssc_scale'] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
+                            state['ssc_m_norm_t'] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
+                            state['ssc_v_norm_t'] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
+                            state['ssc_m_max_t'] = torch.tensor(0.0, device=p.device, dtype=torch.float32)
 
                     state["step"] = state["step"].add_(1)
+
+                    if use_stable_spam_clipping:
+                        state['ssc_scale'].copy_(ssc_warmup.get_death_rate(state['step']) if ssc_warmup is not None else 1.0)
 
                     if not isinstance(group["lr"], torch.Tensor):
                         raise RuntimeError(
@@ -3126,7 +3143,7 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         if group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
                             grad_f32 = orthograd(p_f32, grad_f32)
 
-                        if group["adaptive_clip"] > 0 and p.numel() >= 2 and p.ndim >= 1:
+                        if group["adaptive_clip"] > 0:
                             grad_f32 = agc(p=p_f32, 
                                            grad=grad_f32, 
                                            agc_clip_val=group["adaptive_clip"], 
@@ -3202,6 +3219,11 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                                 sf_adaptive_y_lr=adaptive_y_lr,
                                 swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] and group["weight_decay"] > 0 else None,
                                 swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] and group["weight_decay"] > 0 else None,
+                                use_stable_spam_clipping=group["use_stable_spam_clipping"],
+                                ssc_scale=state['ssc_scale'] if group["use_stable_spam_clipping"] else None,
+                                ssc_m_norm_t=state['ssc_m_norm_t'] if group["use_stable_spam_clipping"] else None,
+                                ssc_v_norm_t=state['ssc_v_norm_t'] if group["use_stable_spam_clipping"] else None,
+                                ssc_m_max_t=state['ssc_m_max_t'] if group["use_stable_spam_clipping"] else None,
                             )
                         else:
                             single_param_ADOPTAOScheduleFree(
@@ -3249,9 +3271,13 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                                 sf_adaptive_y_lr=adaptive_y_lr,
                                 swd_second_moment_mean_sqrt=group['swd_second_moment_mean_sqrt'] if group["stable_weight_decay"] and group["weight_decay"] > 0 else None,
                                 swd_second_moment_parameter_sum=state["swd_second_moment_parameter_sum"] if group["stable_weight_decay"] and group["weight_decay"] > 0 else None,
+                                use_stable_spam_clipping=group["use_stable_spam_clipping"],
+                                ssc_scale=state['ssc_scale'] if group["use_stable_spam_clipping"] else None,
+                                ssc_m_norm_t=state['ssc_m_norm_t'] if group["use_stable_spam_clipping"] else None,
+                                ssc_v_norm_t=state['ssc_v_norm_t'] if group["use_stable_spam_clipping"] else None,
+                                ssc_m_max_t=state['ssc_m_max_t'] if group["use_stable_spam_clipping"] else None,
                             )
                         
-
                         if group["weight_decay"] > 0 and group['stable_weight_decay']:
                             swd_second_moment_group_sum += state["swd_second_moment_parameter_sum"].item()
 
@@ -3325,6 +3351,11 @@ def single_param_ADOPTAOScheduleFree(
     sf_adaptive_y_lr: torch.Tensor,
     swd_second_moment_mean_sqrt: torch.Tensor,
     swd_second_moment_parameter_sum: torch.Tensor,
+    use_stable_spam_clipping: bool,
+    ssc_scale=torch.Tensor,
+    ssc_m_norm_t=torch.Tensor,
+    ssc_v_norm_t=torch.Tensor,
+    ssc_m_max_t= torch.Tensor,
 ):
     # compute in FP32 for accurate calculations
     p_f32 = p.float()
@@ -3370,8 +3401,11 @@ def single_param_ADOPTAOScheduleFree(
     if spam_clipping_threshold != 0 and apply_spam_clipping and p.numel() >= 2 and p.ndim >= 1:
         grad_f32 = spam_grad_clipping(grad=grad_f32, second_moment=exp_avg_sq_f32, clip_threshold=spam_clipping_threshold, clip_type=spam_clipping_type, spam_clip_eps=spam_clipping_eps)
 
-    if adaptive_clip > 0 and p.numel() >= 2 and p.ndim >= 1:
+    if adaptive_clip > 0:
         grad_f32 = agc(p=y_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
+
+    if use_stable_spam_clipping:
+        grad_f32 = stable_spam_clipping_tensors(ssc_m_norm_t=ssc_m_norm_t,ssc_v_norm_t=ssc_v_norm_t,ssc_m_max_t=ssc_m_max_t, grad=grad, step=step, scale=ssc_scale)
 
     if eps_floor is not None and eps_floor < eps:
         rms_grad = grad_f32.pow(2).mean().sqrt_()
@@ -3584,6 +3618,8 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
         focus_gamma: float = 0.1,
         focus_beta: float = 0.9,
         debug: bool = False,
+        use_stable_spam_clipping: bool = False,
+        ssc_t_max: Optional[int] = None,
         *,
         block_size: Optional[int] = None,
         min_quant_size: int = 4096,
@@ -3631,6 +3667,8 @@ class ADOPTAOScheduleFree(_ADOPTAOScheduleFreeBase):
             use_focus=use_focus,
             focus_gamma=focus_gamma,
             focus_beta=focus_beta,
+            use_stable_spam_clipping=use_stable_spam_clipping,
+            ssc_t_max=ssc_t_max,
             debug=debug,
             torch_compile=torch_compile,
         )
