@@ -323,7 +323,7 @@ class ProdigyPlusExMachinaScheduleFree(CoreOptimiser):
 
             # Prodigy works best with unscaled gradients during early steps.
             if not group['use_speed'] and group['d'] <= group['d0']:
-                if group["adaptive_clip"] > 0.0 and p.numel() >= 2 and p.ndim >= 1:
+                if group["adaptive_clip"] > 0.0:
                     grad = agc(p=y, 
                                     grad=grad, 
                                     agc_clip_val=group["adaptive_clip"], 

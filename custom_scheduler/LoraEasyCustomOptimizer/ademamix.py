@@ -9,7 +9,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, orthograd, agc
+from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, orthograd, agc, stable_spam_clipping, SSCCosineDecay
 
 
 class AdEMAMix(BaseOptimizer):
@@ -290,6 +290,8 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         update_strategy: UPDATE_STRATEGY = 'unmodified',
         bias_correction1: bool = False, 
         bias_correction2: bool = True,
+        use_stable_spam_clipping:bool = False,
+        ssc_t_max: Optional[int] = None,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -298,6 +300,9 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         self.validate_non_negative(min_beta1, 'min_beta1')
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
+
+        self.ssc_t_max = ssc_t_max
+        self.warmup = SSCCosineDecay(1.0, ssc_t_max, eta_min=0.5) if ssc_t_max is not None else None
 
         # Override zero to tiny
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
@@ -325,6 +330,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             'update_strategy': update_strategy,
             'bias_correction1': bias_correction1,
             'bias_correction2': bias_correction2,
+            'use_stable_spam_clipping':use_stable_spam_clipping,
         }
 
         super().__init__(params, defaults)
@@ -373,6 +379,11 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             adaptive_clip_type = group['adaptive_clip_type']
             update_strategy  = group['update_strategy']
 
+            use_stable_spam_clipping = group["use_stable_spam_clipping"]
+
+            if use_stable_spam_clipping:
+                scale: float = self.warmup.get_death_rate(group['step']) if self.warmup is not None else 1.0
+
             if group['beta1_warmup']:
                 beta1 = self.linear_hl_warmup_scheduler(
                     group['step'], beta_end=beta1, beta_start=group['min_beta1'], warmup=group['beta1_warmup']
@@ -405,8 +416,11 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                 if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
                     grad = orthograd(p_fp32, grad)
 
-                if adaptive_clip is not None and adaptive_clip > 0 and p.numel() >= 2 and p.ndim >= 1:
+                if adaptive_clip is not None and adaptive_clip > 0:
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
+
+                if use_stable_spam_clipping:
+                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], scale=scale)
 
                 if eps_floor is not None and eps_floor < eps:
                     rms_grad = grad.pow(2).mean().sqrt_()

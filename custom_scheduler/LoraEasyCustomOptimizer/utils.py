@@ -1,6 +1,8 @@
 import torch
 from typing import Tuple, Union, Type, Literal, Optional
-from torch.optim import Optimizer
+from torch.nn import Parameter, ParameterList
+from torch.optim import SGD, Optimizer
+from torch.optim.lr_scheduler import CosineAnnealingLR, LRScheduler
 import math
 import inspect
 import logging
@@ -413,6 +415,40 @@ class CosineDecay:
         self.step(current_step)
         return self.sgd.param_groups[0]["lr"]
     
+class SSCCosineDecay:
+    r"""Applies cosine decay to a parameter (death_rate), using PyTorch's built-in `CosineAnnealingLR`.
+
+    :param death_rate: float. initial value to be decayed.
+    :param t_max: int. maximum number of iterations for the decay.
+    :param eta_min: Optional[float]. minimum value of the parameter after decay. defaults to 0.
+    :param last_epoch: Optional[int]. the index of the last epoch. Defaults to -1.
+    """
+
+    def __init__(self, death_rate: float, t_max: int, eta_min: float = 0.0, last_epoch: int = -1):
+        self.sgd: Optimizer = SGD(ParameterList([Parameter(torch.zeros(1))]), lr=death_rate)
+        self.cosine_stepper: LRScheduler = CosineAnnealingLR(self.sgd, t_max + 1, eta_min, last_epoch)
+        self.t_max = t_max
+        self.eta_min = eta_min
+
+    def step(self, current_step: int) -> None:
+        r"""One step of the cosine decay scheduler.
+
+        :param current_step: int. Current step index.
+        """
+        self.cosine_stepper.step(current_step)
+
+    def get_death_rate(self, current_step: int) -> float:
+        r"""Get the updated rate (death_rate) at the given step.
+
+        :param current_step: int. Current step index.
+        """
+        if current_step >= self.t_max:
+            return self.eta_min
+
+        self.step(current_step)
+
+        return self.sgd.param_groups[0]['lr']
+    
 @torch.no_grad()
 def stable_spam_clipping(state, grad: torch.tensor, 
                          step: int, 
@@ -433,13 +469,13 @@ def stable_spam_clipping(state, grad: torch.tensor,
         m_max_t = gamma3 * m_max_t + (1 - gamma3) * max_grad
         m_max_t.lerp_(max_grad, weight=1.0 - gamma3)
 
+        state["ssc_m_max_t"] = m_max_t
+
         m_max_hat = m_max_t / (1.0 - gamma3 ** step)
 
         mask = grad.abs() > m_max_hat
         if mask.sum() > 0:
             grad[mask] = grad[mask] / max_grad * m_max_hat
-
-        state["ssc_m_max_t"] = m_max_t
 
         grad_norm = torch.norm(grad)
 
@@ -457,5 +493,53 @@ def stable_spam_clipping(state, grad: torch.tensor,
             grad = grad / grad_norm * c_norm_t
 
         state["ssc_m_norm_t"], state["ssc_v_norm_t"] = m_norm_t, v_norm_t
+
+        return grad
+
+@torch.no_grad()
+def stable_spam_clipping_tensors(
+    ssc_m_norm_t: torch.tensor,
+    ssc_v_norm_t: torch.tensor,
+    ssc_m_max_t: torch.tensor, 
+    grad: torch.tensor, 
+    step: int, 
+    scale: float, 
+    eps: float = 1e-8, 
+    gamma1: float = 0.85, 
+    gamma2: float = 0.99999, 
+    gamma3: float = 0.999):    
+
+        m_max_t = ssc_m_norm_t
+
+        max_grad = torch.max(grad.abs())
+
+        m_max_t = gamma3 * m_max_t + (1 - gamma3) * max_grad
+        m_max_t.lerp_(max_grad, weight=1.0 - gamma3)
+
+        ssc_m_norm_t.copy_(m_max_t)
+
+        m_max_hat = m_max_t / (1.0 - gamma3 ** step)
+
+        mask = grad.abs() > m_max_hat
+        if mask.sum() > 0:
+            grad[mask] = grad[mask] / max_grad * m_max_hat
+
+        grad_norm = torch.norm(grad)
+
+        m_norm_t, v_norm_t = ssc_m_norm_t, ssc_m_max_t
+
+        m_norm_t = gamma1 * scale * m_norm_t + (1 - gamma1 * scale) * grad_norm
+        v_norm_t = gamma2 * v_norm_t + (1 - gamma2) * grad_norm**2
+
+        ssc_m_norm_t.copy_(m_norm_t)
+        ssc_v_norm_t.copy_(v_norm_t)
+
+        m_norm_hat = m_norm_t / (1.0 - (gamma1 * scale) ** step)
+        v_norm_hat = v_norm_t / (1.0 - gamma2 ** step)
+
+        c_norm_t = m_norm_hat / (torch.sqrt(v_norm_hat) + eps)
+
+        if grad_norm > 0:
+            grad = grad / grad_norm * c_norm_t
 
         return grad

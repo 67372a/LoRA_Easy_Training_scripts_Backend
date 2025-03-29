@@ -1,6 +1,5 @@
 # Authored by: https://github.com/kozistr
 import math
-from typing import Literal
 from enum import IntEnum
 
 import torch
@@ -9,8 +8,8 @@ from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import CLOSURE, DEFAULTS, LOSS, PARAMETERS
 from pytorch_optimizer.optimizer.shampoo_utils import zero_power_via_newton_schulz_5
-from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, orthograd, agc
-from typing import Callable, Dict, Optional, Tuple, Union, List, Literal
+from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, orthograd, agc, stable_spam_clipping, SSCCosineDecay
+from typing import Dict, Optional
 
 class LMONorm(IntEnum):
     r"""normalization types."""
@@ -334,11 +333,16 @@ class SCION(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         update_strategy: UPDATE_STRATEGY = 'unmodified',
+        use_stable_spam_clipping:bool = False,
+        ssc_t_max: Optional[int] = None,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
         self.validate_range(momentum, 'momentum', 0.0, 1.0, '(]')
         self.validate_positive(scale, 'scale')
+
+        self.ssc_t_max = ssc_t_max
+        self.warmup = SSCCosineDecay(1.0, ssc_t_max, eta_min=0.5) if ssc_t_max is not None else None
 
         if norm_kwargs is None:
             norm_kwargs = {}
@@ -357,6 +361,7 @@ class SCION(BaseOptimizer):
             'adaptive_clip_eps': adaptive_clip_eps,
             'adaptive_clip_type': adaptive_clip_type,
             'update_strategy': update_strategy,
+            'use_stable_spam_clipping':use_stable_spam_clipping,
         }
         super().__init__(params, defaults)
 
@@ -391,6 +396,11 @@ class SCION(BaseOptimizer):
             adaptive_clip_type = group['adaptive_clip_type']
             update_strategy  = group['update_strategy']
 
+            use_stable_spam_clipping = group["use_stable_spam_clipping"]
+
+            if use_stable_spam_clipping:
+                scale: float = self.warmup.get_death_rate(group['step']) if self.warmup is not None else 1.0
+
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -414,8 +424,11 @@ class SCION(BaseOptimizer):
                 if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
                     grad = orthograd(p_fp32, grad)
 
-                if adaptive_clip is not None and adaptive_clip > 0 and p.numel() >= 2 and p.ndim >= 1:
+                if adaptive_clip is not None and adaptive_clip > 0:
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
+
+                if use_stable_spam_clipping:
+                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], scale=scale)
 
                 d.mul_(1.0 - group['momentum']).add_(grad, alpha=group['momentum'])
 
@@ -569,7 +582,7 @@ class SCIONLight(BaseOptimizer):
                 if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
                     grad = orthograd(p_fp32, grad)
 
-                if adaptive_clip is not None and adaptive_clip > 0 and p.numel() >= 2 and p.ndim >= 1:
+                if adaptive_clip is not None and adaptive_clip > 0:
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 update = norm.lmo(grad).mul_(group['scale'])

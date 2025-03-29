@@ -4,15 +4,13 @@
 # Defaults tuned for lora training based on testing
 
 import torch
-from torch.nn import Parameter, ParameterList
-from torch.optim import SGD, Optimizer
-from torch.optim.lr_scheduler import CosineAnnealingLR, LRScheduler
-from .utils import (schedule_beta_tc, orthograd, CosineDecay, CLIP_TYPE, copy_stochastic_, agc, 
+from torch.optim import Optimizer
+from .utils import (orthograd, CosineDecay, CLIP_TYPE, copy_stochastic_, agc, 
                     NORM_TYPE, create_factored_dims, get_denom, update_second_moment, STATE_PRECISION, 
-                    UPDATE_STRATEGY, spam_grad_clipping_logging, spam_grad_clipping, stable_spam_clipping)
+                    UPDATE_STRATEGY, spam_grad_clipping_logging, spam_grad_clipping, stable_spam_clipping, SSCCosineDecay)
 import math
 from torch.nn.functional import softplus
-from typing import Optional, Literal
+from typing import Optional
 import logging
 
 from bitsandbytes.functional import quantize_blockwise, dequantize_blockwise
@@ -20,7 +18,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParamete
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 from pytorch_optimizer.optimizer.gradient_centralization import centralize_gradient
-from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm, get_global_gradient_norm
+from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
@@ -1211,7 +1209,7 @@ class CompassADOPT(BaseOptimizer):
         self.validate_non_negative(eps, 'eps')
 
         self.ssc_t_max = ssc_t_max
-        self.warmup = CosineDecay(1.0, ssc_t_max, eta_min=0.5) if ssc_t_max is not None else None
+        self.warmup = SSCCosineDecay(1.0, ssc_t_max, eta_min=0.5) if ssc_t_max is not None else None
 
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
@@ -2090,7 +2088,7 @@ class _CompassBase(Optimizer):
                         if group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
                             grad_f32 = orthograd(p_f32, grad_f32)
 
-                        if group["adaptive_clip"] > 0 and p.numel() >= 2 and p.ndim >= 1:
+                        if group["adaptive_clip"] > 0:
                             grad_f32 = agc(p=p_f32, 
                                            grad=grad_f32, 
                                            agc_clip_val=group["adaptive_clip"], 
@@ -2317,7 +2315,7 @@ def single_param_compass(
     if spam_clipping_threshold != 0 and apply_spam_clipping and p.numel() >= 2 and p.ndim >= 1:
         grad_f32 = spam_grad_clipping(grad=grad_f32, second_moment=exp_avg_sq_f32, clip_threshold=spam_clipping_threshold, clip_type=spam_clipping_type, spam_clip_eps=spam_clipping_eps)
 
-    if adaptive_clip > 0 and p.numel() >= 2 and p.ndim >= 1:
+    if adaptive_clip > 0:
         grad_f32 = agc(p=p_f32, grad=grad_f32, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
     if eps_floor is not None and eps_floor < eps:
@@ -2622,36 +2620,3 @@ class CompassAO(_CompassBase):
             torch_compile=torch_compile,
         )
 
-class CosineDecay:
-    r"""Applies cosine decay to a parameter (death_rate), using PyTorch's built-in `CosineAnnealingLR`.
-
-    :param death_rate: float. initial value to be decayed.
-    :param t_max: int. maximum number of iterations for the decay.
-    :param eta_min: Optional[float]. minimum value of the parameter after decay. defaults to 0.
-    :param last_epoch: Optional[int]. the index of the last epoch. Defaults to -1.
-    """
-
-    def __init__(self, death_rate: float, t_max: int, eta_min: float = 0.0, last_epoch: int = -1):
-        self.sgd: Optimizer = SGD(ParameterList([Parameter(torch.zeros(1))]), lr=death_rate)
-        self.cosine_stepper: LRScheduler = CosineAnnealingLR(self.sgd, t_max + 1, eta_min, last_epoch)
-        self.t_max = t_max
-        self.eta_min = eta_min
-
-    def step(self, current_step: int) -> None:
-        r"""One step of the cosine decay scheduler.
-
-        :param current_step: int. Current step index.
-        """
-        self.cosine_stepper.step(current_step)
-
-    def get_death_rate(self, current_step: int) -> float:
-        r"""Get the updated rate (death_rate) at the given step.
-
-        :param current_step: int. Current step index.
-        """
-        if current_step >= self.t_max:
-            return self.eta_min
-
-        self.step(current_step)
-
-        return self.sgd.param_groups[0]['lr']

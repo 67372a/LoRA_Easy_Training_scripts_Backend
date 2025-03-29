@@ -1,52 +1,12 @@
 # Authored originally by: https://github.com/kozistr
 import math
-from typing import Optional
-
 import torch
-from torch.nn import Parameter, ParameterList
-from torch.optim import SGD, Optimizer
-from torch.optim.lr_scheduler import CosineAnnealingLR, LRScheduler
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, orthograd, agc
-from typing import Callable, Dict, Optional, Tuple, Union, List, Literal
-
-
-class CosineDecay:
-    r"""Applies cosine decay to a parameter (death_rate), using PyTorch's built-in `CosineAnnealingLR`.
-
-    :param death_rate: float. initial value to be decayed.
-    :param t_max: int. maximum number of iterations for the decay.
-    :param eta_min: Optional[float]. minimum value of the parameter after decay. defaults to 0.
-    :param last_epoch: Optional[int]. the index of the last epoch. Defaults to -1.
-    """
-
-    def __init__(self, death_rate: float, t_max: int, eta_min: float = 0.0, last_epoch: int = -1):
-        self.sgd: Optimizer = SGD(ParameterList([Parameter(torch.zeros(1))]), lr=death_rate)
-        self.cosine_stepper: LRScheduler = CosineAnnealingLR(self.sgd, t_max + 1, eta_min, last_epoch)
-        self.t_max = t_max
-        self.eta_min = eta_min
-
-    def step(self, current_step: int) -> None:
-        r"""One step of the cosine decay scheduler.
-
-        :param current_step: int. Current step index.
-        """
-        self.cosine_stepper.step(current_step)
-
-    def get_death_rate(self, current_step: int) -> float:
-        r"""Get the updated rate (death_rate) at the given step.
-
-        :param current_step: int. Current step index.
-        """
-        if current_step >= self.t_max:
-            return self.eta_min
-
-        self.step(current_step)
-
-        return self.sgd.param_groups[0]['lr']
+from .utils import copy_stochastic_, UPDATE_STRATEGY, orthograd, SSCCosineDecay
+from typing import Optional
 
 class StableSPAM(BaseOptimizer):
     r"""How to Train in 4-Bit More Stably than 16-Bit Adam.
@@ -100,7 +60,7 @@ class StableSPAM(BaseOptimizer):
         self.gamma3: float = gamma3
         self.t_max = t_max
         self.update_proj_gap = update_proj_gap
-        self.warmup = CosineDecay(1.0, t_max, eta_min=eta_min) if t_max is not None else None
+        self.warmup = SSCCosineDecay(1.0, t_max, eta_min=eta_min) if t_max is not None else None
 
         self.total_step: int = 0
 
@@ -197,13 +157,13 @@ class StableSPAM(BaseOptimizer):
                 m_max_t = self.gamma3 * m_max_t + (1 - self.gamma3) * max_grad
                 m_max_t.lerp_(max_grad, weight=1.0 - self.gamma3)
 
+                state["m_max_t"] = m_max_t
+
                 m_max_hat = m_max_t / (1.0 - self.gamma3 ** state['step'])
 
                 mask = grad.abs() > m_max_hat
                 if mask.sum() > 0:
                     grad[mask] = grad[mask] / max_grad * m_max_hat
-
-                state["m_max_t"] = m_max_t
 
                 grad_norm = torch.norm(grad)
 
@@ -212,6 +172,8 @@ class StableSPAM(BaseOptimizer):
                 m_norm_t = self.gamma1 * scale * m_norm_t + (1 - self.gamma1 * scale) * grad_norm
                 v_norm_t = self.gamma2 * v_norm_t + (1 - self.gamma2) * grad_norm**2
 
+                state["m_norm_t"], state["v_norm_t"] = m_norm_t, v_norm_t
+
                 m_norm_hat = m_norm_t / (1.0 - (self.gamma1 * scale) ** state['step'])
                 v_norm_hat = v_norm_t / (1.0 - self.gamma2 ** state['step'])
 
@@ -219,8 +181,6 @@ class StableSPAM(BaseOptimizer):
 
                 if grad_norm > 0:
                     grad = grad / grad_norm * c_norm_t
-
-                state["m_norm_t"], state["v_norm_t"]= m_norm_t, v_norm_t
 
                 if self.update_proj_gap > 0 and self.total_step % self.update_proj_gap == 0:
                     exp_avg = torch.zeros_like(grad)
