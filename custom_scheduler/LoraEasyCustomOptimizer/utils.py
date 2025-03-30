@@ -467,7 +467,6 @@ def stable_spam_clipping(state, grad: torch.tensor,
         max_grad = torch.max(grad.abs())
 
         m_max_t = gamma3 * m_max_t + (1 - gamma3) * max_grad
-        m_max_t.lerp_(max_grad, weight=1.0 - gamma3)
 
         state["ssc_m_max_t"] = m_max_t
 

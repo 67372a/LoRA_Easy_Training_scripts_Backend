@@ -155,7 +155,6 @@ class StableSPAM(BaseOptimizer):
                 max_grad = torch.max(grad.abs())
 
                 m_max_t = self.gamma3 * m_max_t + (1 - self.gamma3) * max_grad
-                m_max_t.lerp_(max_grad, weight=1.0 - self.gamma3)
 
                 state["m_max_t"] = m_max_t
 
