@@ -452,7 +452,7 @@ class SSCCosineDecay:
 @torch.no_grad()
 def stable_spam_clipping(state, grad: torch.tensor, 
                          step: int, 
-                         scale: float, 
+                         scale: float = 1.0, 
                          eps: float = 1e-8, 
                          gamma1: float = 0.85, 
                          gamma2: float = 0.99999, 
