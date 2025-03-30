@@ -450,7 +450,8 @@ class SSCCosineDecay:
         return self.sgd.param_groups[0]['lr']
     
 @torch.no_grad()
-def stable_spam_clipping(state, grad: torch.tensor, 
+def stable_spam_clipping(state: dict, 
+                         grad: torch.tensor, 
                          step: int, 
                          scale: float = 1.0, 
                          eps: float = 1e-8, 
@@ -502,7 +503,7 @@ def stable_spam_clipping_tensors(
     ssc_m_max_t: torch.tensor, 
     grad: torch.tensor, 
     step: int, 
-    scale: float, 
+    scale: float = 1.0, 
     eps: float = 1e-8, 
     gamma1: float = 0.85, 
     gamma2: float = 0.99999, 
@@ -513,7 +514,6 @@ def stable_spam_clipping_tensors(
         max_grad = torch.max(grad.abs())
 
         m_max_t = gamma3 * m_max_t + (1 - gamma3) * max_grad
-        m_max_t.lerp_(max_grad, weight=1.0 - gamma3)
 
         ssc_m_norm_t.copy_(m_max_t)
 
