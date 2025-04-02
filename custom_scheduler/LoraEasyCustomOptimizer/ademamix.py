@@ -292,6 +292,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         bias_correction2: bool = True,
         use_stable_spam_clipping:bool = False,
         ssc_t_max: Optional[int] = None,
+        use_adopt: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -331,6 +332,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             'bias_correction1': bias_correction1,
             'bias_correction2': bias_correction2,
             'use_stable_spam_clipping':use_stable_spam_clipping,
+            'use_adopt':use_adopt,
         }
 
         super().__init__(params, defaults)
@@ -370,6 +372,8 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             else:
                 group['step'] = 1
 
+            adopt_clip: float = (group['step']-1)**0.25
+
             beta1, beta2 = group['betas']
 
             eps, eps2, eps_floor = group['eps'], group['eps2'], group['eps_floor']
@@ -378,6 +382,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             adaptive_clip_eps = group['adaptive_clip_eps']
             adaptive_clip_type = group['adaptive_clip_type']
             update_strategy  = group['update_strategy']
+            use_adopt  = group['use_adopt']
 
             use_stable_spam_clipping = group["use_stable_spam_clipping"]
 
@@ -428,45 +433,55 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                 else:
                     curr_eps = eps
 
-                exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                if use_adopt and group['step'] == 1:
+                    exp_avg_sq.addcmul_(grad, grad)
+                else:
+                    exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
 
-                state['num_sum'] = beta1 * state['num_sum'] + 1.0
-                state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
+                    state['num_sum'] = beta1 * state['num_sum'] + 1.0
+                    state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
 
-                de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
+                    if use_adopt:
+                        de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
+                        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                    else:   
+                        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                        de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
 
-                update = (group['alpha'] * grad + exp_avg)
+                    update = (group['alpha'] * grad + exp_avg)
 
-                if update_strategy in {'cautious','grams','both'}:
-                    if update_strategy in {'cautious','both'}:
-                        mask = (update * grad > 0).to(grad.dtype)
-                        mask.div_(mask.mean().clamp_(min=1e-3))
-                        update = update * mask
-                    if update_strategy in {'grams','both'}:
-                        update.copy_(torch.sign(grad) * update.abs())
+                    if update_strategy in {'cautious','grams','both'}:
+                        if update_strategy in {'cautious','both'}:
+                            mask = (update * grad > 0).to(grad.dtype)
+                            mask.div_(mask.mean().clamp_(min=1e-3))
+                            update = update * mask
+                        if update_strategy in {'grams','both'}:
+                            update.copy_(torch.sign(grad) * update.abs())
 
-                update.div_(de_nom).mul_(math.sqrt(state['den_sum']))
+                    update.div_(de_nom).mul_(math.sqrt(state['den_sum']))
 
-                if group['bias_correction1']:
-                    update.div_(state['num_sum'])
-                if group['bias_correction2']:
-                    update.mul_(math.sqrt(state['den_sum']))
+                    if group['bias_correction1']:
+                        update.div_(state['num_sum'])
+                    if group['bias_correction2']:
+                        update.mul_(math.sqrt(state['den_sum']))
 
-                self.apply_weight_decay(
-                    p=p_fp32,
-                    grad=grad,
-                    lr=group['lr'],
-                    weight_decay=group['weight_decay'],
-                    weight_decouple=group['weight_decouple'],
-                    fixed_decay=group['fixed_decay'],
-                )
+                    if use_adopt:
+                        update.clamp_(-adopt_clip, adopt_clip)
 
-                p_fp32.add_(update, alpha=-group['lr'])
+                    self.apply_weight_decay(
+                        p=p_fp32,
+                        grad=grad,
+                        lr=group['lr'],
+                        weight_decay=group['weight_decay'],
+                        weight_decouple=group['weight_decouple'],
+                        fixed_decay=group['fixed_decay'],
+                    )
 
-                if p.dtype == torch.bfloat16:
-                    copy_stochastic_(state["exp_avg"], exp_avg)
-                    copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
-                    copy_stochastic_(p, p_fp32)
+                    p_fp32.add_(update, alpha=-group['lr'])
+
+                    if p.dtype == torch.bfloat16:
+                        copy_stochastic_(state["exp_avg"], exp_avg)
+                        copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
+                        copy_stochastic_(p, p_fp32)
 
         return loss
