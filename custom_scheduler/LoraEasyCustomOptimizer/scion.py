@@ -7,8 +7,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from pytorch_optimizer.optimizer.shampoo_utils import zero_power_via_newton_schulz_5
-from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, orthograd, agc, stable_spam_clipping, SSCCosineDecay
+from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, orthograd, agc, stable_spam_clipping, SSCCosineDecay, newton_schulz_
 from typing import Dict, Optional
 
 class LMONorm(IntEnum):
@@ -163,7 +162,8 @@ class SpectralConv(Norm):
         return x_fp64.to(dtype=x.dtype)
 
     def lmo(self, grad: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-        grad = zero_power_via_newton_schulz_5(grad.view(len(grad), -1), self.num_steps).view(grad.shape)
+        
+        grad = newton_schulz_(grad, self.num_steps)
 
         d_out, d_in, kernel_size, *_ = grad.size()
 
@@ -201,7 +201,7 @@ class Spectral(Norm):
         return x_fp64.to(dtype=x.dtype)
 
     def lmo(self, grad: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-        grad = zero_power_via_newton_schulz_5(grad.view(len(grad), -1), self.num_steps).view(grad.shape)
+        grad = newton_schulz_(grad, self.num_steps)
 
         d_out, d_in = grad.size()
 
@@ -335,6 +335,8 @@ class SCION(BaseOptimizer):
         update_strategy: UPDATE_STRATEGY = 'unmodified',
         use_stable_spam_clipping:bool = False,
         ssc_t_max: Optional[int] = None,
+        use_focus: bool = False,
+        focus_beta: float = 0.999,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -362,6 +364,8 @@ class SCION(BaseOptimizer):
             'adaptive_clip_type': adaptive_clip_type,
             'update_strategy': update_strategy,
             'use_stable_spam_clipping':use_stable_spam_clipping,
+            'use_focus':use_focus,
+            'focus_beta':focus_beta,
         }
         super().__init__(params, defaults)
 
@@ -379,6 +383,11 @@ class SCION(BaseOptimizer):
             for p in group['params']:
                 norm.init(p)
                 p.mul_(group['scale'])
+                state = self.state[p]
+                state['d'] = torch.zeros_like(p)
+
+                if group['use_focus']:
+                    state['pbar'] = torch.zeros_like(p)
 
     @torch.no_grad()
     def step(self, closure: CLOSURE = None) -> LOSS:
@@ -400,6 +409,9 @@ class SCION(BaseOptimizer):
             adaptive_clip_eps = group['adaptive_clip_eps']
             adaptive_clip_type = group['adaptive_clip_type']
             update_strategy  = group['update_strategy']
+            focus_beta = group['focus_beta']
+            use_focus = group['use_focus']
+            bias_correction2: float = self.debias(focus_beta, group['step'])
 
             use_stable_spam_clipping = group["use_stable_spam_clipping"]
 
@@ -417,7 +429,9 @@ class SCION(BaseOptimizer):
 
                 state = self.state[p]
                 if 'd' not in state:
-                    state['d'] = torch.zeros_like(grad)
+                    state['d'] = torch.zeros_like(p)
+                    if use_focus:
+                        state['pbar'] = torch.zeros_like(p)
 
                 d = state['d']
 
@@ -437,20 +451,28 @@ class SCION(BaseOptimizer):
 
                 d.mul_(1.0 - group['momentum']).add_(grad, alpha=group['momentum'])
 
+                if use_focus:
+                    pbar = state['pbar']
+                    if p.dtype == torch.bfloat16:
+                        pbar = pbar.to(torch.float32)
+
+                    pbar.mul_(focus_beta).add_(p_fp32, alpha=1.0 - focus_beta)
+
                 update = norm.lmo(d).mul_(group['scale'])
+                
+                if not use_focus:
+                    if group['constraint']:
+                        p_fp32.mul_(1.0 - group['lr'])
 
-                if group['constraint']:
-                    p_fp32.mul_(1.0 - group['lr'])
-
-                if not group['constraint'] and group['weight_decay'] > 0.0:
-                    self.apply_weight_decay(
-                        p_fp32,
-                        grad,
-                        lr=group['lr'],
-                        weight_decay=group['weight_decay'],
-                        weight_decouple=group['weight_decouple'],
-                        fixed_decay=False,
-                    )
+                    if not group['constraint'] and group['weight_decay'] > 0.0:
+                        self.apply_weight_decay(
+                            p_fp32,
+                            grad,
+                            lr=group['lr'],
+                            weight_decay=group['weight_decay'],
+                            weight_decouple=group['weight_decouple'],
+                            fixed_decay=False,
+                        )
 
                 if update_strategy in {'cautious','grams','both'}:
                     if update_strategy in {'cautious','both'}:
@@ -460,10 +482,20 @@ class SCION(BaseOptimizer):
                     if update_strategy in {'grams','both'}:
                         update.copy_(torch.sign(grad) * update.abs())
 
+                if use_focus:
+                    pbar_hat = pbar / bias_correction2
+
+                    if group['weight_decay'] > 0.0:
+                        p_fp32.add_(pbar_hat, alpha=-group['lr'] * group['weight_decay'])
+
+                update = (p_fp32 - pbar_hat).sign_().mul_(0.1).add_(torch.sign(d))
+
                 p_fp32.add_(update, alpha=-group['lr'])
 
                 if p.dtype == torch.bfloat16:
                     copy_stochastic_(state["d"], d)
+                    if use_focus:
+                        copy_stochastic_(state['pbar'], pbar)
                     copy_stochastic_(p, p_fp32)
 
         return loss

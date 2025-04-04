@@ -332,15 +332,18 @@ def orthograd(param: torch.tensor, grad: torch.tensor, eps: Optional[float] = No
     if eps is None or eps == 0.0:
         eps = torch.finfo(torch.float32).tiny
 
+    if param.norm(2) <= eps:
+        return grad.to(dtype=torch.float32, copy=True)
+
+    grad_shape = grad.shape
     w = param.view(-1)
-    og_grad_shape = grad.shape
     grad = grad.view(-1)
 
     proj = torch.dot(w, grad) / (torch.dot(w, w) + eps)
     g_orth = grad.to(dtype=torch.float32, copy=True).add_(w, alpha=-proj)
     g_orth_scaled = g_orth.mul_(grad.norm(2) / (g_orth.norm(2) + eps))
 
-    return g_orth_scaled.view(og_grad_shape)
+    return g_orth_scaled.view(grad_shape)
 
 def clean_dict_params(func, params_dict, wrapped=False):
     """
@@ -543,3 +546,32 @@ def stable_spam_clipping_tensors(
                            grad)
 
         return grad
+
+
+# From: https://github.com/KellerJordan/Muon/blob/master/muon.py
+@torch.no_grad()
+def newton_schulz_(grad, steps=6, eps=1e-7):
+    # Inline reshaping step within the method itself.
+    G_shape = grad.shape
+    grad = grad.view(grad.size(0), -1)
+
+    a, b, c = (3.4445, -4.7750,  2.0315)
+    X = grad.to(dtype=torch.bfloat16, copy=True)
+    if grad.size(0) > grad.size(1):
+        X = X.T
+
+    X /= X.norm().add(eps) # ensure top singular value <= 1
+    for _ in range(steps):
+        A = X @ X.T
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+
+    if grad.size(0) > grad.size(1):
+        X = X.T
+
+    # Gradient scaling adaptation from: https://github.com/leloykun/adaptive-muon
+    X = torch.einsum('ij,ij->', grad.type_as(X), X).clamp(-1.0, 1.0) * X
+    grad.copy_(X)
+    del X
+
+    return grad.view(G_shape)
