@@ -5,28 +5,7 @@ from torch.optim import Optimizer
 from math import sqrt
 from enum import IntEnum
 import math
-from .utils import stable_spam_clipping
-
-def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
-    # thanks to Nerogar for fast stochastic pytorch implementation
-    # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
-    with torch.no_grad():
-        # create a random 16 bit integer
-        result = torch.randint_like(
-            source,
-            dtype=torch.int32,
-            low=0,
-            high=(1 << 16),
-        )
-
-        # add the random number to the lower 16 bit of the mantissa
-        result.add_(source.view(dtype=torch.int32))
-
-        # mask off the lower 16 bit of the mantissa
-        result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
-
-        # copy the higher 16 bit into the target tensor
-        target.copy_(result.view(dtype=torch.float32))
+from .utils import stable_spam_clipping, orthograd_atan, copy_stochastic_
 
 # https://github.com/kozistr/pytorch_optimizer/blob/6397d56279ad80b26c4bba7fb4b04852b517fdeb/pytorch_optimizer/optimizer/shampoo_utils.py#L533
 def zero_power_via_newton_schulz_5(
@@ -479,7 +458,7 @@ class SCORN(Optimizer):
             weight_decay = group["weight_decay"]
             weight_decay_rate = group["weight_decay_rate"]
             amp = group["amp"]
-            orthograd = group["orthograd"]
+            use_orthograd = group["orthograd"]
             step = group['step']
             spectral_update_scale = group['spectral_update_scale']
             use_stable_spam_clipping = group['use_stable_spam_clipping']
@@ -492,18 +471,12 @@ class SCORN(Optimizer):
                     continue
                 state = self.state[p]
 
-                if orthograd and p.ndim >= 2:
-                    self.orthograd(p)
-
-                grad = p.grad.data
-
-                if use_stable_spam_clipping:
-                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'])
+                grad = p.grad
 
                 # State initialization
                 if len(state) == 0:
                     # Exponential moving average of gradient values
-                    state["ema"] = torch.zeros_like(p.data)
+                    state["ema"] = torch.zeros_like(p)
                     # Exponential moving average of squared gradient values
                     state["ema_squared"] = grad.pow(2)
                     # Optional resets
@@ -511,7 +484,7 @@ class SCORN(Optimizer):
                         state["times_zero"] = 0
                         state["steps_since_reset"] = 1
                     if focus_ratio > 0.0:
-                        state["pbar"] = torch.zeros_like(p.data)
+                        state["pbar"] = torch.zeros_like(p)
 
                 p_fp32 = p.detach().clone()
                 if focus_ratio > 0.0:
@@ -527,11 +500,17 @@ class SCORN(Optimizer):
                     ema_squared = state['ema_squared'].detach().clone().to(torch.float32)
                     p_fp32 = p.detach().clone().to(torch.float32)
 
+                if use_orthograd and p_fp32.ndim >= 2:
+                    grad = orthograd_atan(p_fp32, grad)
+
+                if use_stable_spam_clipping:
+                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'])
+
                 if group["reset_interval"] > 0:
                     if state["steps_since_reset"] // (group["reset_interval"] + (group["reset_increment"] * state["times_zero"])) > 0:
                         self.reset_momentums(ema, ema_squared, grad)
                         if focus_ratio > 0. and 'pbar' in state:
-                            pbar = pbar.copy_(torch.zeros_like(p.data))
+                            pbar = pbar.copy_(torch.zeros_like(p))
                         state["times_zero"] += 1
                         state["steps_since_reset"] = 1
                     step = state["steps_since_reset"]
@@ -579,7 +558,7 @@ class SCORN(Optimizer):
 
                 if weight_decay != 0 and not group["constrain"]:
                     # Perform weight decay
-                    grad_weights = p_fp32.data
+                    grad_weights = p_fp32
 
                     full_step = full_step.add(grad_weights, alpha=weight_decay * weight_decay_rate**group["step"])
 
@@ -593,7 +572,7 @@ class SCORN(Optimizer):
                 if group["constrain"]:
                     p_fp32.mul_(1.0 - step_size)
 
-                p_fp32.data.add_(full_step, alpha=-step_size)
+                p_fp32.add_(full_step, alpha=-step_size)
                 if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
                     copy_stochastic_(state["ema"], ema)
                     copy_stochastic_(state["ema_squared"], ema_squared)

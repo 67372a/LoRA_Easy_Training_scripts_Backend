@@ -328,6 +328,7 @@ def update_second_moment(second_moment: torch.tensor, grad: torch.tensor, beta2:
     return second_moment
 
 # Implementation from: https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/main/orthograd.py
+@torch.no_grad()
 def orthograd(param: torch.tensor, grad: torch.tensor, eps: Optional[float] = None):
     if eps is None or eps == 0.0:
         eps = torch.finfo(torch.float32).tiny
@@ -342,6 +343,19 @@ def orthograd(param: torch.tensor, grad: torch.tensor, eps: Optional[float] = No
     proj = torch.dot(w, grad) / (torch.dot(w, w) + eps)
     g_orth = grad.to(dtype=torch.float32, copy=True).add_(w, alpha=-proj)
     g_orth_scaled = g_orth.mul_(grad.norm(2) / (g_orth.norm(2) + eps))
+
+    return g_orth_scaled.view(grad_shape)
+
+# Implementation from: https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/main/orthograd.py
+@torch.no_grad()
+def orthograd_atan(param: torch.Tensor, grad: torch.Tensor):
+    grad_shape = grad.shape
+    w = param.view(-1)
+    grad = grad.view(-1)
+
+    proj = torch.dot(w, grad).atan2_(torch.dot(w, w)).mul_(1.27323954474)
+    g_orth = grad.to(dtype=torch.float32, copy=True).sub_(w, alpha=proj)
+    g_orth_scaled = g_orth.mul_(grad.norm(2).div_(g_orth.norm(2).clamp_(min=1e-6)))
 
     return g_orth_scaled.view(grad_shape)
 
