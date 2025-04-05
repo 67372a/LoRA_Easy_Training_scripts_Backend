@@ -5,6 +5,7 @@ from torch.optim import Optimizer
 from math import sqrt
 from enum import IntEnum
 import math
+from .utils import stable_spam_clipping
 
 def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     # thanks to Nerogar for fast stochastic pytorch implementation
@@ -406,6 +407,7 @@ class SCORN(Optimizer):
         constrain: bool = False,
         cautious_min: float = 1.0,
         stochastic_fp: bool = True,
+        use_stable_spam_clipping:bool = False,
     ):
 
         self._init_lr = lr
@@ -424,6 +426,7 @@ class SCORN(Optimizer):
             constrain = constrain,
             cautious_min = cautious_min,
             stochastic_fp = stochastic_fp,
+            use_stable_spam_clipping = use_stable_spam_clipping,
         )
 
         super(SCORN, self).__init__(params, defaults)
@@ -479,6 +482,7 @@ class SCORN(Optimizer):
             orthograd = group["orthograd"]
             step = group['step']
             spectral_update_scale = group['spectral_update_scale']
+            use_stable_spam_clipping = group['use_stable_spam_clipping']
 
             if spectral_update_scale > 0.:
                 norm = build_lmo_norm(LMONorm.AUTO)
@@ -490,6 +494,9 @@ class SCORN(Optimizer):
 
                 if orthograd and p.ndim >= 2:
                     self.orthograd(p)
+
+                if use_stable_spam_clipping:
+                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], scale=scale)
 
                 grad = p.grad.data
 
