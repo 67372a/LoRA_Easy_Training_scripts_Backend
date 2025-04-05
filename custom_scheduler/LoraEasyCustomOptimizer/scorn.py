@@ -495,10 +495,10 @@ class SCORN(Optimizer):
                 if orthograd and p.ndim >= 2:
                     self.orthograd(p)
 
-                if use_stable_spam_clipping:
-                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], scale=scale)
-
                 grad = p.grad.data
+
+                if use_stable_spam_clipping:
+                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'])
 
                 # State initialization
                 if len(state) == 0:
