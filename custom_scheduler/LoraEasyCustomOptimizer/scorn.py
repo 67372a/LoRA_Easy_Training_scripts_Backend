@@ -486,19 +486,20 @@ class SCORN(Optimizer):
                     if focus_ratio > 0.0:
                         state["pbar"] = torch.zeros_like(p)
 
-                p_fp32 = p.detach().clone()
+                p_fp32 = p
                 if focus_ratio > 0.0:
-                    pbar = state["pbar"].detach().clone()
-                ema = state["ema"].detach().clone()
-                ema_squared = state["ema_squared"].detach().clone()
+                    pbar = state["pbar"]
+                ema = state["ema"]
+                ema_squared = state["ema_squared"]
+
                 # Unpack
                 if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
                     grad = grad.to(torch.float32)
                     if focus_ratio > 0.0:
-                        pbar = state["pbar"].detach().clone().to(torch.float32)
-                    ema = state['ema'].detach().clone().to(torch.float32)
-                    ema_squared = state['ema_squared'].detach().clone().to(torch.float32)
-                    p_fp32 = p.detach().clone().to(torch.float32)
+                        pbar = pbar.to(torch.float32)
+                    ema = ema.to(torch.float32)
+                    ema_squared = ema_squared.to(torch.float32)
+                    p_fp32 = p.to(torch.float32)
 
                 if use_orthograd and p_fp32.ndim >= 2:
                     grad = orthograd_atan(p_fp32, grad)
@@ -579,12 +580,6 @@ class SCORN(Optimizer):
                     if focus_ratio > 0.0:
                         copy_stochastic_(state["pbar"], pbar)
                     copy_stochastic_(p, p_fp32)
-                else:
-                    state["ema"].copy_(ema)
-                    state["ema_squared"].copy_(ema_squared)
-                    if focus_ratio > 0.0:
-                        state["pbar"].copy_(pbar)
-                    p.copy_(p_fp32)
                 if group["reset_interval"] > 0:
                     state["steps_since_reset"] += 1
         return loss
