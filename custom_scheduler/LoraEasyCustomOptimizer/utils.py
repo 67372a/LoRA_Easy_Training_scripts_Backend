@@ -333,8 +333,14 @@ def orthograd(param: torch.tensor, grad: torch.tensor, eps: Optional[float] = No
     if eps is None or eps == 0.0:
         eps = torch.finfo(torch.float32).tiny
 
-    if param.norm(2) <= eps:
-        return grad.to(dtype=torch.float32, copy=True)
+    return torch.where(param.norm(2) <= eps,
+                       grad.to(dtype=torch.float32, copy=True),
+                       _orthograd(param, grad, eps))
+
+@torch.no_grad()
+def _orthograd(param: torch.tensor, grad: torch.tensor, eps: Optional[float] = None):
+    if eps is None or eps == 0.0:
+        eps = torch.finfo(torch.float32).tiny
 
     grad_shape = grad.shape
     w = param.view(-1)
@@ -343,8 +349,8 @@ def orthograd(param: torch.tensor, grad: torch.tensor, eps: Optional[float] = No
     proj = torch.dot(w, grad) / (torch.dot(w, w) + eps)
     g_orth = grad.to(dtype=torch.float32, copy=True).add_(w, alpha=-proj)
     g_orth_scaled = g_orth.mul_(grad.norm(2) / (g_orth.norm(2) + eps))
-
     return g_orth_scaled.view(grad_shape)
+
 
 # Implementation from: https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/main/orthograd.py
 @torch.no_grad()
