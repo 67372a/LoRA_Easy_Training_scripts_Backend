@@ -387,6 +387,7 @@ class SCORN(Optimizer):
         cautious_min: float = 1.0,
         stochastic_fp: bool = True,
         use_stable_spam_clipping:bool = False,
+        **kwargs,
     ):
 
         self._init_lr = lr
