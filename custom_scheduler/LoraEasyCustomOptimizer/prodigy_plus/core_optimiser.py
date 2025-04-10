@@ -191,7 +191,10 @@ class CoreOptimiser(torch.optim.Optimizer):
 
     # From: https://github.com/KellerJordan/Muon/blob/master/muon.py
     @torch.no_grad()
-    def newton_schulz_(self, G, steps: int = 6, eps: float = 1e-7):
+    def newton_schulz_(self, G, steps: int = 6, eps: float = 1e-12):
+        if eps is None or eps == 0.0:
+            eps = torch.finfo(torch.float32).tiny
+
         # Inline reshaping step within the method itself.
         G_shape = G.shape
         G = G.view(G.size(0), -1)
