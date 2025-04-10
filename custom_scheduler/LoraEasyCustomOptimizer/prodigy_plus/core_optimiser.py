@@ -191,18 +191,26 @@ class CoreOptimiser(torch.optim.Optimizer):
 
     # From: https://github.com/KellerJordan/Muon/blob/master/muon.py
     @torch.no_grad()
-    def newton_schulz_(self, G, steps=6, eps=1e-7):
+    def newton_schulz_(self, G, steps: int = 6, eps: float = 1e-7):
         # Inline reshaping step within the method itself.
         G_shape = G.shape
         G = G.view(G.size(0), -1)
 
-        a, b, c = (3.4445, -4.7750,  2.0315)
-        X = G.to(dtype=torch.bfloat16, copy=True)
+        abc_list = [
+            (3955/1024, -8306/1024, 5008/1024),
+            (3735/1024, -6681/1024, 3463/1024),
+            (3799/1024, -6499/1024, 3211/1024),
+            (4019/1024, -6385/1024, 2906/1024),
+            (2677/1024, -3029/1024, 1162/1024),
+            (2172/1024, -1833/1024,  682/1024)
+        ]
+
+        X = G.to(dtype=torch.float32, copy=True)
         if G.size(0) > G.size(1):
             X = X.T
 
         X /= X.norm().add(eps) # ensure top singular value <= 1
-        for _ in range(steps):
+        for a,b,c in abc_list:
             A = X @ X.T
             B = b * A + c * A @ A
             X = a * X + B @ X
