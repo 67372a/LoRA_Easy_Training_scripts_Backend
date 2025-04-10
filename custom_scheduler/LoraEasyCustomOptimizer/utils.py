@@ -570,7 +570,10 @@ def stable_spam_clipping_tensors(
 
 # From: https://github.com/KellerJordan/Muon/blob/master/muon.py
 @torch.no_grad()
-def newton_schulz_(grad, steps=6, eps=1e-7):
+def newton_schulz_(grad, steps=6, eps=1e-12):
+    if eps is None or eps == 0.0:
+        eps = torch.finfo(torch.float32).tiny
+
     # Inline reshaping step within the method itself.
     G_shape = grad.shape
     grad = grad.view(grad.size(0), -1)
