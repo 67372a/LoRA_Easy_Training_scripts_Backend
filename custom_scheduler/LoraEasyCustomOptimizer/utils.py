@@ -329,26 +329,35 @@ def update_second_moment(second_moment: torch.tensor, grad: torch.tensor, beta2:
 
 # Implementation from: https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/main/orthograd.py
 @torch.no_grad()
-def orthograd(param: torch.tensor, grad: torch.tensor, eps: Optional[float] = None):
+def orthograd(param: torch.tensor, grad: torch.tensor, eps: float = 1e-30):
     if eps is None or eps == 0.0:
         eps = torch.finfo(torch.float32).tiny
 
     return torch.where(param.norm(2) <= eps,
-                       grad.to(dtype=torch.float32, copy=True),
+                       grad,
                        _orthograd(param, grad, eps))
 
 @torch.no_grad()
-def _orthograd(param: torch.tensor, grad: torch.tensor, eps: Optional[float] = None):
+def _orthograd(param: torch.tensor, 
+               grad: torch.tensor, 
+               eps: float = 1e-30):
     if eps is None or eps == 0.0:
         eps = torch.finfo(torch.float32).tiny
 
+    if not param.numel() > 1:
+        return grad
+    
     grad_shape = grad.shape
     w = param.view(-1)
     grad = grad.view(-1)
 
-    proj = torch.dot(w, grad) / (torch.dot(w, w) + eps)
+    # Perturb to prevent perfect alignment
+    w_perturbed = w.clone().add_(eps)
+
+    proj = torch.dot(w_perturbed, grad) / torch.dot(w_perturbed, w_perturbed)
     g_orth = grad.to(dtype=torch.float32, copy=True).add_(w, alpha=-proj)
     g_orth_scaled = g_orth.mul_(grad.norm(2) / (g_orth.norm(2) + eps))
+
     return g_orth_scaled.view(grad_shape)
 
 
@@ -481,43 +490,46 @@ def stable_spam_clipping(state: dict,
                          gamma1: float = 0.85, 
                          gamma2: float = 0.99999, 
                          gamma3: float = 0.999):    
-        if 'ssc_m_norm_t' not in state:
-            state['ssc_m_norm_t'] = 0.0
-            state['ssc_v_norm_t'] = 0.0
-            state['ssc_m_max_t'] = 0.0
+    if eps is None or eps == 0.0:
+        eps = torch.finfo(torch.float32).tiny
 
-        m_max_t = state['ssc_m_max_t']
+    if 'ssc_m_norm_t' not in state:
+        state['ssc_m_norm_t'] = 0.0
+        state['ssc_v_norm_t'] = 0.0
+        state['ssc_m_max_t'] = 0.0
 
-        max_grad = torch.max(grad.abs())
+    m_max_t = state['ssc_m_max_t']
 
-        m_max_t = gamma3 * m_max_t + (1 - gamma3) * max_grad
+    max_grad = torch.max(grad.abs())
 
-        state["ssc_m_max_t"] = m_max_t
+    m_max_t = gamma3 * m_max_t + (1 - gamma3) * max_grad
 
-        m_max_hat = m_max_t / (1.0 - gamma3 ** step)
+    state["ssc_m_max_t"] = m_max_t
 
-        mask = grad.abs() > m_max_hat
-        if mask.sum() > 0:
-            grad[mask] = grad[mask] / max_grad * m_max_hat
+    m_max_hat = m_max_t / (1.0 - gamma3 ** step)
 
-        grad_norm = torch.norm(grad)
+    mask = grad.abs() > m_max_hat
+    if mask.sum() > 0:
+        grad[mask] = grad[mask] / max_grad * m_max_hat
 
-        m_norm_t, v_norm_t = state['ssc_m_norm_t'], state['ssc_v_norm_t']
+    grad_norm = torch.norm(grad)
 
-        m_norm_t = gamma1 * scale * m_norm_t + (1 - gamma1 * scale) * grad_norm
-        v_norm_t = gamma2 * v_norm_t + (1 - gamma2) * grad_norm**2
+    m_norm_t, v_norm_t = state['ssc_m_norm_t'], state['ssc_v_norm_t']
 
-        m_norm_hat = m_norm_t / (1.0 - (gamma1 * scale) ** step)
-        v_norm_hat = v_norm_t / (1.0 - gamma2 ** step)
+    m_norm_t = gamma1 * scale * m_norm_t + (1 - gamma1 * scale) * grad_norm
+    v_norm_t = gamma2 * v_norm_t + (1 - gamma2) * grad_norm**2
 
-        c_norm_t = m_norm_hat / (torch.sqrt(v_norm_hat) + eps)
+    m_norm_hat = m_norm_t / (1.0 - (gamma1 * scale) ** step)
+    v_norm_hat = v_norm_t / (1.0 - gamma2 ** step)
 
-        if grad_norm > 0:
-            grad = grad / grad_norm * c_norm_t
+    c_norm_t = m_norm_hat / (torch.sqrt(v_norm_hat) + eps)
 
-        state["ssc_m_norm_t"], state["ssc_v_norm_t"] = m_norm_t, v_norm_t
+    if grad_norm > 0:
+        grad = grad / grad_norm * c_norm_t
 
-        return grad
+    state["ssc_m_norm_t"], state["ssc_v_norm_t"] = m_norm_t, v_norm_t
+
+    return grad
 
 @torch.no_grad()
 def stable_spam_clipping_tensors(

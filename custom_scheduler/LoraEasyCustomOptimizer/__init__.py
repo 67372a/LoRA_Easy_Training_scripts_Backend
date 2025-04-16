@@ -35,6 +35,7 @@ from .distributed_shampoo.distributed_shampoo import DistributedShampoo
 from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
 from .prodigy_plus.prodigy_plus_schedulefree import ProdigyPlusExMachinaScheduleFree
 from LoraEasyCustomOptimizer.scorn import SCORN
+from LoraEasyCustomOptimizer.scornmachina import SCORNMachina
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ADOPT,
@@ -91,6 +92,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     ScalableShampoo,
     ScheduleFreeWrapper,
     SCORN,
+    SCORNMachina,
     SimplifiedAdEMAMix,
     StableSPAM,
 ]
