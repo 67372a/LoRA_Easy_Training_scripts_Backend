@@ -585,7 +585,7 @@ class SCORNMachina(Optimizer):
                 # Compass amplification
                 c_t = grad.add(ema.div(bias_correction), alpha=amp)
 
-                if step == 1 or state["steps_since_reset"] // (group["reset_interval"] + (group["reset_increment"] * (max(0,state["times_zero"] - 1)))) > 0:
+                if step == 1 or (group["reset_interval"] > 0 and state["steps_since_reset"] // (group["reset_interval"] + (group["reset_increment"] * (max(0,state["times_zero"] - 1)))) > 0):
                     if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
                         ema_squared = norm.lmo(c_t.pow(2), eps=eps_floor)
                     else:
