@@ -1,227 +1,482 @@
-# Authored by: https://github.com/kozistr
-import math
-
 import torch
+import torch.optim as optim
+import math
+import warnings
+from typing import Tuple, Dict, Any
 
-from pytorch_optimizer.base.exception import NoSparseGradientError
-from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from pytorch_optimizer.optimizer.utils import get_global_gradient_norm
-from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, orthograd, agc
-from typing import Callable, Dict, Optional, Tuple, Union, List, Literal
+# Provided stochastic rounding function
+def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
+    """
+    Stochastically rounds a float32 tensor to bfloat16/float16 and copies it
+    into a target tensor of that dtype. Assumes target is bfloat16 or float16.
+    Based on fast stochastic pytorch implementation by Nerogar.
+    https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
+    """
+    if target.dtype == torch.float32:
+         # If target is float32, just do a regular copy (no rounding needed)
+         target.copy_(source)
+         return
 
-class AdaGC(BaseOptimizer):
-    r"""
-    Implements AdamW with Adaptive Gradient Clipping (AdaGC) optimizer.
-    
-    Based on "AdaGC: Improving Training Stability for Large Language Model Pretraining"
-    by Wang et al. This implementation follows Algorithm 1 from the paper.
-    
-    AdaGC eliminates loss spikes during training by adaptively adjusting local
-    thresholds per parameter through an exponential moving average of gradient norms.
+    if source.dtype != torch.float32:
+        raise ValueError("Source tensor must be float32 for stochastic rounding.")
+    if target.dtype not in [torch.bfloat16, torch.float16]:
+         raise ValueError("Target tensor must be bfloat16 or float16 for stochastic rounding.")
+
+    with torch.no_grad():
+        # Ensure tensors are on the same device
+        if source.device != target.device:
+             source = source.to(target.device)
+
+        # Generate random bits based on the shape of the source tensor
+        random_bits = torch.randint_like(
+            source,
+            dtype=torch.int32,
+            low=0,
+            high=(1 << 16),
+            device=source.device
+        )
+
+        # Add the random bits to the int32 representation of the float32 source.
+        source_int32_view = source.view(torch.int32)
+        result_int32_view = torch.add(source_int32_view, random_bits)
+
+        # Mask off the lower 16 bits.
+        result_int32_view = torch.bitwise_and(result_int32_view, torch.tensor(-65536, dtype=torch.int32, device=source.device))
+
+        # Copy the result bits viewed back as float32 into the target tensor.
+        target.copy_(result_int32_view.view(torch.float32))
+
+
+class AdaGC(optim.Optimizer):
+    """
+    Implements AdaGC (Adaptive Gradient Clipping based on Local Gradient Norm)
+    integrated with AdamW, with optional stochastic rounding and torch.compile support.
+    Manages tensors to minimize re-creation, using pre-allocated buffers and scalar tensors.
 
     Args:
-        params (iterable): iterable of parameters to optimize
-        alphas (float, list or callable): learning rate or list of learning rates α_t
-        weight_decay (float): weight decay coefficient λ_w
-        eps (float): epsilon for numerical stability ε_1
-        beta1 (float): coefficient for momentum β_1
-        beta2 (float): coefficient for velocity β_2
-        beta (float): coefficient for EMA gradient norm history β (paper recommends 0.98)
-        lambda_abs (float): absolute global clipping value λ_abs (used before t_start, paper recommends 1.0)
-        lambda_rel (float): relative clipping threshold λ_rel (paper recommends 1.05)
-        t_start (int): starting time for adaptive clipping T_start (paper recommends 100)
+        params (iterable): iterable of parameters to optimize or dicts defining
+            parameter groups
+        lr (float, optional): learning rate (default: 1e-3)
+        betas (Tuple[float, float], optional): coefficients used for computing
+            running averages of gradient and its square (default: (0.9, 0.999))
+        eps (float, optional): term added to the denominator to improve
+            numerical stability (default: 1e-8)
+        weight_decay (float, optional): decoupled weight decay (L2 penalty)
+            (default: 1e-2)
+        amsgrad (boolean, optional): whether to use the AMSGrad variant of Adam
+            (default: False)
+        Tstart (int, optional): number of warm-up steps using global clipping.
+            Set to 0 to disable warm-up. (default: 100)
+        Aabs (float, optional): absolute global clipping threshold used during
+            warm-up (default: 1.0)
+        Arel (float, optional): relative local clipping threshold used in AdaGC
+            phase (default: 1.05)
+        beta_ema (float, optional): smoothing coefficient for the EMA of
+            clipped gradient norms (gamma) (default: 0.98)
+        eps_ema (float, optional): term added to the gamma EMA denominator
+            to improve numerical stability (default: 1e-6).
+        stochastic_rounding (bool, optional): whether to apply stochastic
+            rounding when writing back to low-precision parameter and state
+            tensors after float32 calculations. Calculations are always done in
+            float32 if the parameter's original dtype is not float32.
+            (default: False)
+        compile_step (bool, optional): whether to torch.compile the core
+            optimization step logic (`_single_param_step_fp32`) with
+            `fullgraph=True, dynamic=False`. (default: False)
     """
 
-    def __init__(self, 
-                params: PARAMETERS,
-                lr: float = 1e-3, 
-                betas: BETAS = (0.9, 0.999),
-                weight_decay: float = 0, 
-                eps: float = 1e-8,
-                eps2: float = 1e-2,
-                eps_floor: Optional[float] = None,
-                beta: float = 0.98, 
-                lambda_abs: float = 1.0, 
-                lambda_rel: float = 1.05, 
-                warmup_steps: float = 20,
-                use_orthograd: bool = False,
-                update_strategy: UPDATE_STRATEGY = 'unmodified',
-                **kwargs):
-        
-        self.validate_learning_rate(lr)
-        self.validate_betas(betas)
-        self.validate_range(beta, 'beta', 0.0, 1.0, '[)')
-        self.validate_positive(lambda_abs, 'lambda_abs')
-        self.validate_positive(lambda_rel, 'lambda_rel')
-        self.validate_non_negative(warmup_steps, 'warmup_steps')
-        self.validate_non_negative(weight_decay, 'weight_decay')
-        self.validate_non_negative(eps, 'eps')
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
+                 weight_decay=1e-2, amsgrad=False, Tstart=100, Aabs=1.0,
+                 Arel=1.05, beta_ema=0.98, eps_ema=1e-6,
+                 stochastic_rounding=False, compile_step=False):
+        if not 0.0 <= lr:
+            raise ValueError("Invalid learning rate: {}".format(lr))
+        if not 0.0 <= eps:
+            raise ValueError("Invalid epsilon value: {}".format(eps))
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
+        if not 0.0 <= weight_decay:
+            raise ValueError("Invalid weight_decay value: {}".format(weight_decay))
+        if not 0 <= Tstart:
+            raise ValueError("Invalid Tstart value: {}".format(Tstart))
+        if not 0.0 <= Aabs:
+             raise ValueError("Invalid Aabs value: {}".format(Aabs))
+        if not 0.0 <= Arel:
+             raise ValueError("Invalid Arel value: {}".format(Arel))
+        if not 0.0 <= beta_ema < 1.0:
+            raise ValueError("Invalid beta_ema value: {}".format(beta_ema))
+        if not 0.0 <= eps_ema:
+            raise ValueError("Invalid eps_ema value: {}".format(eps_ema))
 
-        # Override zero to tiny
-        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
-            eps_floor = torch.finfo(torch.float32).tiny
+        defaults = dict(lr=lr, betas=betas, eps=eps,
+                        weight_decay=weight_decay, amsgrad=amsgrad,
+                        Tstart=Tstart, Aabs=Aabs, Arel=Arel,
+                        beta_ema=beta_ema, eps_ema=eps_ema,
+                        stochastic_rounding=stochastic_rounding,
+                        compile_step=compile_step)
+        super(AdaGC, self).__init__(params, defaults)
 
-        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams', 'both'}:
-            raise ValueError("Invalid update strategy: {}".format(update_strategy))
+        # Global step counter (Python int)
+        self._global_step = 0
 
-        defaults: DEFAULTS = {
-            'lr': lr,
-            'weight_decay': weight_decay,
-            'eps': eps,
-            'eps2': eps2,
-            'eps_floor': eps_floor,
-            'betas': betas,
-            'beta': beta,
-            'lambda_abs': lambda_abs,
-            'lambda_rel': lambda_rel,
-            'warmup_steps': warmup_steps,
-            'use_orthograd': use_orthograd,
-            'update_strategy': update_strategy,
-        }
-        super().__init__(params, defaults)
+        # Tensors to hold scalar values for the compiled step function, per device
+        # Use dicts keyed by device
+        self._scalar_tensors_float: Dict[torch.device, Dict[str, torch.Tensor]] = {}
+        self._scalar_tensors_int64: Dict[torch.device, Dict[str, torch.Tensor]] = {}
+        self._scalar_tensors_bool: Dict[torch.device, Dict[str, torch.Tensor]] = {}
 
-    def __str__(self) -> str:
-        return 'AdaGC'
+        # Global clip factor tensor (FP32 scalar)
+        self._global_clip_factor_fp32 = torch.tensor(1.0, dtype=torch.float32, device='cpu')
 
-    @torch.no_grad()
-    def reset(self):
-        pass
-    
-    @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        """Performs a single optimization step.
-        
+        # Compile the core step logic if requested
+        self._single_param_step_callable = self._single_param_step_fp32 # Default to non-compiled
+        if compile_step:
+             try:
+                # Compile the FP32 version of the step function
+                with torch._dynamo.utils.disable_cache_limit():
+                    self._single_param_step_callable = torch.compile(
+                        self._single_param_step_fp32, fullgraph=True, dynamic=False
+                        )
+                warnings.warn("Core optimization step compiled with torch.compile(fullgraph=True, dynamic=False, mode=\"reduce-overhead\").")
+             except Exception as e:
+                 warnings.warn(f"torch.compile(fullgraph=True, dynamic=False) failed: {e}. Falling back to non-compiled step.")
+                 self._single_param_step_callable = self._single_param_step_fp32 # Fallback
+
+    # @staticmethod removed because it needs access to self._allocate_scalar_tensors
+    # Let's make it a regular method that takes parameters as arguments or accessess state via p
+    # No, the point was to compile a static method. Keep it static, and pass everything it needs.
+
+    @staticmethod
+    # Using **kwargs allows for easier addition of future scalar tensor inputs
+    def _single_param_step_fp32(
+        p_data_fp32: torch.Tensor,
+        grad_fp32: torch.Tensor,
+        exp_avg_fp32: torch.Tensor,
+        exp_avg_sq_fp32: torch.Tensor,
+        gamma_fp32: torch.Tensor, # Gamma is always FP32 state (scalar tensor)
+        max_exp_avg_sq_fp32: torch.Tensor, # Max_exp_avg_sq is always FP32 (tensor or placeholder)
+        final_clip_factor_fp32: torch.Tensor, # Final clip factor (scalar tensor)
+        # Scalar hyperparameters and step count as tensors
+        step_t: torch.Tensor, # Parameter step (scalar int tensor)
+        lr_t: torch.Tensor, # Scalar float tensor
+        beta1_t: torch.Tensor, # Scalar float tensor
+        beta2_t: torch.Tensor, # Scalar float tensor
+        eps_t: torch.Tensor, # Scalar float tensor
+        weight_decay_t: torch.Tensor, # Scalar float tensor
+        beta_ema_t: torch.Tensor, # Scalar float tensor
+        amsgrad: bool # Scalar bool tensor
+    ):
+        """
+        Core optimization logic for a single parameter, designed to run in FP32.
+        All inputs are expected to be tensors.
+        Updates inputs tensors in-place.
+        """
+        with torch.no_grad():
+            # --- Apply Final Clipping Factor ---
+            # The `final_clip_factor_fp32` is already determined outside
+            # Always apply this factor.
+            clipped_grad_fp32 = grad_fp32 # Operation modifies in-place
+            clipped_grad_fp32.mul_(final_clip_factor_fp32)
+
+
+            # --- EMA Update (using norm of the *clipped* gradient) ---
+            # Calculate the norm of the *clipped* gradient in FP32
+            clipped_param_norm_fp32 = torch.linalg.norm(clipped_grad_fp32)
+            # Update gamma state (which is an FP32 scalar tensor) in-place
+            gamma_fp32.mul_(beta_ema_t).add_(clipped_param_norm_fp32, alpha=1.0 - beta_ema_t)
+
+
+            # --- Standard AdamW Update ---
+            # Use the calculation tensors (FP32) and scalar tensors for updates
+            exp_avg_fp32.mul_(beta1_t).add_(clipped_grad_fp32, alpha=1.0 - beta1_t)
+            exp_avg_sq_fp32.mul_(beta2_t).addcmul_(clipped_grad_fp32, clipped_grad_fp32, value=1.0 - beta2_t) # Use clipped gradient (FP32) and 1.0 - tensor
+
+            # Use torch.where for amsgrad logic - requires scalar bool tensor to work
+            # Need to prepare both amsgrad and non-amsgrad denominator calculations
+            if amsgrad:
+                denom_fp32 = max_exp_avg_sq_fp32.sqrt().add_(eps_t)
+            else:
+                denom_fp32 = exp_avg_sq_fp32.sqrt().add_(eps_t)
+
+            # AdamW bias correction factors (use scalar tensor power)
+            bias_correction1_t = 1.0 - beta1_t.pow(step_t.float()) # Pow requires float
+            bias_correction2_t = 1.0 - beta2_t.pow(step_t.float())
+            # Apply bias correction to the denominator (FP32)
+            denom_fp32.div_(torch.sqrt(bias_correction2_t)) # torch.sqrt works on tensors
+
+            # Calculate step_size (use scalar tensor division)
+            step_size_t = lr_t / bias_correction1_t
+
+            # Parameter update (on the calculation tensor - FP32)
+            # Decoupled weight decay - use torch.where for static graph
+            p_data_fp32.addcdiv_(exp_avg_fp32, denom_fp32, value=-step_size_t)
+            # Add weight decay term using torch.where based on weight_decay_t
+            p_data_fp32.add_(
+                p_data_fp32,
+                alpha=torch.where(weight_decay_t != 0.0, -weight_decay_t * lr_t, torch.tensor(0.0, dtype=torch.float32, device=p_data_fp32.device))
+            )
+
+
+            # Updates happened in-place on the input FP32 tensors.
+
+
+    def _allocate_scalar_tensors(self, device: torch.device, group_defaults: Dict[str, Any]):
+         """Allocates or retrieves scalar tensors for a given device."""
+         if device not in self._scalar_tensors_float:
+            self._scalar_tensors_float[device] = {}
+            self._scalar_tensors_int64[device] = {}
+            self._scalar_tensors_bool[device] = {}
+
+            # Initialize float tensors
+            self._scalar_tensors_float[device]['lr_t'] = torch.tensor(group_defaults['lr'], dtype=torch.float32, device=device)
+            self._scalar_tensors_float[device]['beta1_t'] = torch.tensor(group_defaults['betas'][0], dtype=torch.float32, device=device)
+            self._scalar_tensors_float[device]['beta2_t'] = torch.tensor(group_defaults['betas'][1], dtype=torch.float32, device=device)
+            self._scalar_tensors_float[device]['eps_t'] = torch.tensor(group_defaults['eps'], dtype=torch.float32, device=device)
+            self._scalar_tensors_float[device]['weight_decay_t'] = torch.tensor(group_defaults['weight_decay'], dtype=torch.float32, device=device)
+            self._scalar_tensors_float[device]['beta_ema_t'] = torch.tensor(group_defaults['beta_ema'], dtype=torch.float32, device=device)
+            self._scalar_tensors_float[device]['eps_ema_t'] = torch.tensor(group_defaults['eps_ema'], dtype=torch.float32, device=device)
+            self._scalar_tensors_float[device]['Arel_t'] = torch.tensor(group_defaults['Arel'], dtype=torch.float32, device=device)
+
+            # Initialize int64 tensors
+            self._scalar_tensors_int64[device]['step_t'] = torch.tensor(0, dtype=torch.int64, device=device) # Parameter step
+            self._scalar_tensors_int64[device]['global_step_t'] = torch.tensor(0, dtype=torch.int64, device=device) # Global step
+            self._scalar_tensors_int64[device]['Tstart_t'] = torch.tensor(group_defaults['Tstart'], dtype=torch.int64, device=device)
+
+            # Initialize bool tensors
+            self._scalar_tensors_bool[device]['amsgrad_t_bool'] = torch.tensor(group_defaults['amsgrad'], dtype=torch.bool, device=device)
+
+         return (self._scalar_tensors_float[device],
+                 self._scalar_tensors_int64[device],
+                 self._scalar_tensors_bool[device])
+
+
+    def step(self, closure=None):
+        """
+        Performs a single optimization step.
+
         Args:
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
-        loss: LOSS = None
+        loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
-        
+
+        self._global_step += 1 # Python int global step counter
+
+        # --- Global Clipping Calculation (outside compiled step) ---
+        # Calculate global norm and clip factor in FP32 if needed.
+        # This result is passed to the compiled function.
+        # Find a device to perform global norm calculation on
+        global_norm_device = 'cpu'
+        has_grad = False
         for group in self.param_groups:
+             for p in group['params']:
+                 if p.grad is not None:
+                      has_grad = True
+                      global_norm_device = p.grad.data.device # Use device of first grad found
+                      break
+             if global_norm_device != 'cpu': break # Found a device
+
+        if self._global_step <= self.defaults['Tstart'] and self.defaults['Tstart'] > 0 and has_grad:
+            # Calculate total squared global norm of gradients in FP32 on the selected device
+            global_norm_sq_fp32 = torch.tensor(0.0, dtype=torch.float32, device=global_norm_device)
+            for group in self.param_groups:
+                for p in group['params']:
+                    if p.grad is not None:
+                        global_norm_sq_fp32.add_(p.grad.data.float().pow(2).sum()) # Ensure sum is in FP32
+
+            if global_norm_sq_fp32 > 0: # Avoid division by zero
+                 global_norm_fp32 = torch.sqrt(global_norm_sq_fp32)
+                 # Global clip factor computed once in FP32
+                 # Ensure eps is a float or FP32 tensor when adding
+                 eps_fp32 = torch.tensor(self.defaults['eps'], dtype=torch.float32, device=global_norm_device)
+                 self._global_clip_factor_fp32 = torch.tensor(self.defaults['Aabs'], dtype=torch.float32, device=global_norm_device) / (global_norm_fp32 + eps_fp32)
+                 self._global_clip_factor_fp32 = torch.min(self._global_clip_factor_fp32, torch.tensor(1.0, device=global_norm_device, dtype=torch.float32))
+            else:
+                 # If global norm is 0, no clipping is needed, factor is 1.0
+                 self._global_clip_factor_fp32 = torch.tensor(1.0, device=global_norm_device, dtype=torch.float32) # Put on device
+        else:
+             # If not in warm-up or no grads, global clip factor is 1.0 (ensure it's on a device if possible)
+             device = global_norm_device # Use the device found earlier, or 'cpu'
+             self._global_clip_factor_fp32 = torch.tensor(1.0, device=device, dtype=torch.float32)
+
+
+        # --- AdaGC & AdamW Logic per parameter ---
+        for group in self.param_groups:
+            # Get group hyperparameters (Python scalars)
+            # Access defaults directly to avoid recreating dict each step if needed,
+            # or just pull the values out as they are few.
+            beta1, beta2 = group['betas']
+            eps = group['eps']
+            weight_decay = group['weight_decay']
+            amsgrad = group['amsgrad']
+            lr = group['lr']
+            stochastic_rounding = group['stochastic_rounding']
+            Tstart = group['Tstart']
+            beta_ema = group['beta_ema']
+            eps_ema = group['eps_ema']
+            Arel = group['Arel']
+
+
+            # Get the step function to use (compiled or original)
+            step_fn = self._single_param_step_callable
+
+
             for p in group['params']:
                 if p.grad is None:
                     continue
-                
-                # Get gradient
-                p_fp32 = p
-                grad = p.grad
-                if grad.is_sparse:
-                    raise RuntimeError('AdamWAdaGC does not support sparse gradients')
-                
-                # Get state
+
+                # Get the parameter's device
+                device = p.data.device
+
+                # State initialization (including FP32 buffers)
                 state = self.state[p]
-                
-                # State initialization (line 2)
                 if len(state) == 0:
-                    state['step'] = 0
-                    state['exp_avg'] = torch.zeros_like(p.data)  # m_0 ← 0
-                    state['exp_avg_sq'] = torch.zeros_like(p.data)  # v_0 ← 0
-                    state['gamma'] = torch.empty(1, device=grad.device, dtype=torch.float32)  # Gradient norm history (γ)
-                    # γ is initialized in first iteration when calculating clipping
-                
-                # Update step counter
+                    state['step'] = 0 # Python int step
+                    # exp_avg and exp_avg_sq match parameter dtype
+                    state['exp_avg'] = torch.zeros_like(p.data, memory_format=torch.preserve_format)
+                    state['exp_avg_sq'] = torch.zeros_like(p.data, memory_format=torch.preserve_format)
+                    # gamma is always FP32 scalar state
+                    state['gamma'] = torch.tensor(0.0, device=device, dtype=torch.float32)
+                    if amsgrad:
+                        # max_exp_avg_sq matches parameter dtype initially
+                        state['max_exp_avg_sq'] = torch.zeros_like(p.data, memory_format=torch.preserve_format)
+
+                    # Allocate FP32 buffers in state if original dtype is not FP32
+                    if p.data.dtype != torch.float32:
+                        state['_p_data_fp32_buf'] = torch.zeros_like(p.data, dtype=torch.float32, memory_format=torch.preserve_format)
+                        state['_grad_fp32_buf'] = torch.zeros_like(p.grad.data, dtype=torch.float32, memory_format=torch.preserve_format)
+                        state['_exp_avg_fp32_buf'] = torch.zeros_like(state['exp_avg'], dtype=torch.float32, memory_format=torch.preserve_format)
+                        state['_exp_avg_sq_fp32_buf'] = torch.zeros_like(state['exp_avg_sq'], dtype=torch.float32, memory_format=torch.preserve_format)
+                        if amsgrad:
+                             state['_max_exp_avg_sq_fp32_buf'] = torch.zeros_like(state['max_exp_avg_sq'], dtype=torch.float32, memory_format=torch.preserve_format)
+                        else:
+                             # Placeholder buffer for amsgrad=False, needed for consistent logic flow
+                             state['_max_exp_avg_sq_fp32_buf'] = torch.tensor([], dtype=torch.float32, device=device)
+
+                # Update parameter step counter (Python int)
                 state['step'] += 1
-                step = state['step']
-                
-                # Get hyperparameters
-                lr = group['lr']
-                weight_decay = group['weight_decay']
-                eps = group['eps']
-                eps2 = group['eps2']
-                eps_floor = group['eps_floor']
-                beta1, beta2 = group['betas']
-                beta = group['beta']
-                lambda_abs = group['lambda_abs']
-                lambda_rel = group['lambda_rel']
-                warmup_steps = group['warmup_steps']
-                use_orthograd = group['use_orthograd']
-                update_strategy = group['update_strategy']
-                
-                # Retrieve state variables
-                exp_avg, exp_avg_sq, gamma = state['exp_avg'], state['exp_avg_sq'], state['gamma']
 
-                if p.dtype == torch.bfloat16:
-                    grad = grad.to(torch.float32)
-                    p_fp32 = p.to(torch.float32)
-                    exp_avg, exp_avg_sq = exp_avg.to(torch.float32), exp_avg_sq.to(torch.float32)
-                
-                # Compute gradient (line 4: g_t = ∇_θ f_t(θ_{t-1}, X_t))
-                g_t = grad
+                # Allocate or get scalar tensors for this device and update their values
+                scalar_float, scalar_int64, scalar_bool = self._allocate_scalar_tensors(device, group)
+                scalar_float['lr_t'].fill_(lr)
+                scalar_float['beta1_t'].fill_(beta1)
+                scalar_float['beta2_t'].fill_(beta2)
+                scalar_float['eps_t'].fill_(eps)
+                scalar_float['weight_decay_t'].fill_(weight_decay)
+                scalar_float['beta_ema_t'].fill_(beta_ema)
+                scalar_float['eps_ema_t'].fill_(eps_ema)
+                scalar_float['Arel_t'].fill_(Arel)
+                scalar_int64['step_t'].fill_(self.state[p]['step']) # Use the parameter's internal step counter
+                scalar_int64['global_step_t'].fill_(self._global_step) # Use the optimizer's global step counter
+                scalar_int64['Tstart_t'].fill_(Tstart)
+                scalar_bool['amsgrad_t_bool'].fill_(amsgrad)
 
-                if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
-                    g_t = orthograd(p_fp32, g_t)
+                original_dtype = p.data.dtype
+                is_original_fp32 = (original_dtype == torch.float32)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = g_t.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad), eps_floor) # Set a floor for eps to avoid NaN
+                # --- Prepare FP32 calculation tensors (use buffers) ---
+                if not is_original_fp32:
+                     # Copy low-precision data into FP32 buffers
+                     state['_p_data_fp32_buf'].copy_(p.data)
+                     state['_grad_fp32_buf'].copy_(p.grad.data)
+                     state['_exp_avg_fp32_buf'].copy_(state['exp_avg'])
+                     state['_exp_avg_sq_fp32_buf'].copy_(state['exp_avg_sq'])
+                     if amsgrad:
+                          state['_max_exp_avg_sq_fp32_buf'].copy_(state['max_exp_avg_sq'])
+
+                     p_data_calc = state['_p_data_fp32_buf']
+                     grad_calc = state['_grad_fp32_buf']
+                     exp_avg_calc = state['_exp_avg_fp32_buf']
+                     exp_avg_sq_calc = state['_exp_avg_sq_fp32_buf']
+                     gamma_calc = state['gamma'] # gamma is always float32
+                     max_exp_avg_sq_calc = state['_max_exp_avg_sq_fp32_buf'] # Buffer or placeholder
+
+                else: # Original dtype is FP32
+                     # Use original tensors directly as they are FP32
+                     p_data_calc = p.data
+                     grad_calc = p.grad.data
+                     exp_avg_calc = state['exp_avg']
+                     exp_avg_sq_calc = state['exp_avg_sq']
+                     gamma_calc = state['gamma'] # gamma is always FP32
+                     if amsgrad:
+                          max_exp_avg_sq_calc = state['max_exp_avg_sq']
+                     else:
+                          # Still need a placeholder for the function signature
+                          max_exp_avg_sq_calc = torch.tensor([], dtype=torch.float32, device=device)
+
+
+                # --- Determine the FINAL clipping factor for this parameter (outside compiled step) ---
+                # This logic remains outside to avoid tensor-based control flow in compiled graph.
+                if self._global_step <= Tstart and Tstart > 0:
+                    # Use the pre-calculated global clip factor.
+                    # It was already placed on a device during the global norm calculation,
+                    # move it to the current parameter's device if needed.
+                    final_clip_factor_fp32 = self._global_clip_factor_fp32.to(device)
                 else:
-                    curr_eps = eps
-                
-                if step < warmup_steps:
-                    # Before t_start: global clipping (lines 5-7)
-                    g_t_norm = torch.linalg.norm(g_t)
-                    
-                    h_t = min(lambda_abs / g_t_norm.add_(curr_eps), 1.0)
+                    # Calculate the local AdaGC scaling factor in FP32
+                    # Norm of the raw gradient (grad_calc is FP32)
+                    param_norm_fp32 = torch.linalg.norm(grad_calc)
 
-                    g_t.mul_(h_t)  # g_t = h_t · g_t
-                    
-                    # Update gamma with minimum of current and previous gamma (lines 8-10)
-                    g_t_norm = torch.linalg.norm(g_t)
-                    if step == 1:
-                        # First iteration: γ_0,i = ||g_1,i||
-                        gamma.copy_(g_t_norm)
+                    # Get previous EMA gamma (gamma_calc is FP32) and calculate adaptive threshold (FP32)
+                    prev_gamma_fp32 = gamma_calc
+                    Arel_t = scalar_float['Arel_t'] # Get the scalar tensor
+                    eps_ema_t = scalar_float['eps_ema_t'] # Get the scalar tensor
+                    adaptive_threshold_fp32 = Arel_t * (prev_gamma_fp32 + eps_ema_t)
+
+                    # Calculate the static clipping factor: min(1.0, threshold / norm)
+                    # Add eps_t to the denominator of the ratio to prevent division by zero
+                    eps_t = scalar_float['eps_t'] # Get the scalar tensor
+                    ratio_fp32 = adaptive_threshold_fp32 / (param_norm_fp32 + eps_t)
+                    # Create 1.0 tensor on the correct device for torch.min
+                    one_fp32 = torch.tensor(1.0, device=device, dtype=torch.float32)
+                    final_clip_factor_fp32 = torch.min(one_fp32, ratio_fp32)
+
+                # --- Call the core step function (potentially compiled) ---
+                # Always call the FP32 step function with the FP32 calculation tensors and scalar tensors
+                with torch._dynamo.utils.disable_cache_limit():
+                    step_fn(
+                        p_data_fp32=p_data_calc,
+                        grad_fp32=grad_calc,
+                        exp_avg_fp32=exp_avg_calc,
+                        exp_avg_sq_fp32=exp_avg_sq_calc,
+                        gamma_fp32=gamma_calc, # gamma is always FP32
+                        max_exp_avg_sq_fp32=max_exp_avg_sq_calc, # will be FP32 tensor or placeholder
+                        final_clip_factor_fp32=final_clip_factor_fp32, # Pass the pre-calculated final factor
+                        # Scalar tensor inputs (retrieve from allocated tensors)
+                        step_t=scalar_int64['step_t'],
+                        lr_t=scalar_float['lr_t'],
+                        beta1_t=scalar_float['beta1_t'],
+                        beta2_t=scalar_float['beta2_t'],
+                        eps_t=scalar_float['eps_t'],
+                        weight_decay_t=scalar_float['weight_decay_t'],
+                        beta_ema_t=scalar_float['beta_ema_t'],
+                        amsgrad=amsgrad
+                    )
+
+                # --- Write Back to Original Tensors with Rounding ---
+                if not is_original_fp32: # If original dtype was low-precision
+                    if stochastic_rounding:
+                        # Use stochastic rounding to copy FP32 results back to original low-precision tensors
+                        copy_stochastic_(p.data, p_data_calc) # p.data is original low-prec tensor
+                        copy_stochastic_(state['exp_avg'], exp_avg_calc) # state['exp_avg'] is original low-prec tensor
+                        copy_stochastic_(state['exp_avg_sq'], exp_avg_sq_calc) # state['exp_avg_sq'] is original low-prec tensor
+                        if amsgrad:
+                            copy_stochastic_(state['max_exp_avg_sq'], max_exp_avg_sq_calc) # state['max_exp_avg_sq'] is original low-prec tensor
+                        # gamma was updated in-place as FP32, no copy needed
                     else:
-                        # Subsequent iterations: γ_t,i = min{γ_{t-1,i}, ||g_t,i||}
-                        gamma = torch.minimum(gamma, g_t_norm)
-                else:
-                    # After t_start: per-parameter adaptive clipping (lines 11-16)
-                    g_t_norm = torch.linalg.norm(g_t)
-                    
-                    # Compute clipping factors (line 13): h_t,i = min{λ_rel·γ_{t-1,i}/||g_t,i||, 1.0}
-                    h_t = torch.minimum(lambda_rel * gamma / g_t_norm.add_(curr_eps), 
-                                        torch.ones_like(g_t_norm))
-                    
-                    # Apply clipping (line 14): g̃_t,i = h_t,i · g_t,i
-                    g_t.mul_(h_t.item())
-                    
-                    # Update gamma using EMA (line 15): γ_t,i = β·γ_{t-1,i} + (1-β)||g̃_t1,i||
-                    gamma.mul_(beta).add_(torch.linalg.norm(g_t), alpha= 1 - beta)
+                        # Standard copy (effectively casting FP32 result back using default rounding)
+                        p.data.copy_(p_data_calc)
+                        state['exp_avg'].copy_(exp_avg_calc)
+                        state['exp_avg_sq'].copy_(exp_avg_sq_calc)
+                        if amsgrad:
+                             state['max_exp_avg_sq'].copy_(max_exp_avg_sq_calc)
+                        # gamma was updated in-place as FP32
+                # Else: original dtype was FP32, updates were in-place on original tensors, no copy needed
 
-                state['gamma'] = gamma
-                
-                # Update momentum (line 18): m_t = β_1*m_{t-1} + (1-β_1)g̃_t
-                exp_avg.mul_(beta1).add_(g_t, alpha=1 - beta1)
-                
-                # Update velocity (line 19): v_t = β_2*v_{t-1} + (1-β_2)g̃_t²
-                exp_avg_sq.mul_(beta2).addcmul_(g_t, g_t, value=1 - beta2)
-                
-                # Compute bias-corrected momentum and velocity (line 20)
-                bias_correction1 = 1 - beta1 ** step
-                bias_correction2 = 1 - beta2 ** step
-                m_hat = exp_avg / bias_correction1  # m̂_t = m_t/(1-β_1^t)
-                v_hat = exp_avg_sq / bias_correction2  # v̂_t = v_t/(1-β_2^t)
 
-                update = m_hat
-
-                if update_strategy in {'cautious','grams','both'}:
-                    if update_strategy in {'cautious','both'}:
-                        mask = (update * g_t > 0).to(grad.dtype)
-                        mask.div_(mask.mean().clamp_(min=1e-3))
-                        update = update * mask
-                    if update_strategy in {'grams','both'}:
-                        update.copy_(torch.sign(g_t) * update.abs())
-                
-                # Update parameters (line 21)
-                p_fp32.mul_(1 - lr * weight_decay)  # Weight decay term: θ_t = θ_{t-1} - α_t*λ_w*θ_{t-1}
-                p_fp32.addcdiv_(update, torch.sqrt(v_hat) + curr_eps, value=-lr)  # - α_t*m̂_t/(√v̂_t + ε_1)
-
-                if p.dtype == torch.bfloat16:
-                    copy_stochastic_(state["exp_avg"], exp_avg)
-                    copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
-                    copy_stochastic_(p, p_fp32)
-                
         return loss
