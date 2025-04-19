@@ -1,5 +1,5 @@
 import torch
-from typing import Tuple, Union, Type, Literal, Optional
+from typing import Tuple, Union, Type, Literal, Optional, Dict, Any
 from torch.nn import Parameter, ParameterList
 from torch.optim import SGD, Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LRScheduler
@@ -618,3 +618,110 @@ def newton_schulz_(grad, steps=6, eps=1e-12):
     del X
 
     return grad.view(G_shape)
+
+@torch.no_grad()
+def adagc_global_clipping_calc(
+        self,
+        step: int,
+        warmup_steps: int = 0,
+        lambda_abs: float = 1.0,
+        eps: float = 1e-8
+) -> torch.Tensor:
+        # --- Global Clipping Calculation (outside compiled step) ---
+        global_norm_device = 'cpu'
+        has_grad = False
+        for group in self.param_groups:
+             for p in group['params']:
+                 if p.grad is not None:
+                    has_grad = True
+                    global_norm_device = p.grad.device # Use device of first grad found
+                    break
+             if global_norm_device != 'cpu': break # Found a device
+
+        if step <= warmup_steps and warmup_steps > 0 and has_grad:
+            # Calculate total squared global norm of gradients
+            global_norm_sq_fp32 = torch.tensor(0.0, dtype=torch.float32, device=global_norm_device)
+            for group in self.param_groups:
+                for p in group['params']:
+                    if p.grad is not None:
+                        global_norm_sq_fp32.add_(p.grad.float().pow(2).sum())
+
+            if global_norm_sq_fp32 > 0: # Avoid division by zero
+                 global_norm_fp32 = torch.sqrt(global_norm_sq_fp32)
+                 eps_fp32 = torch.tensor(eps, dtype=torch.float32, device=global_norm_device)
+                 global_clip_factor_fp32 = torch.tensor(lambda_abs, dtype=torch.float32, device=global_norm_device) / (global_norm_fp32 + eps_fp32)
+                 global_clip_factor_fp32 = torch.min(global_clip_factor_fp32, torch.tensor(1.0, device=global_norm_device, dtype=torch.float32))
+            else:
+                 # If global norm is 0, no clipping is needed, factor is 1.0
+                 global_clip_factor_fp32 = torch.tensor(1.0, device=global_norm_device, dtype=torch.float32) # Put on device
+        else:
+             # If not in warm-up or no grads, global clip factor is 1.0 (ensure it's on a device if possible)
+             device = global_norm_device # Use the device found earlier, or 'cpu'
+             global_clip_factor_fp32 = torch.tensor(1.0, device=device, dtype=torch.float32)
+
+        return global_clip_factor_fp32
+
+@torch.no_grad()
+def _apply_adagc_clipping_and_update_gamma(
+    self,
+    grad: torch.Tensor,
+    state: Dict[str, Any],
+    step: int,
+    warmup_steps: int = 0,
+    lambda_rel: float = 1.05,
+    ema_beta: float = 0.98,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Applies AdaGC or global clipping to the gradient and updates the gamma state.
+    Returns the clipped gradient as an FP32 tensor
+    """
+    with torch.no_grad():
+        grad_fp32 = grad.float()
+
+
+        device = grad_fp32.device
+        # Get gamma state (always FP32 scalar tensor)
+        if 'adagc_gamma' not in state:
+            state['adagc_gamma'] = torch.tensor(lambda_rel, dtype=torch.float32, device=device)
+        gamma_fp32 = state['adagc_gamma']
+
+
+        # Determine the FINAL clipping factor for this parameter
+        final_clip_factor_fp32: torch.Tensor # Define type hint
+
+        if step <= warmup_steps and warmup_steps > 0:
+             # Warm-up phase: Use the pre-calculated global clip factor
+             # Ensure it's on the same device as the gradient we're modifying
+             final_clip_factor_fp32 = self._global_clip_factor_fp32.to(device)
+        else:
+             # AdaGC phase: Calculate the local AdaGC scaling factor in FP32
+             # Norm of the raw gradient (grad_fp32 is FP32)
+             param_norm_fp32 = torch.linalg.norm(grad_fp32)
+
+             # Get previous EMA gamma (gamma_fp32 is FP32 scalar tensor)
+             prev_gamma_fp32 = gamma_fp32
+             # Calculate adaptive threshold (FP32 scalar tensor)
+             Arel_t = torch.tensor(lambda_rel, dtype=torch.float32, device=device)
+             eps_ema_t = torch.tensor(eps, dtype=torch.float32, device=device)
+             adaptive_threshold_fp32 = Arel_t * (prev_gamma_fp32 + eps_ema_t)
+
+             # Calculate the static clipping factor: min(1.0, threshold / norm)
+             eps_t = torch.tensor(eps, dtype=torch.float32, device=device)
+             ratio_fp32 = adaptive_threshold_fp32 / (param_norm_fp32 + eps_t) # Add eps_t to denominator
+             # Ensure ratio is not NaN/Inf in edge cases (though adding eps should help)
+             ratio_fp32 = torch.nan_to_num(ratio_fp32, nan=1.0, posinf=1.0, neginf=1.0)
+
+             # Create 1.0 tensor on the correct device for torch.min
+             one_fp32 = torch.tensor(1.0, device=device, dtype=torch.float32)
+             final_clip_factor_fp32 = torch.min(one_fp32, ratio_fp32)
+
+
+        clipped_grad_fp32 = grad_fp32 # reference for clarity
+        clipped_grad_fp32.mul_(final_clip_factor_fp32)
+        clipped_param_norm_fp32 = torch.linalg.norm(clipped_grad_fp32)
+        ema_beta_t = torch.tensor(ema_beta, dtype=torch.float32, device=device)
+        gamma_fp32.mul_(ema_beta_t).add_(clipped_param_norm_fp32, alpha=1.0 - ema_beta_t) # gamma_fp32 is state['gamma']
+
+        # Return the clipped FP32 gradient and the final clipping factor
+        return clipped_grad_fp32

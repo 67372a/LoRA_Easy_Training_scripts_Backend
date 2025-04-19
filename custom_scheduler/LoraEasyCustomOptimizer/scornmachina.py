@@ -5,7 +5,7 @@ from torch.optim import Optimizer
 from math import sqrt
 from enum import IntEnum
 import math
-from .utils import stable_spam_clipping, copy_stochastic_, orthograd
+from .utils import stable_spam_clipping, copy_stochastic_, orthograd, adagc_global_clipping_calc, _apply_adagc_clipping_and_update_gamma
 from pytorch_optimizer.base.exception import NoSparseGradientError
 
 # https://github.com/kozistr/pytorch_optimizer/blob/6397d56279ad80b26c4bba7fb4b04852b517fdeb/pytorch_optimizer/optimizer/shampoo_utils.py#L533
@@ -408,10 +408,18 @@ class SCORNMachina(Optimizer):
         use_stable_spam_clipping: bool = False,
         eps: float = 1e-8,
         eps_floor: float = 1e-16,
+        use_adgc: bool = False,
+        adgc_warmup_steps: int = 0,
         **kwargs,
     ):
 
         self._init_lr = lr
+        self.use_adgc = use_adgc
+        if self.use_adgc:
+            self.use_adgc = use_adgc
+            self._adagc_global_clip_factor_fp32 = None
+            self.adgc_warmup_steps = adgc_warmup_steps
+            self._global_step = 0
 
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
@@ -473,6 +481,10 @@ class SCORNMachina(Optimizer):
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
+
+        if self.use_adgc:
+            self._global_step += 1
+            self._global_clip_factor_fp32 = adagc_global_clipping_calc(self, self._global_step, self.adgc_warmup_steps)
 
         for group in self.param_groups:
             if 'step' in group:
@@ -541,6 +553,9 @@ class SCORNMachina(Optimizer):
 
                 if use_orthograd and p.numel() > 1:
                     grad = orthograd(p_fp32, grad)
+
+                if self.use_adgc:
+                    grad = _apply_adagc_clipping_and_update_gamma(self, grad=grad, state=state, step=step, warmup_steps=self.adgc_warmup_steps)
 
                 if use_stable_spam_clipping:
                     grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], eps=eps_floor)
