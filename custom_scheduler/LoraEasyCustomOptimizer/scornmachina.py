@@ -5,7 +5,7 @@ from torch.optim import Optimizer
 from math import sqrt
 from enum import IntEnum
 import math
-from .utils import stable_spam_clipping, copy_stochastic_, orthograd, adagc_global_clipping_calc, _apply_adagc_clipping_and_update_gamma
+from .utils import stable_spam_clipping, copy_stochastic_, orthograd, adagc_global_clipping_calc, _apply_adagc_clipping_and_update_gamma, _paper_orthograd
 from pytorch_optimizer.base.exception import NoSparseGradientError
 
 # https://github.com/kozistr/pytorch_optimizer/blob/6397d56279ad80b26c4bba7fb4b04852b517fdeb/pytorch_optimizer/optimizer/shampoo_utils.py#L533
@@ -504,6 +504,7 @@ class SCORNMachina(Optimizer):
             use_stable_spam_clipping = group['use_stable_spam_clipping']
             eps = group['eps']
             eps_floor = group['eps_floor']
+            apply_ortho_to_group = group.get('orthograd', False) # Default to False if key missing
 
             adopt_clip: float = (step-1)**0.25
 
@@ -551,8 +552,8 @@ class SCORNMachina(Optimizer):
                     ema_squared = ema_squared.to(torch.float32)
                     p_fp32 = p.to(torch.float32)
 
-                if use_orthograd and p.numel() > 1:
-                    grad = orthograd(p_fp32, grad)
+                if apply_ortho_to_group and use_orthograd:
+                    _paper_orthograd(p_fp32, grad)
 
                 if self.use_adgc:
                     grad = _apply_adagc_clipping_and_update_gamma(self, grad=grad, state=state, step=step, warmup_steps=self.adgc_warmup_steps)

@@ -725,3 +725,31 @@ def _apply_adagc_clipping_and_update_gamma(
 
         # Return the clipped FP32 gradient and the final clipping factor
         return clipped_grad_fp32
+
+
+@torch.no_grad()
+def _paper_orthograd(param, grad, alpha: float = 1.0, eps: float = 1e-20):
+    """Applies orthogonal projection to a single parameter's gradient."""
+
+    # Flatten parameter and gradient
+    w = param.view(-1) # Use p.data to avoid graph tracking if not needed
+    g = grad.view(-1)
+
+    w_norm_sq = torch.dot(w, w)
+
+    # Only project if the weight norm is significant
+    # If w_norm_sq is near zero, the parameter contributes little,
+    # and projection is ill-defined or numerically unstable.
+    # Leave the gradient untouched in this case.
+    if w_norm_sq > eps:
+        # Calculate projection of g onto w: (w·g / w·w) * w
+        proj_coeff = torch.dot(w, g) / w_norm_sq # Note: w_norm_sq already > eps
+        g_parallel = proj_coeff * w
+
+        # Subtract the parallel component to get the orthogonal one
+        # Apply scaled orthogonalization
+        g_scaled_orth = g - alpha * g_parallel # <-- Key change
+
+        # Update the gradient in-place with the orthogonal component
+        grad.copy_(g_scaled_orth.view_as(grad))
+    # Else: w_norm_sq is too small, leave p.grad as is.
