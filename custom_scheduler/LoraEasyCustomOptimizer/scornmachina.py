@@ -401,6 +401,7 @@ class SCORNMachina(Optimizer):
         reset_interval: int = 0,
         reset_increment: int = 0,
         orthograd: bool = True,
+        orthograd_alpha: float = 1.0,
         spectral_update_scale: float = 1.0,
         constrain: bool = False,
         cautious_min: float = 1.0,
@@ -435,6 +436,7 @@ class SCORNMachina(Optimizer):
             reset_interval = reset_interval,
             reset_increment = reset_increment,
             orthograd = orthograd,
+            orthograd_alpha = orthograd_alpha,
             spectral_update_scale = spectral_update_scale,
             constrain = constrain,
             cautious_min = cautious_min,
@@ -504,6 +506,7 @@ class SCORNMachina(Optimizer):
             use_stable_spam_clipping = group['use_stable_spam_clipping']
             eps = group['eps']
             eps_floor = group['eps_floor']
+            orthograd_alpha = group['orthograd_alpha']
             apply_ortho_to_group = group.get('orthograd', False) # Default to False if key missing
 
             adopt_clip: float = (step-1)**0.25
@@ -553,7 +556,7 @@ class SCORNMachina(Optimizer):
                     p_fp32 = p.to(torch.float32)
 
                 if apply_ortho_to_group and use_orthograd:
-                    _paper_orthograd(p_fp32, grad)
+                    _paper_orthograd(param=p_fp32, grad=grad, alpha=orthograd_alpha)
 
                 if self.use_adgc:
                     grad = _apply_adagc_clipping_and_update_gamma(self, grad=grad, state=state, step=step, warmup_steps=self.adgc_warmup_steps)

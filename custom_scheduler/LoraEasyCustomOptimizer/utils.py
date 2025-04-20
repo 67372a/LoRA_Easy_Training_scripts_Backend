@@ -747,9 +747,10 @@ def _paper_orthograd(param, grad, alpha: float = 1.0, eps: float = 1e-20):
         g_parallel = proj_coeff * w
 
         # Subtract the parallel component to get the orthogonal one
+        g_orth = g - alpha * g_parallel
         # Apply scaled orthogonalization
-        g_scaled_orth = g - alpha * g_parallel # <-- Key change
+        g_orth_scaled = g_orth.mul_(grad.norm(2) / (g_orth.norm(2) + eps))
 
         # Update the gradient in-place with the orthogonal component
-        grad.copy_(g_scaled_orth.view_as(grad))
+        grad.copy_(g_orth_scaled.view_as(grad))
     # Else: w_norm_sq is too small, leave p.grad as is.
