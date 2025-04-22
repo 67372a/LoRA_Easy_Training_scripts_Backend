@@ -599,19 +599,19 @@ class SCORNMachina(Optimizer):
                 mask = (grad * ema > 0).to(grad.dtype)
                 mask.clamp_min_(betas[0])
                 mask.div_(mask.mean().clamp_(min=1e-3)) # Divide by mean (0.001-1.0)
-                ema = ema.mul(mask)
+                ema.mul_(mask)
 
                 # Update ema
-                ema = ema.mul(betas[0]).add_(grad, alpha=1 - betas[0])
+                ema.mul_(betas[0]).add_(grad, alpha=1 - betas[0])
 
                 # Compass amplification
                 c_t = grad.add(ema.div(bias_correction), alpha=amp)
 
                 if step == 1 or (group["reset_interval"] > 0 and state["steps_since_reset"] // (group["reset_interval"] + (group["reset_increment"] * (max(0,state["times_zero"] - 1)))) > 0):
                     if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
-                        ema_squared = norm.lmo(c_t.pow(2), eps=eps_floor)
+                        ema_squared.copy_(norm.lmo(c_t.pow(2), eps=eps_floor))
                     else:
-                        state["ema_squared"] = norm.lmo(c_t.pow(2), eps=eps_floor)
+                        state["ema_squared"].copy_(norm.lmo(c_t.pow(2), eps=eps_floor))
                 else:
                     # AdamW debias
                     denom = ema_squared.sqrt().div_(bias_correction_sqrt).add_(curr_eps)

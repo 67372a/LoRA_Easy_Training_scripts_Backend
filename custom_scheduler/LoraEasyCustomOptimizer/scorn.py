@@ -535,10 +535,10 @@ class SCORN(Optimizer):
                 mask = (grad * ema > 0).to(grad.dtype)
                 mask.clamp_min_(betas[0])
                 mask.div_(mask.mean().clamp_(min=1e-3)) # Divide by mean (0.001-1.0)
-                ema = ema.mul(mask)
+                ema.mul_(mask)
 
                 # Update ema
-                ema = ema.mul(betas[0]).add_(grad, alpha=1 - betas[0])
+                ema.mul_(betas[0]).add_(grad, alpha=1 - betas[0])
 
                 # Compass amplification
                 c_t = grad.add(ema.div(bias_correction), alpha=amp)
@@ -547,7 +547,7 @@ class SCORN(Optimizer):
                 denom = ema_squared.sqrt().div_(bias_correction_sqrt)
 
                 # ADOPT update
-                ema_squared = ema_squared.mul(slow_beta).addcmul_(c_t, c_t, value=1 - slow_beta)
+                ema_squared.mul_(slow_beta).addcmul_(c_t, c_t, value=1 - slow_beta)
 
                 # Atan2-Adamw, Spectral update part 2/2
                 full_step = c_t.atan2(denom).mul_(atan2_mul).mul_(spectral_update_scale)
