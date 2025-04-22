@@ -411,6 +411,7 @@ class SCORNMachina(Optimizer):
         eps_floor: float = 1e-16,
         use_adgc: bool = False,
         adgc_warmup_steps: int = 0,
+        amsgrad: bool = False,
         **kwargs,
     ):
 
@@ -444,6 +445,7 @@ class SCORNMachina(Optimizer):
             use_stable_spam_clipping = use_stable_spam_clipping,
             eps = eps,
             eps_floor = eps_floor,
+            amsgrad = amsgrad
         )
 
         super(SCORNMachina, self).__init__(params, defaults)
@@ -508,6 +510,7 @@ class SCORNMachina(Optimizer):
             eps_floor = group['eps_floor']
             orthograd_alpha = group['orthograd_alpha']
             apply_ortho_to_group = group.get('orthograd', False) # Default to False if key missing
+            amsgrad = group['amsgrad']
 
             adopt_clip: float = (step-1)**0.25
 
@@ -613,8 +616,13 @@ class SCORNMachina(Optimizer):
                     # AdamW debias
                     denom = ema_squared.sqrt().div_(bias_correction_sqrt).add_(curr_eps)
 
+                    new_ema_squared = ema_squared.mul(slow_beta).addcmul_(c_t, c_t, value=1 - slow_beta)
+
                     # ADOPT update
-                    ema_squared = ema_squared.mul(slow_beta).addcmul_(c_t, c_t, value=1 - slow_beta)
+                    if amsgrad:
+                        torch.maximum(ema_squared, new_ema_squared, out=ema_squared)
+                    else:
+                        ema_squared = new_ema_squared
 
                     # Atan2-Adamw
                     full_step = c_t.div(denom).mul_(spectral_update_scale)
