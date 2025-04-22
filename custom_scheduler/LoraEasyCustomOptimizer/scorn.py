@@ -426,7 +426,7 @@ class SCORN(Optimizer):
     @torch.no_grad()
     def reset_momentums(self, momentum, sq_momentum, grad):
         momentum.copy_(torch.zeros_like(momentum))
-        sq_momentum.copy_(grad.pow(2))
+        sq_momentum.copy_(grad.pow(2).detach().to(dtype=sq_momentum.dtype, copy=True))
 
     @torch.no_grad()
     def reset(self):
@@ -479,7 +479,7 @@ class SCORN(Optimizer):
                     # Exponential moving average of gradient values
                     state["ema"] = torch.zeros_like(p)
                     # Exponential moving average of squared gradient values
-                    state["ema_squared"] = grad.pow(2)
+                    state["ema_squared"] = grad.detach().to(dtype=p.dtype, copy=True)
                     # Optional resets
                     if group["reset_interval"] > 0:
                         state["times_zero"] = 0

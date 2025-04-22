@@ -620,7 +620,7 @@ class SCORNMachina(Optimizer):
 
                     # ADOPT update
                     if amsgrad:
-                        torch.maximum(ema_squared, new_ema_squared, out=ema_squared)
+                        torch.maximum(ema_squared.mul(slow_beta), new_ema_squared, out=ema_squared)
                     else:
                         ema_squared.copy_(new_ema_squared)
 
