@@ -622,7 +622,7 @@ class SCORNMachina(Optimizer):
                     if amsgrad:
                         torch.maximum(ema_squared, new_ema_squared, out=ema_squared)
                     else:
-                        ema_squared = new_ema_squared
+                        ema_squared.copy_(new_ema_squared)
 
                     # Atan2-Adamw
                     full_step = c_t.div(denom).mul_(spectral_update_scale)
