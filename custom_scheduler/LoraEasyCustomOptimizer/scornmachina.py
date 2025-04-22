@@ -412,6 +412,7 @@ class SCORNMachina(Optimizer):
         use_adgc: bool = False,
         adgc_warmup_steps: int = 0,
         amsgrad: bool = False,
+        amsgrad_decay_rate: float = 0.998,
         **kwargs,
     ):
 
@@ -445,7 +446,8 @@ class SCORNMachina(Optimizer):
             use_stable_spam_clipping = use_stable_spam_clipping,
             eps = eps,
             eps_floor = eps_floor,
-            amsgrad = amsgrad
+            amsgrad = amsgrad,
+            amsgrad_decay_rate = amsgrad_decay_rate,
         )
 
         super(SCORNMachina, self).__init__(params, defaults)
@@ -511,6 +513,7 @@ class SCORNMachina(Optimizer):
             orthograd_alpha = group['orthograd_alpha']
             apply_ortho_to_group = group.get('orthograd', False) # Default to False if key missing
             amsgrad = group['amsgrad']
+            amsgrad_decay_rate = group['amsgrad_decay_rate']
 
             adopt_clip: float = (step-1)**0.25
 
@@ -620,7 +623,7 @@ class SCORNMachina(Optimizer):
 
                     # ADOPT update
                     if amsgrad:
-                        torch.maximum(ema_squared.mul(slow_beta), new_ema_squared, out=ema_squared)
+                        torch.maximum(ema_squared.mul(amsgrad_decay_rate), new_ema_squared, out=ema_squared)
                     else:
                         ema_squared.copy_(new_ema_squared)
 
