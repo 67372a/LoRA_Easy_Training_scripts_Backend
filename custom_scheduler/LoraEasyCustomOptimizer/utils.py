@@ -754,3 +754,14 @@ def _paper_orthograd(param, grad, alpha: float = 1.0, eps: float = 1e-20):
         # Update the gradient in-place with the orthogonal component
         grad.copy_(g_orth_scaled.view_as(grad))
     # Else: w_norm_sq is too small, leave p.grad as is.
+
+@torch.no_grad()
+def apply_cautious(update: torch.Tensor, grad: torch.Tensor) -> None:
+    r"""Apply the Cautious Optimizer feature.
+
+    :param update: torch.Tensor. update. it'll be masked in in-place manner.
+    :param grad: torch.Tensor. gradient.
+    """
+    mask = (update * grad > 0).to(grad.dtype)
+    mask.div_(mask.mean().clamp_(min=1e-3))
+    update.mul_(mask)

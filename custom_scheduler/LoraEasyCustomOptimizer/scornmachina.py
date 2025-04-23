@@ -7,6 +7,7 @@ from enum import IntEnum
 import math
 from .utils import stable_spam_clipping, copy_stochastic_, orthograd, adagc_global_clipping_calc, _apply_adagc_clipping_and_update_gamma, _paper_orthograd
 from pytorch_optimizer.base.exception import NoSparseGradientError
+from typing import Optional
 
 # https://github.com/kozistr/pytorch_optimizer/blob/6397d56279ad80b26c4bba7fb4b04852b517fdeb/pytorch_optimizer/optimizer/shampoo_utils.py#L533
 def zero_power_via_newton_schulz_6(
@@ -412,7 +413,7 @@ class SCORNMachina(Optimizer):
         use_adgc: bool = False,
         adgc_warmup_steps: int = 0,
         amsgrad: bool = False,
-        amsgrad_decay_rate: float = 0.998,
+        amsgrad_decay_rate: Optional[float] = None,
         **kwargs,
     ):
 
@@ -423,6 +424,9 @@ class SCORNMachina(Optimizer):
             self._adagc_global_clip_factor_fp32 = None
             self.adgc_warmup_steps = adgc_warmup_steps
             self._global_step = 0
+
+        if amsgrad_decay_rate is None:
+            amsgrad_decay_rate = betas[1]
 
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
