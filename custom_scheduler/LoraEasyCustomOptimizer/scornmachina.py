@@ -425,9 +425,6 @@ class SCORNMachina(Optimizer):
             self.adgc_warmup_steps = adgc_warmup_steps
             self._global_step = 0
 
-        if amsgrad_decay_rate is None:
-            amsgrad_decay_rate = betas[1]
-
         # Override zero to 1e-37, as zero and float32.tiny NaNs
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = torch.finfo(torch.float32).tiny
@@ -627,7 +624,7 @@ class SCORNMachina(Optimizer):
 
                     # ADOPT update
                     if amsgrad:
-                        torch.maximum(ema_squared.mul(amsgrad_decay_rate), new_ema_squared, out=ema_squared)
+                        torch.maximum(ema_squared.mul(amsgrad_decay_rate if amsgrad_decay_rate is not None else slow_beta), new_ema_squared, out=ema_squared)
                     else:
                         ema_squared.copy_(new_ema_squared)
 
