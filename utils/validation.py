@@ -42,6 +42,25 @@ def validate(args: dict) -> tuple[bool, bool, list[str], dict, dict]:
                 del args_data["log_prefix"]
         if "log_prefix_mode" in args_data: del args_data["log_prefix_mode"]
 
+    if "run_name_mode" in args_data:
+        mode = args_data["run_name_mode"]
+        if mode == "output_name":
+            if "output_name" in args_data and args_data["output_name"]:
+                args_data["wandb_run_name"] = args_data["output_name"]
+            else:
+                # Error only if output_name is expected but missing/empty
+                over_errors.append("Log Prefix Mode is 'Output Name', but 'Output Name' in Saving Args is missing or empty.")
+                over_pass = False # Mark overall validation as failed
+        elif mode == "manual":
+            if "run_name" not in args_data or not args_data.get("run_name", ""):
+                over_errors.append("Log Prefix Mode is 'Manual', but the 'Manual Run Name' is missing or empty.")
+                over_pass = False # Mark overall validation as failed
+                args_data["wandb_run_name"] = args_data["run_name"]
+        elif mode == "default":
+            if "run_name" in args_data:
+                del args_data["run_name"]
+        if "run_name_mode" in args_data: del args_data["run_name_mode"]
+
     tag_data = {}
     if not over_errors:
         validate_warmup_ratio(args_data, dataset_data)
