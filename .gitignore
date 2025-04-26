@@ -183,3 +183,4 @@ wd14_tagger_model
 wandb/
 .aiexclude
 config.json
+*.code-workspace
