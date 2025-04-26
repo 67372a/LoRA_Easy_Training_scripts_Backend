@@ -19,6 +19,29 @@ def validate(args: dict) -> tuple[bool, bool, list[str], dict, dict]:
     dataset_pass, dataset_errors, dataset_data = validate_dataset_args(args["dataset"])
     over_pass = args_pass and dataset_pass
     over_errors = args_errors + dataset_errors
+
+    # Process log prefix mode regardless of initial pass status, but add errors if needed
+    if "log_prefix_mode" in args_data:
+        mode = args_data["log_prefix_mode"]
+        if mode == "output_name":
+            # Check if output_name exists and is not empty (comes from saving_args)
+            if "output_name" in args_data and args_data["output_name"]:
+                args_data["log_prefix"] = args_data["output_name"] + "_"
+            else:
+                # Error only if output_name is expected but missing/empty
+                over_errors.append("Log Prefix Mode is 'Output Name', but 'Output Name' in Saving Args is missing or empty.")
+                over_pass = False # Mark overall validation as failed
+        elif mode == "manual":
+            # Check if log_prefix exists (set by logging UI) and is not empty
+            if "log_prefix" not in args_data or not args_data.get("log_prefix", ""):
+                over_errors.append("Log Prefix Mode is 'Manual', but the 'Manual Prefix' is missing or empty.")
+                over_pass = False # Mark overall validation as failed
+        elif mode == "disabled":
+            if "log_prefix" in args_data:
+                # Clean up if prefix exists but mode is disabled
+                del args_data["log_prefix"]
+        if "log_prefix_mode" in args_data: del args_data["log_prefix_mode"]
+
     tag_data = {}
     if not over_errors:
         validate_warmup_ratio(args_data, dataset_data)
@@ -27,9 +50,7 @@ def validate(args: dict) -> tuple[bool, bool, list[str], dict, dict]:
         validate_existing_files(args_data)
         validate_optimizer(args_data)
     sdxl = validate_sdxl(args_data)
-    if not over_pass:
-        return False, sdxl, over_errors, args_data, dataset_data, tag_data
-    return True, sdxl, over_errors, args_data, dataset_data, tag_data
+    return over_pass, sdxl, over_errors, args_data, dataset_data, tag_data
 
 
 def validate_args(args: dict) -> tuple[bool, list[str], dict]:
