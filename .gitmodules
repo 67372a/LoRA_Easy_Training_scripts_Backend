@@ -1,6 +1,3 @@
 [submodule "sd_scripts"]
 	path = sd_scripts
 	url = https://github.com/67372a/sd-scripts
-[submodule "LyCORIS"]
-	path = LyCORIS
-	url = https://github.com/67372a/LyCORIS
