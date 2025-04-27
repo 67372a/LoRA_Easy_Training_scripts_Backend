@@ -410,7 +410,7 @@ class SCORNMachina(Optimizer):
         use_stable_spam_clipping: bool = False,
         eps: float = 1e-8,
         eps_floor: float = 1e-16,
-        use_adgc: bool = False,
+        use_adagc: bool = False,
         adgc_warmup_steps: int = 0,
         amsgrad: bool = False,
         amsgrad_decay_rate: Optional[float] = None,
@@ -418,9 +418,9 @@ class SCORNMachina(Optimizer):
     ):
 
         self._init_lr = lr
-        self.use_adgc = use_adgc
-        if self.use_adgc:
-            self.use_adgc = use_adgc
+        self.use_adagc = use_adagc
+        if self.use_adagc:
+            self.use_adagc = use_adagc
             self._adagc_global_clip_factor_fp32 = None
             self.adgc_warmup_steps = adgc_warmup_steps
             self._global_step = 0
@@ -489,7 +489,7 @@ class SCORNMachina(Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
-        if self.use_adgc:
+        if self.use_adagc:
             self._global_step += 1
             self._global_clip_factor_fp32 = adagc_global_clipping_calc(self, self._global_step, self.adgc_warmup_steps)
 
@@ -565,7 +565,7 @@ class SCORNMachina(Optimizer):
                 if apply_ortho_to_group and use_orthograd:
                     _paper_orthograd(param=p_fp32, grad=grad, alpha=orthograd_alpha)
 
-                if self.use_adgc:
+                if self.use_adagc:
                     grad = _apply_adagc_clipping_and_update_gamma(self, grad=grad, state=state, step=step, warmup_steps=self.adgc_warmup_steps)
 
                 if use_stable_spam_clipping:
