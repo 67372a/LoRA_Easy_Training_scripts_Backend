@@ -411,7 +411,7 @@ class SCORNMachina(Optimizer):
         eps: float = 1e-8,
         eps_floor: float = 1e-16,
         use_adagc: bool = False,
-        adgc_warmup_steps: int = 0,
+        adagc_warmup_steps: int = 0,
         amsgrad: bool = False,
         amsgrad_decay_rate: Optional[float] = None,
         **kwargs,
@@ -422,7 +422,7 @@ class SCORNMachina(Optimizer):
         if self.use_adagc:
             self.use_adagc = use_adagc
             self._adagc_global_clip_factor_fp32 = None
-            self.adgc_warmup_steps = adgc_warmup_steps
+            self.adagc_warmup_steps = adagc_warmup_steps
             self._global_step = 0
 
         # Override zero to 1e-37, as zero and float32.tiny NaNs
@@ -491,7 +491,7 @@ class SCORNMachina(Optimizer):
 
         if self.use_adagc:
             self._global_step += 1
-            self._global_clip_factor_fp32 = adagc_global_clipping_calc(self, self._global_step, self.adgc_warmup_steps)
+            self._global_clip_factor_fp32 = adagc_global_clipping_calc(self, self._global_step, self.adagc_warmup_steps)
 
         for group in self.param_groups:
             if 'step' in group:
@@ -566,7 +566,7 @@ class SCORNMachina(Optimizer):
                     _paper_orthograd(param=p_fp32, grad=grad, alpha=orthograd_alpha)
 
                 if self.use_adagc:
-                    grad = _apply_adagc_clipping_and_update_gamma(self, grad=grad, state=state, step=step, warmup_steps=self.adgc_warmup_steps)
+                    grad = _apply_adagc_clipping_and_update_gamma(self, grad=grad, state=state, step=step, warmup_steps=self.adagc_warmup_steps)
 
                 if use_stable_spam_clipping:
                     grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], eps=eps_floor)
