@@ -101,7 +101,7 @@ def setup_venv(venv_pip):
     )
     
     subprocess.check_call(
-        f"{venv_pip} install -U --force-reinstall --no-deps ../installables/lycoris_lora-3.1.1.post1-py3-none-any.whl",
+        f"{venv_pip} install -U --force-reinstall --no-deps ../installables/lycoris_lora-3.2.0.post2-py3-none-any.whl",
         shell=PLATFORM == "linux",
     )
 

@@ -512,7 +512,7 @@ class SCORNMachina(Optimizer):
             eps = group['eps']
             eps_floor = group['eps_floor']
             orthograd_alpha = group['orthograd_alpha']
-            apply_ortho_to_group = group.get('orthograd', False) # Default to False if key missing
+            apply_ortho_to_group = group.get('is_ortho_group', False) # Default to False if key missing
             amsgrad = group['amsgrad']
             amsgrad_decay_rate = group['amsgrad_decay_rate']
 
