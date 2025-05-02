@@ -52,27 +52,35 @@ def unit_norm_logging(x: torch.Tensor, norm: float = 2.0):
     logging.info(f"unit_norm shape={str(x.shape)}")
     logging.info(f"unit_norm norms={str(torch.norm(x, p=norm, dim=dim, keepdim=keep_dim))}")
 
-
+@torch.no_grad()
 def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
+    # Determine the intermediate FP32 tensor
+    if source.dtype == torch.float64:
+        src_fp32 = source.to(dtype=torch.float32)
+    elif source.dtype == torch.float32:
+        src_fp32 = source
+    else:
+        target.copy_(source.to(dtype=target.dtype))
+        return
+
     # thanks to Nerogar for fast stochastic pytorch implementation
     # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
-    with torch.no_grad():
-        # create a random 16 bit integer
-        result = torch.randint_like(
-            source,
-            dtype=torch.int32,
-            low=0,
-            high=(1 << 16),
-        )
+    # create a random 16 bit integer
+    result = torch.randint_like(
+        src_fp32,
+        dtype=torch.int32,
+        low=0,
+        high=(1 << 16),
+    )
 
-        # add the random number to the lower 16 bit of the mantissa
-        result.add_(source.view(dtype=torch.int32))
+    # add the random number to the lower 16 bit of the mantissa
+    result.add_(src_fp32.view(dtype=torch.int32))
 
-        # mask off the lower 16 bit of the mantissa
-        result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
+    # mask off the lower 16 bit of the mantissa
+    result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
 
-        # copy the higher 16 bit into the target tensor
-        target.copy_(result.view(dtype=torch.float32))
+    # copy the higher 16 bit into the target tensor
+    target.copy_(result.view(dtype=torch.float32))
     
 def agc(p: torch.Tensor, 
         grad: torch.Tensor, 
