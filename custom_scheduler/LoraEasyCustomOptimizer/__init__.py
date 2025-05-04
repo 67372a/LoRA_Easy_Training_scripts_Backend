@@ -38,7 +38,8 @@ from LoraEasyCustomOptimizer.scorn import SCORN
 from LoraEasyCustomOptimizer.scornmachina import SCORNMachina
 from LoraEasyCustomOptimizer.mythical import Mythical
 from LoraEasyCustomOptimizer.glyph import Glyph
-from LoraEasyCustomOptimizer.racs import (RACS, Alice)
+from LoraEasyCustomOptimizer.racs import RACS
+from LoraEasyCustomOptimizer.alice import Alice
 from LoraEasyCustomOptimizer.fira import Fira
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
