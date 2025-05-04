@@ -554,7 +554,8 @@ class Mythical(Optimizer):
                 # Compass amplification (functionally/practically a low-pass filter when used with a denom)
                 update = c_t.add(ema, alpha=group["amp"] * betas[0])
 
-                update = zero_power_via_newton_schulz_6(update.view(len(update), -1)).view(update.shape)
+                if update.ndim > 0:
+                    update = zero_power_via_newton_schulz_6(update.view(len(update), -1)).view(update.shape)
 
                 # ADOPT update (update squared EMA after creation of denominator)
                 if not group["atan2"]:
