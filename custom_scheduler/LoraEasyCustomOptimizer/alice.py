@@ -82,26 +82,113 @@ class Alice(BaseOptimizer):
 
     @staticmethod
     def subspace_iteration(
-        a: torch.Tensor, mat: torch.Tensor, num_steps: int = 1
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        r"""Perform subspace iteration."""
-        u = mat
-        for _ in range(num_steps):
-            u, _ = torch.linalg.qr(a @ u)
+        a: torch.Tensor, mat: torch.Tensor, num_steps: int = 1, jitter: float = 1e-6 # Add jitter param
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        r"""Perform subspace iteration. Returns eigenvalues, eigenvectors (coeffs), and basis u."""
+        # Ensure inputs are at least float32 for stability
+        a_float32 = a.to(torch.float32)
+        u = mat.to(torch.float32) # Start with float32 basis
 
-        return torch.linalg.eigh(u.T @ a @ u)
+        basis_u = u # Initialize basis_u
+        for _ in range(num_steps):
+            # a is (m, m), u is (m, rank) -> a @ u is (m, rank)
+            # --- Potentially add stabilization here too if QR fails later ---
+            # try:
+            #     q_val, r_val = torch.linalg.qr(a_float32 @ u)
+            #     u = q_val
+            # except torch._C._LinAlgError:
+            #     print("Warning: QR decomposition failed in subspace_iteration. Adding jitter.")
+            #     q_val, r_val = torch.linalg.qr(a_float32 @ u + jitter * torch.randn_like(a_float32 @ u))
+            #     u = q_val
+            # --- End potential stabilization ---
+            u, _ = torch.linalg.qr(a_float32 @ u) # u remains (m, rank), now float32
+            basis_u = u # Store the refined basis (float32)
+
+        # V = basis_u.T @ a @ basis_u has shape (rank, rank)
+        # This is the matrix causing issues for eigh
+        v_matrix = basis_u.T @ a_float32 @ basis_u
+
+        # --- Stabilization for eigh ---
+        # 1. Ensure symmetry (though theoretically guaranteed, enforce numerically)
+        v_matrix_sym = (v_matrix + v_matrix.T) / 2.0
+
+        # 2. Add diagonal jitter for numerical stability
+        rank_dim = v_matrix_sym.shape[0]
+        diag_jitter = jitter * torch.eye(rank_dim, device=v_matrix_sym.device, dtype=torch.float32)
+        v_matrix_stable = v_matrix_sym + diag_jitter
+        # --- End stabilization ---
+
+        try:
+            # eigh returns vals (rank,), vecs (rank, rank) where V @ vecs = vals * vecs
+            vals, vecs = torch.linalg.eigh(v_matrix_stable)
+        except torch._C._LinAlgError as e:
+            print(f"FATAL: linalg.eigh failed even after jitter/symmetry: {e}. Input matrix stats:")
+            print(f"Matrix shape: {v_matrix_stable.shape}")
+            print(f"Matrix dtype: {v_matrix_stable.dtype}")
+            print(f"Contains NaNs: {torch.isnan(v_matrix_stable).any()}")
+            print(f"Contains Infs: {torch.isinf(v_matrix_stable).any()}")
+            # Optional: Save the matrix for debugging
+            # torch.save(v_matrix_stable, "failed_eigh_matrix.pt")
+            raise e # Re-raise the error after printing info
+
+        # Return eigenvalues, eigenvectors (coeffs), and the basis, converting back if needed
+        # Basis_u is already float32, vals/vecs computed from float32 are float32
+        # The calling function (`switch`) handles final conversion back to original_dtype
+        return vals, vecs, basis_u
 
     def switch(self, q: torch.Tensor, u_prev: torch.Tensor, rank: int, leading_basis: int) -> torch.Tensor:
-        vals, vecs = self.subspace_iteration(q.to(torch.float32), u_prev.to(torch.float32), num_steps=1)
+        # ... (previous code for switch, but ensure it calls subspace_iteration correctly) ...
+        m_dim = q.shape[0]
+        original_dtype = q.dtype
+        q_float32 = q.to(torch.float32)
+        u_prev_float32 = u_prev.to(torch.float32)
+
+        # Pass jitter value (e.g., from group['eps'] or a small default)
+        # Using eps might be too large, start with a smaller value like 1e-6
+        eigh_jitter = 1e-8
+        vals, vecs, basis_u = self.subspace_iteration(q_float32, u_prev_float32, num_steps=1, jitter=eigh_jitter)
+
+        # ... (rest of the switch function remains the same, ensuring it uses float32 intermediates
+        #      and converts back to original_dtype at the end) ...
+        eigenvectors_full = basis_u @ vecs # (m, rank) @ (rank, rank) = (m, rank)
 
         leading_indices = torch.argsort(vals, descending=True)[:leading_basis]
-        u_t1 = vecs[:, leading_indices]
+        u_t1 = eigenvectors_full[:, leading_indices] # Shape (m, l)
 
-        u_c, _ = torch.linalg.qr(torch.eye(q.shape[0], device=q.device) - u_t1 @ u_t1.T)
-        u_t2 = u_c[:, :rank - leading_basis]  # fmt: skip
+        eye_m = torch.eye(m_dim, device=q.device, dtype=torch.float32)
+        complement_proj = eye_m - u_t1 @ u_t1.T
 
-        return torch.cat([u_t1, u_t2], dim=1).to(q.dtype)
+        # Jitter for QR stability (maybe increase slightly if QR still fails)
+        qr_jitter = 1e-8 * torch.randn_like(complement_proj)
+        u_c, _ = torch.linalg.qr(complement_proj + qr_jitter)
 
+        num_complement_needed = rank - leading_basis
+        if num_complement_needed <= 0:
+             u_t2 = torch.empty((m_dim, 0), device=q.device, dtype=torch.float32)
+        elif u_c.shape[1] >= num_complement_needed:
+             u_t2 = u_c[:, :num_complement_needed]
+        else:
+            # Fallback if QR didn't yield enough columns
+            #print(f"Warning: Complement basis via QR has insufficient rank ({u_c.shape[1]} < {num_complement_needed}). "
+            #      f"Padding {num_complement_needed - u_c.shape[1]} dimensions.")
+            padding = torch.zeros(m_dim, num_complement_needed - u_c.shape[1], device=q.device, dtype=torch.float32)
+            # Orthogonalize padding against u_c? For now, just append zeros.
+            u_t2 = torch.cat([u_c[:, :u_c.shape[1]], padding], dim=1) # Take available columns + padding
+
+        final_u = torch.cat([u_t1, u_t2], dim=1)
+
+        # Ensure final shape consistency
+        if final_u.shape[1] > rank:
+            final_u = final_u[:, :rank]
+        elif final_u.shape[1] < rank:
+             # This case might happen if QR failed badly and padding wasn't enough
+             #print(f"Warning: Final basis rank {final_u.shape[1]} less than target {rank}. Padding.")
+             padding = torch.zeros(m_dim, rank - final_u.shape[1], device=q.device, dtype=torch.float32)
+             final_u = torch.cat([final_u, padding], dim=1)
+
+
+        return final_u.to(original_dtype)
+    
     @staticmethod
     def compensation(
         grad: torch.Tensor,
@@ -111,6 +198,7 @@ class Alice(BaseOptimizer):
         gamma: float,
         decay_rate: float,
         rank: int,
+        eps: float,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         m, n = grad.shape
 
@@ -122,7 +210,7 @@ class Alice(BaseOptimizer):
 
         d = torch.zeros_like(grad)
         diag_len: int = min(m, n)
-        d[torch.arange(diag_len), torch.arange(diag_len)] = 1.0 / p.sqrt()[:diag_len]
+        d[torch.arange(diag_len), torch.arange(diag_len)] = (1.0 / p.sqrt())[:diag_len]
 
         c_t = math.sqrt(m - rank) * (grad - u @ sigma) * d if m >= rank else torch.zeros_like(grad)
 
@@ -224,9 +312,9 @@ class Alice(BaseOptimizer):
                 m.mul_(beta1).add_(sigma, alpha=1.0 - beta1)
                 v.mul_(beta2).add_(sigma.pow(2), alpha=1.0 - beta2)
 
-                c_t, phi = self.compensation(grad, u, state['p'], state['phi'], group['gamma'], beta1, rank)
+                c_t, phi = self.compensation(grad, u, state['p'], state['phi'], group['gamma'], beta1, rank, group['eps'])
 
-                update = u @ (m / v.sqrt())
+                update = u @ (m / (v.sqrt() + group['eps']))
                 update.add_(c_t, alpha=group['alpha_c'])
 
                 p_fp32.add_(update, alpha=-group['lr'] * group['alpha'])
