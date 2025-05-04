@@ -36,6 +36,10 @@ from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
 from .prodigy_plus.prodigy_plus_schedulefree import ProdigyPlusExMachinaScheduleFree
 from LoraEasyCustomOptimizer.scorn import SCORN
 from LoraEasyCustomOptimizer.scornmachina import SCORNMachina
+from LoraEasyCustomOptimizer.mythical import Mythical
+from LoraEasyCustomOptimizer.glyph import Glyph
+from LoraEasyCustomOptimizer.racs import (RACS, Alice)
+from LoraEasyCustomOptimizer.fira import Fira
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ADOPT,
@@ -52,6 +56,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdamW4bitAO,
     AdamW8bitAO,
     AdamWfp8AO,
+    Alice,
     CAME,
     Compass,
     CompassAO,
@@ -68,6 +73,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     FCompassADOPT,
     FCompassADOPTMARS,
     FCompassPlus,
+    Fira,
     FMARSCrop,
     FMARSCropV2,
     FMARSCropV2ExMachina,
@@ -76,12 +82,15 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     FishMonger,
     FishMonger8BitBNB,
     GaLore,
+    Glyph,
     GrokFastAdamW,
     LPFAdamW,
     LaProp,
     MomentusCaution,
+    Mythical,
     ProdigyPlusScheduleFree,
     ProdigyPlusExMachinaScheduleFree,
+    RACS,
     REMASTER,
     RMSProp,
     RMSPropADOPT,
