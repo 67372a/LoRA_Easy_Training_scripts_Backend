@@ -28,8 +28,8 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
         target.copy_(result.view(dtype=torch.float32))
 
 # https://github.com/kozistr/pytorch_optimizer/blob/6397d56279ad80b26c4bba7fb4b04852b517fdeb/pytorch_optimizer/optimizer/shampoo_utils.py#L533
-def zero_power_via_newton_schulz_5(
-    g: torch.Tensor, num_steps: int = 5, eps: float = 1e-12, weights: tuple[int, int, int] = (3, -3.41421356237, 1.41421356237)
+def zero_power_via_newton_schulz_6(
+    g: torch.Tensor, eps: float = 1e-16
 ) -> torch.Tensor:
     r"""Compute the zeroth power / orthogonalization of G.
 
@@ -64,7 +64,6 @@ def zero_power_via_newton_schulz_5(
     if g.size(0) > g.size(1):
         x = x.T
 
-    #for _ in range(num_steps):
     for weight in abc_list:
         a = x @ x.T
         b = weight[1] * a + weight[2] * a @ a
@@ -229,7 +228,7 @@ class SpectralConv(Norm):
         return x_fp64.to(dtype=x.dtype)
 
     def lmo(self, grad: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-        grad = zero_power_via_newton_schulz_5(grad.view(len(grad), -1), self.num_steps).view(grad.shape)
+        grad = zero_power_via_newton_schulz_6(grad.view(len(grad), -1)).view(grad.shape)
 
         d_out, d_in, kernel_size, *_ = grad.size()
 
@@ -267,7 +266,7 @@ class Spectral(Norm):
         return x_fp64.to(dtype=x.dtype)
 
     def lmo(self, grad: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-        grad = zero_power_via_newton_schulz_5(grad.view(len(grad), -1), self.num_steps).view(grad.shape)
+        grad = zero_power_via_newton_schulz_6(grad.view(len(grad), -1)).view(grad.shape)
 
         d_out, d_in = grad.size()
 
@@ -391,16 +390,15 @@ class Mythical(Optimizer):
         weight_decay_rate: float = 0.998,
         amp: float = 1.0,
         orthograd: bool = False,
-        adaptive_ema: bool = True,
-        atan2: bool = True,
-        warmup: bool = True,
+        adaptive_ema: bool = False,
+        atan2: bool = False,
+        warmup: bool = False,
         cautious_min: float = 1.0,
         stochastic_fp: bool = True,
-        zero_dim_scalar_projection: bool = False,
+        **kwargs
     ):
 
         self._init_lr = lr
-        self.zero_dim_scalar_projection = zero_dim_scalar_projection
 
         defaults = dict(
             lr = lr,
@@ -447,7 +445,7 @@ class Mythical(Optimizer):
     
     @torch.no_grad()
     def scalar_projection(self, to_proj, receive):
-        if receive.ndim > 1 and self.zero_dim_scalar_projection:
+        if receive.ndim > 1:
             to_proj_flat = to_proj.reshape(to_proj.shape[0], -1)
             receive_flat = receive.reshape(receive.shape[0], -1)
 
@@ -478,13 +476,6 @@ class Mythical(Optimizer):
     def reset(self):
         pass
 
-    @torch.no_grad() # Unsure if this is needed
-    def init(self):
-        for group in self.param_groups:
-            norm = build_lmo_norm(LMONorm.AUTO)
-            for p in group['params']:
-                norm.init(p)
-
     @torch.no_grad()
     def step(self, closure = None):
         loss = None
@@ -503,8 +494,6 @@ class Mythical(Optimizer):
             weight_decay = group["weight_decay"]
             weight_decay_rate = group["weight_decay_rate"]
             step = group['step']
-
-            norm = build_lmo_norm(LMONorm.AUTO)
 
             for p in group["params"]:
                 if p.grad is None:
@@ -542,12 +531,15 @@ class Mythical(Optimizer):
                 if group["orthograd"] and p_fp32.data.nelement() > 1: # Might just be me, but I've had the most success via ndim > 1
                     self.orthograd2(p_fp32, grad)
 
-                # MARS
-                correction = (((1. - betas[0]) / 2) * betas[0]) / (1 - betas[0]) * (grad - prev_grad) * self.scalar_projection(p_fp32, grad)
-                c_t = grad + correction
+                rms = grad.pow(2).mean().sqrt_().clamp_min_(1)
+                grad = grad.div(rms)
 
-                # SCION spectral norm
-                c_t = norm.lmo(c_t, eps=1e-30)
+                # Stabilize gradient oscillations via weird but cool math that I don't have a name for
+                grad = self.smoothen_oscillation(grad, prev_grad)
+
+                # MARS
+                correction = (((1. - betas[0]) / 2) * betas[0]) / (1 - betas[0]) * (grad - prev_grad)
+                c_t = grad + correction
 
                 # Update ema
                 ema = ema.mul(betas[0]).add_(c_t)
@@ -561,6 +553,8 @@ class Mythical(Optimizer):
 
                 # Compass amplification (functionally/practically a low-pass filter when used with a denom)
                 update = c_t.add(ema, alpha=group["amp"] * betas[0])
+
+                update = zero_power_via_newton_schulz_6(update.view(len(update), -1)).view(update.shape)
 
                 # ADOPT update (update squared EMA after creation of denominator)
                 if not group["atan2"]:
