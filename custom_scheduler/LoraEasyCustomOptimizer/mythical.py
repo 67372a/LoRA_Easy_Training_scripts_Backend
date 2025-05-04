@@ -6,26 +6,7 @@ from math import sqrt
 from enum import IntEnum
 import math
 
-def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
-    # thanks to Nerogar for fast stochastic pytorch implementation
-    # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
-    with torch.no_grad():
-        # create a random 16 bit integer
-        result = torch.randint_like(
-            source,
-            dtype=torch.int32,
-            low=0,
-            high=(1 << 16),
-        )
-
-        # add the random number to the lower 16 bit of the mantissa
-        result.add_(source.view(dtype=torch.int32))
-
-        # mask off the lower 16 bit of the mantissa
-        result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
-
-        # copy the higher 16 bit into the target tensor
-        target.copy_(result.view(dtype=torch.float32))
+from .utils import copy_stochastic_
 
 # https://github.com/kozistr/pytorch_optimizer/blob/6397d56279ad80b26c4bba7fb4b04852b517fdeb/pytorch_optimizer/optimizer/shampoo_utils.py#L533
 def zero_power_via_newton_schulz_6(
@@ -502,25 +483,27 @@ class Mythical(Optimizer):
 
                 grad = p.grad.data
 
+                grad = grad.detach().clone()
+                p_fp32 = p.detach().clone()
+
                 # State initialization
                 if len(state) == 0:
                     # Exponential moving average of gradient values
                     state["ema"] = torch.zeros_like(p.data)
                     # Exponential moving average of squared gradient values
                     state["ema_squared"] = torch.ones_like(p.data)
-                    state["prev_grad"] = torch.zeros_like(grad)
+                    state["prev_grad"] = torch.zeros_like(grad, dtype=p.dtype)
 
-                p_fp32 = p.detach().clone()
-                ema = state["ema"].detach().clone()
-                ema_squared = state["ema_squared"].detach().clone()
-                prev_grad = state["prev_grad"].detach().clone()
+                ema = state["ema"]
+                ema_squared = state["ema_squared"]
+                prev_grad = state["prev_grad"]
                 # Unpack
                 if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
                     grad = grad.to(torch.float32)
-                    ema = state['ema'].detach().clone().to(torch.float32)
-                    ema_squared = state['ema_squared'].detach().clone().to(torch.float32)
-                    prev_grad = state['prev_grad'].detach().clone().to(torch.float32)
-                    p_fp32 = p.detach().clone().to(torch.float32)
+                    ema = state['ema'].to(torch.float32)
+                    ema_squared = state['ema_squared'].to(torch.float32)
+                    prev_grad = state['prev_grad'].to(torch.float32)
+                    p_fp32 = p.to(torch.float32)
 
                 slow_beta = ((betas[1]**(step) - betas[1]) / (betas[1]**(step) - 1.0)) # Bias-correctionless squared EMA beta
 
@@ -556,6 +539,9 @@ class Mythical(Optimizer):
 
                 if update.ndim > 0:
                     update = zero_power_via_newton_schulz_6(update.view(len(update), -1)).view(update.shape)
+                elif update.numel() > 1:
+                    rms_value = torch.sqrt(torch.sum(update.pow(2), dim=0, keepdim=True))
+                    update.atan2_(rms_value).mul_(1.27323954474) 
 
                 # ADOPT update (update squared EMA after creation of denominator)
                 if not group["atan2"]:
