@@ -7,7 +7,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
 
-from .utils import copy_stochastic_
+from .utils import copy_stochastic_, debias_beta
 
 class Alice(BaseOptimizer):
     r"""Adaptive low-dimensional subspace estimation.
@@ -41,8 +41,10 @@ class Alice(BaseOptimizer):
         leading_basis: int = 40,
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
-        fixed_decay: bool = False,
         eps: float = 1e-8,
+        adam_lr: float = 1e-3,
+        adam_betas: BETAS = (0.9, 0.999),
+        adam_weight_decay: float = 0.0,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -55,10 +57,15 @@ class Alice(BaseOptimizer):
         self.validate_positive(leading_basis, 'leading_basis')
         self.validate_non_negative(rank - leading_basis, 'rank - leading_basis')
         self.validate_non_negative(weight_decay, 'weight_decay')
+        self.validate_non_negative(adam_weight_decay, 'adam_weight_decay')
         self.validate_non_negative(eps, 'eps')
+        self.validate_learning_rate(adam_lr)
+        self.validate_betas(adam_betas)
+
 
         defaults: DEFAULTS = {
             'lr': lr,
+            '_lr_ratio': (adam_lr / lr) if lr > 0 else 0,
             'betas': betas,
             'alpha': alpha,
             'alpha_c': alpha_c,
@@ -68,8 +75,10 @@ class Alice(BaseOptimizer):
             'leading_basis': leading_basis,
             'weight_decay': weight_decay,
             'weight_decouple': weight_decouple,
-            'fixed_decay': fixed_decay,
             'eps': eps,
+            'adam_lr': adam_lr,
+            'adam_betas': adam_betas,
+            'adam_weight_decay': adam_weight_decay,
         }
         super().__init__(params, defaults)
 
@@ -236,6 +245,9 @@ class Alice(BaseOptimizer):
 
             beta1, beta2, beta3 = group['betas']
             rank, leading_basis = group['rank'], group['leading_basis']
+            adam_betas = group['adam_betas']
+            beta1_comp = 1 - debias_beta(adam_betas[0], group['step'])
+            beta2_hat = debias_beta(adam_betas[1], group['step'])
 
             for p in group['params']:
                 if p.grad is None:
@@ -246,26 +258,40 @@ class Alice(BaseOptimizer):
                     raise NoSparseGradientError(str(self))
 
                 state = self.state[p]
+                
 
                 # Alice doesn't support scalars or dim > 2
-                # TODO - Nested optimizer for these?
+                # Fallback to AdamW
                 if p.ndim == 0 or p.ndim > 2:
                     p_fp32 = p
+
+                    if 'exp_avg' not in state:
+                        state['exp_avg'] = torch.zeros_like(p)
+                        state['exp_avg_sq'] = torch.zeros_like(p)
+
+                    exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+  
                     if p.dtype in {torch.float16, torch.bfloat16}:
                         grad = grad.to(torch.float32)
                         p_fp32 = p.to(torch.float32)
+                        exp_avg, exp_avg_sq = exp_avg.to(torch.float32), exp_avg_sq.to(torch.float32)
 
-                    self.apply_weight_decay(
-                        p=p_fp32,
-                        grad=grad,
-                        lr=group['lr'],
-                        weight_decay=group['weight_decay'],
-                        weight_decouple=group['weight_decouple'],
-                        fixed_decay=group['fixed_decay'],
-                    )
+                    # decoupled weight decay, fully decoupled weight decay, or L2 weight decay
+                    if group['adam_weight_decay']:
+                        if group['weight_decouple']:
+                            p_fp32.mul_(group['adam_weight_decay'])
+                        else:
+                            grad.add_(p_fp32, alpha=group['adam_weight_decay'])
 
-                    p_fp32.add_(grad, alpha=-group['lr'])
+                    # update gradient moving averages with debiased betas
+                    exp_avg.lerp_(grad, weight=beta1_comp)
+                    exp_avg_sq.mul_(beta2_hat).addcmul_(grad, grad, value=1 - beta2_hat)
 
+                    # Adam step
+                    p_fp32.addcdiv_(exp_avg, exp_avg_sq.sqrt().add_(group['eps']), value=-group['lr'] * group['_lr_ratio'])
+
+                    copy_stochastic_(state['exp_avg'], exp_avg)
+                    copy_stochastic_(state['exp_avg_sq'], exp_avg_sq)
                     copy_stochastic_(p, p_fp32)
                     continue
 
@@ -299,7 +325,7 @@ class Alice(BaseOptimizer):
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
                     weight_decouple=group['weight_decouple'],
-                    fixed_decay=group['fixed_decay'],
+                    fixed_decay=False,
                 )
 
                 if group['step'] == 1 or group['step'] % group['update_interval'] == 0:

@@ -773,3 +773,15 @@ def apply_cautious(update: torch.Tensor, grad: torch.Tensor) -> None:
     mask = (update * grad > 0).to(grad.dtype)
     mask.div_(mask.mean().clamp_(min=1e-3))
     update.mul_(mask)
+
+def debias(beta: float, step: int) -> float:
+    """Adam-style debias correction. Returns `1 - beta ** step`."""
+    return 1 - beta**step
+
+
+def debias_beta(beta: float, step: int) -> float:
+    """Applies the Adam-style debias correction into beta.
+
+    Simplified version of `betahat = beta*(1-beta**(step-1))/(1-beta**step)`
+    """
+    return (beta**step - beta) / (beta**step - 1)
