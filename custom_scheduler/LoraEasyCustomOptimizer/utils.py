@@ -739,6 +739,10 @@ def _apply_adagc_clipping_and_update_gamma(
 def _paper_orthograd(param, grad, alpha: float = 1.0, eps: float = 1e-20):
     """Applies orthogonal projection to a single parameter's gradient."""
 
+    # Skip for scalars
+    if param.ndim == 0 or param.numel() <= 1:
+        return
+
     # Flatten parameter and gradient
     w = param.view(-1) # Use p.data to avoid graph tracking if not needed
     g = grad.view(-1)
