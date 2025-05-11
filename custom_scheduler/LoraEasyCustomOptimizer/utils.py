@@ -104,13 +104,6 @@ def agc(p: torch.Tensor,
         associated parameter.
     :param eps: float. simple stop from div by zero, as such should be as small as possible to avoid skewing clipping.
     """
-
-    if agc_eps is None or agc_eps == 0.0:
-        agc_eps = torch.finfo(torch.float32).tiny    
-
-    if eps is None or eps == 0.0:
-        eps = torch.finfo(torch.float32).tiny
-
     if norm_type in {'global','layer'}:
         # Compute the global norm of the parameters and gradients
         p_norm = torch.norm(p).clamp_(min=agc_eps)
@@ -291,7 +284,7 @@ def create_factored_dims(
     
 # https://github.com/LoganBooker/prodigy-plus-schedule-free/blob/23f752a3901686d270dfdcb9b29823541ad1c3c7/prodigyplus/core_optimiser.py#L389
 @torch.no_grad()
-def get_denom(second_moment: torch.tensor, eps: float = 1e-16):
+def get_denom(second_moment: torch.Tensor, eps: float = 1e-16):
     # Get denom
     if isinstance(second_moment, list):
         row_var, col_var, _, _, reduce_dc = second_moment
@@ -307,7 +300,7 @@ def get_denom(second_moment: torch.tensor, eps: float = 1e-16):
     
 # https://github.com/LoganBooker/prodigy-plus-schedule-free/blob/23f752a3901686d270dfdcb9b29823541ad1c3c7/prodigyplus/core_optimiser.py#L411
 @torch.no_grad()
-def update_second_moment(second_moment: torch.tensor, grad: torch.tensor, beta2: float, adopt_first: bool = False) -> torch.tensor:
+def update_second_moment(second_moment: torch.Tensor, grad: torch.Tensor, beta2: float, adopt_first: bool = False) -> torch.Tensor:
     # EMA updates
     if isinstance(second_moment, list):
         row_var, col_var, dr, dc, _ = second_moment
@@ -337,21 +330,15 @@ def update_second_moment(second_moment: torch.tensor, grad: torch.tensor, beta2:
 
 # Implementation from: https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/main/orthograd.py
 @torch.no_grad()
-def orthograd(param: torch.tensor, grad: torch.tensor, eps: float = 1e-30):
-    if eps is None or eps == 0.0:
-        eps = torch.finfo(torch.float32).tiny
-
+def orthograd(param: torch.Tensor, grad: torch.Tensor, eps: float = 1e-30):
     return torch.where(param.norm(2) <= eps,
                        grad,
                        _orthograd(param, grad, eps))
 
 @torch.no_grad()
-def _orthograd(param: torch.tensor, 
-               grad: torch.tensor, 
+def _orthograd(param: torch.Tensor, 
+               grad: torch.Tensor, 
                eps: float = 1e-30):
-    if eps is None or eps == 0.0:
-        eps = torch.finfo(torch.float32).tiny
-
     if not param.numel() > 1:
         return grad
     
@@ -491,16 +478,13 @@ class SSCCosineDecay:
     
 @torch.no_grad()
 def stable_spam_clipping(state: dict, 
-                         grad: torch.tensor, 
+                         grad: torch.Tensor, 
                          step: int, 
                          scale: float = 1.0, 
-                         eps: float = 1e-8, 
+                         eps: float|torch.Tensor = 1e-8, 
                          gamma1: float = 0.85, 
                          gamma2: float = 0.99999, 
-                         gamma3: float = 0.999):    
-    if eps is None or eps == 0.0:
-        eps = torch.finfo(torch.float32).tiny
-
+                         gamma3: float = 0.999) -> torch.Tensor:    
     if 'ssc_m_norm_t' not in state:
         state['ssc_m_norm_t'] = 0.0
         state['ssc_v_norm_t'] = 0.0
@@ -516,9 +500,9 @@ def stable_spam_clipping(state: dict,
 
     m_max_hat = m_max_t / (1.0 - gamma3 ** step)
 
-    mask = grad.abs() > m_max_hat
-    if mask.sum() > 0:
-        grad[mask] = grad[mask] / max_grad * m_max_hat
+    grad = torch.where(grad.abs() > m_max_hat,
+                        grad / max_grad * m_max_hat,
+                        grad)
 
     grad_norm = torch.norm(grad)
 
@@ -532,8 +516,9 @@ def stable_spam_clipping(state: dict,
 
     c_norm_t = m_norm_hat / (torch.sqrt(v_norm_hat) + eps)
 
-    if grad_norm > 0:
-        grad = grad / grad_norm * c_norm_t
+    grad = torch.where(grad_norm > 0,
+                        grad / grad_norm * c_norm_t,
+                        grad)
 
     state["ssc_m_norm_t"], state["ssc_v_norm_t"] = m_norm_t, v_norm_t
 
@@ -541,10 +526,10 @@ def stable_spam_clipping(state: dict,
 
 @torch.no_grad()
 def stable_spam_clipping_tensors(
-    ssc_m_norm_t: torch.tensor,
-    ssc_v_norm_t: torch.tensor,
-    ssc_m_max_t: torch.tensor, 
-    grad: torch.tensor, 
+    ssc_m_norm_t: torch.Tensor,
+    ssc_v_norm_t: torch.Tensor,
+    ssc_m_max_t: torch.Tensor, 
+    grad: torch.Tensor, 
     step: int, 
     scale: float = 1.0, 
     eps: float = 1e-8, 
@@ -562,7 +547,7 @@ def stable_spam_clipping_tensors(
 
         m_max_hat = m_max_t / (1.0 - gamma3 ** step)
 
-        grad = torch.where((grad.abs() > m_max_hat).sum() > 0,
+        grad = torch.where(grad.abs() > m_max_hat,
                            grad / max_grad * m_max_hat,
                            grad)
 
@@ -591,9 +576,6 @@ def stable_spam_clipping_tensors(
 # From: https://github.com/KellerJordan/Muon/blob/master/muon.py
 @torch.no_grad()
 def newton_schulz_(grad, steps=6, eps=1e-12):
-    if eps is None or eps == 0.0:
-        eps = torch.finfo(torch.float32).tiny
-
     # Inline reshaping step within the method itself.
     G_shape = grad.shape
     grad = grad.view(grad.size(0), -1)
@@ -736,7 +718,7 @@ def _apply_adagc_clipping_and_update_gamma(
 
 
 @torch.no_grad()
-def _paper_orthograd(param, grad, alpha: float = 1.0, eps: float = 1e-20):
+def _paper_orthograd(param, grad, alpha: float = 1.0, eps: float|torch.Tensor = 1e-20):
     """Applies orthogonal projection to a single parameter's gradient."""
 
     # Skip for scalars
@@ -753,6 +735,7 @@ def _paper_orthograd(param, grad, alpha: float = 1.0, eps: float = 1e-20):
     # If w_norm_sq is near zero, the parameter contributes little,
     # and projection is ill-defined or numerically unstable.
     # Leave the gradient untouched in this case.
+
     if w_norm_sq > eps:
         # Calculate projection of g onto w: (w·g / w·w) * w
         proj_coeff = torch.dot(w, g) / w_norm_sq # Note: w_norm_sq already > eps

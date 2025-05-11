@@ -117,9 +117,6 @@ class Col(Norm):
         return x
 
     def lmo(self, grad: torch.Tensor, eps: float = 1e-16) -> torch.Tensor:
-        if eps is None or eps == 0.0:
-            eps = torch.finfo(torch.float32).tiny
-
         if self.transpose:
             grad = grad.transpose(0, 1)
 
@@ -167,9 +164,6 @@ class Row(Norm):
         return x
 
     def lmo(self, grad: torch.Tensor, eps: float = 1e-16) -> torch.Tensor:
-        if eps is None or eps == 0.0:
-            eps = torch.finfo(torch.float32).tiny
-
         if self.transpose:
             grad = grad.transpose(0, 1)
 
@@ -192,9 +186,6 @@ class BiasRMS(Norm):
         return torch.nn.init.zeros_(x)
 
     def lmo(self, grad: torch.Tensor, eps: float = 1e-16) -> torch.Tensor:
-        if eps is None or eps == 0.0:
-            eps = torch.finfo(torch.float32).tiny
-
         rms_value = torch.sqrt(torch.sum(grad.pow(2), dim=0, keepdim=True))
         grad /= rms_value.add_(eps)
         return grad
@@ -298,9 +289,6 @@ class Sign(Norm):
         return x
 
     def lmo(self, grad: torch.Tensor, eps: float = 1e-16) -> torch.Tensor:
-        if eps is None or eps == 0.0:
-            eps = torch.finfo(torch.float32).tiny
-
         d_in: int = grad.size(1)
         return torch.sign(grad).div_(d_in) if self.normalize else torch.sign(grad)
 
@@ -319,9 +307,6 @@ class Auto(Norm):
         raise NotImplementedError
 
     def lmo(self, grad: torch.Tensor, eps: float = 1e-16) -> torch.Tensor:
-        if eps is None or eps == 0.0:
-            eps = torch.finfo(torch.float32).tiny
-
         ndim: int = grad.ndim
         if ndim in (0, 1):
             return BiasRMS().lmo(grad, eps=eps)
@@ -510,7 +495,13 @@ class SCORNMachina(Optimizer):
             spectral_update_scale = group['spectral_update_scale']
             use_stable_spam_clipping = group['use_stable_spam_clipping']
             eps = group['eps']
+            if 'eps_t' not in group or group['eps_t'].device != group["params"][0].device:
+                group['eps_t'] = torch.tensor(eps, device=group["params"][0].device)
+
             eps_floor = group['eps_floor']
+            if 'eps_floor_t' not in group or group['eps_floor_t'].device != group["params"][0].device:
+                group['eps_floor_t'] = torch.tensor(eps_floor, device=group["params"][0].device)
+
             orthograd_alpha = group['orthograd_alpha']
             apply_ortho_to_group = group.get('is_ortho_group', False) # Default to False if key missing
             amsgrad = group['amsgrad']
@@ -569,13 +560,15 @@ class SCORNMachina(Optimizer):
                     grad = _apply_adagc_clipping_and_update_gamma(self, grad=grad, state=state, step=step, warmup_steps=self.adagc_warmup_steps)
 
                 if use_stable_spam_clipping:
-                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], eps=eps_floor)
+                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], eps=group['eps_floor_t'])
+
 
                 if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, 1e-2 * rms_grad), eps_floor) # Set a floor for eps to avoid NaN
+                    rms_grad = torch.sqrt(torch.mean(grad.pow(2)))
+                    val_to_bound = 1e-2 * rms_grad
+                    curr_eps = torch.clamp(val_to_bound, min=group['eps_floor_t'], max=group['eps_t'])
                 else:
-                    curr_eps = eps
+                    curr_eps = group['eps_t']
 
                 if group["reset_interval"] > 0:
                     if state["steps_since_reset"] // (group["reset_interval"] + (group["reset_increment"] * state["times_zero"])) > 0:
@@ -597,7 +590,7 @@ class SCORNMachina(Optimizer):
                 grad.div_(rms)
 
                 # SCION spectral norm
-                grad = norm.lmo(grad, eps=eps_floor)#.mul_(spectral_update_scale)
+                grad = norm.lmo(grad, eps=group['eps_floor_t'])#.mul_(spectral_update_scale)
 
                 # Adaptive ema
                 mask = (grad * ema > 0).to(grad.dtype)
@@ -613,9 +606,9 @@ class SCORNMachina(Optimizer):
 
                 if step == 1 or (group["reset_interval"] > 0 and state["steps_since_reset"] // (group["reset_interval"] + (group["reset_increment"] * (max(0,state["times_zero"] - 1)))) > 0):
                     if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
-                        ema_squared.copy_(norm.lmo(c_t.pow(2), eps=eps_floor))
+                        ema_squared.copy_(norm.lmo(c_t.pow(2), eps=group['eps_floor_t']))
                     else:
-                        state["ema_squared"].copy_(norm.lmo(c_t.pow(2), eps=eps_floor))
+                        state["ema_squared"].copy_(norm.lmo(c_t.pow(2), eps=group['eps_floor_t']))
                 else:
                     # AdamW debias
                     denom = ema_squared.sqrt().div_(bias_correction_sqrt).add_(curr_eps)
