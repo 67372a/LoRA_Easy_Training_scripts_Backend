@@ -772,3 +772,129 @@ def debias_beta(beta: float, step: int) -> float:
     Simplified version of `betahat = beta*(1-beta**(step-1))/(1-beta**step)`
     """
     return (beta**step - beta) / (beta**step - 1)
+
+@torch.no_grad()
+def find_closest_orthogonal_matrix(self, A: torch.Tensor, max_iter: int = 8) -> torch.Tensor:
+    """
+    Find the closest orthogonal matrix to A using an iterative method
+    """    
+    k, n = A.shape
+    if k == 0 or n == 0:
+        # Handle empty matrix case: return an empty matrix of the correct shape
+        # or raise an error, depending on desired behavior.
+        # For now, returning a zero matrix of the same shape.
+        # The SVD of an empty or zero-dimension matrix is problematic.
+        # Orthogonality is trivial/undefined for k=0 or n=0 in this context.
+        # If k > n, the concept of "orthogonal matrix L (k,n)" means L @ L.T = I_k,
+        # which is only possible if k <= n. If k < n, it means L.T @ L = I_n.
+        # The paper implies symmetric leakage correction, often k=n.
+        # If k != n, it's finding a matrix with orthonormal rows (if k < n) or columns (if k > n).
+        # Let's assume k <= n for "L L.T = I" interpretation, or simply closest in Frobenius norm to an orthogonal matrix.
+        # The algorithm tries to make V (n,k if scA is n,k) orthogonal, then scales.
+        # If A is (0,N) or (N,0), let's return zeros.
+        return torch.zeros_like(A)
+
+
+    # Determine the floating point type for calculations involving real numbers (like tolerance parts)
+    # If A is complex, its real part's dtype is used. Otherwise, A's dtype.
+    # However, torch.finfo requires a float dtype.
+    float_dtype = A.real.dtype if A.is_complex() else A.dtype
+    
+    # Tolerance calculation
+    # Original: np.max((1, np.max(A.shape) * np.linalg.svd(A.T, False, False)[0])) * np.finfo(A.dtype).eps
+    # svd(A.T) -> singular values of A.T. A.T is (n, k)
+    # Need to handle if A.T is empty or too small for SVD
+    if A.T.shape[0] == 0 or A.T.shape[1] == 0: # Should be caught by k==0 or n==0 above
+        s_A_T_first = torch.tensor(0.0, device=A.device, dtype=float_dtype)
+    else:
+        try:
+            s_A_T = torch.linalg.svdvals(A.T)
+            s_A_T_first = s_A_T[0] if s_A_T.numel() > 0 else torch.tensor(0.0, device=A.device, dtype=float_dtype)
+        except RuntimeError: # SVD might fail for ill-conditioned or zero-sized dim
+            s_A_T_first = torch.tensor(0.0, device=A.device, dtype=float_dtype)
+
+
+    # Ensure max_A_shape_val is a float tensor for multiplication
+    max_A_shape_val = torch.tensor(float(max(A.shape)), device=A.device, dtype=float_dtype)
+    
+    tolerance_factor = torch.max(
+        torch.tensor(1.0, device=A.device, dtype=float_dtype),
+        max_A_shape_val * s_A_T_first
+    )
+    TOLERANCE = tolerance_factor * torch.finfo(float_dtype).eps
+
+    # Helper for relative difference, adding epsilon for numerical stability
+    # Ensure reldiff output is float_dtype for comparison with TOLERANCE
+    # Note: rhos will be float_dtype
+    eps_val = torch.finfo(float_dtype).eps
+    def reldiff(a, b): # a and b are scalar tensors
+        return 2 * torch.abs(a - b) / (torch.abs(a) + torch.abs(b) + eps_val)
+
+    def convergence(rho, prev_rho):
+        return reldiff(rho, prev_rho) <= TOLERANCE
+
+    A_conj = A.conj()
+    # d = sqrt(sum(A * A_conj, dim=1)) -> shape (k)
+    # (A * A_conj) is element-wise. sum over n (dim=1)
+    d_val = torch.sqrt(torch.sum(A * A_conj, dim=1)) # d_val is real, shape (k,)
+
+    rhos = torch.zeros(max_iter, device=A.device, dtype=float_dtype)
+    L = torch.zeros_like(A) # Initialize L, will be updated in the loop
+
+    for i in range(max_iter):
+        # scA = A.T * d  (NumPy broadcasting)
+        # A.T is (n, k), d_val is (k,). We need d_val to be (1, k) for broadcasting.
+        scA = A.T * d_val.unsqueeze(0) # d_val.unsqueeze(0) is (1, k)
+
+        # Perform SVD: u is (n, p), s is (p,), vh is (p, k) where p = min(n, k)
+        try:
+            u, s, vh = torch.linalg.svd(scA, full_matrices=False)
+        except RuntimeError as e:
+            # SVD can fail (e.g. if scA contains NaNs or Infs, or LAPACK error)
+            # print(f"SVD failed at iteration {i}: {e}. Returning current L or A.")
+            # Depending on requirements, could return A, L from previous iter, or re-raise.
+            # For now, if SVD fails, break and return the last computed L (or initial zeros if i=0).
+            if i == 0: L = A.clone() # Or some other fallback
+            break
+
+
+        V = u @ vh # V is (n, k) (if n>=k) or (n,n)@(n,k) (if n < k, u is (n,n), s is (n), vh is (n,k)) -> (n,k)
+                # Actually, V is (n, p) @ (p, k) -> (n, k)
+                # This V is the "orthogonal part" of scA.
+                # If scA is (N, M), U is (N, min(N,M)), S is (min(N,M)), Vh is (min(N,M), M)
+                # So V = U @ Vh will be (N, M)
+
+        # d = sum(A_conj * V.T, dim=1)
+        # A_conj is (k, n). V.T is (k, n). Element-wise product. Sum over n (dim=1).
+        d_val = torch.sum(A_conj * V.T, dim=1) # d_val is potentially complex, shape (k,)
+
+        # L = (V * d).T
+        # V is (n, k). d_val is (k,). We need d_val to be (1, k) for broadcasting.
+        # Result (V * d_val_row) is (n, k). Transpose to (k, n).
+        L = (V * d_val.unsqueeze(0)).T
+        
+        E = A - L
+        # rho is sqrt(sum(E * E_conj)). This is Frobenius norm of E.
+        # E*E.conj() is element-wise, sum over all elements. Result is real.
+        current_rho = torch.sqrt(torch.sum(E * E.conj())) # scalar, real
+        rhos[i] = current_rho
+
+        if torch.isnan(current_rho) or torch.isinf(current_rho):
+            # print(f"Warning: rho is NaN or Inf at iteration {i}. Stopping.")
+            if i == 0: L = A.clone() # Fallback if first iteration yields NaN/Inf
+            break
+
+        if i > 0:
+            # Check for convergence against previous rho.
+            # Ensure rhos[i-1] is not nan/inf for a valid comparison.
+            if not (torch.isnan(rhos[i-1]) or torch.isinf(rhos[i-1])):
+                if convergence(rhos[i], rhos[i-1]):
+                    break
+            elif torch.isnan(rhos[i-1]) or torch.isinf(rhos[i-1]):
+                # If previous rho was bad, can't check convergence. Maybe continue or break.
+                # print(f"Warning: prev_rho was NaN/Inf at iter {i}, cannot check convergence.")
+                pass # Continue, hoping it stabilizes
+    
+    # The loop might complete max_iter or break early.
+    # rhos are kept for potential debugging, could be returned or discarded.
+    return L

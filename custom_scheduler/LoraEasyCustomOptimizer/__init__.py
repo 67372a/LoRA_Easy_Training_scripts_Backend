@@ -41,6 +41,7 @@ from LoraEasyCustomOptimizer.glyph import Glyph
 from LoraEasyCustomOptimizer.racs import RACS
 from LoraEasyCustomOptimizer.alice import Alice
 from LoraEasyCustomOptimizer.fira import Fira
+from LoraEasyCustomOptimizer.vsgd import VSGD
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ADOPT,
@@ -105,6 +106,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     SCORNMachina,
     SimplifiedAdEMAMix,
     StableSPAM,
+    VSGD,
 ]
 
 OPTIMIZERS: Dict[str, OPTIMIZER] = {str(f"{optimizer.__name__}".lower()): optimizer for optimizer in OPTIMIZER_LIST}
