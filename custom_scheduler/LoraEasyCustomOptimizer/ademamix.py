@@ -374,7 +374,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
 
             beta1, beta2 = group['betas']
 
-            eps, eps_floor = group['eps'], group['eps2'], group['eps_floor']
+            eps, eps_floor = group['eps'], group['eps_floor']
 
             eps = group['eps']
             if 'eps_t' not in group or group['eps_t'].device != group["params"][0].device:
