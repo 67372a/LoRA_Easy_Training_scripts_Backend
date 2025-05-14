@@ -381,7 +381,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                 group['eps_t'] = torch.tensor(eps, device=group["params"][0].device)
 
             eps_floor = group['eps_floor']
-            if eps_floor is not None and 'eps_floor_t' not in group or group['eps_floor_t'].device != group["params"][0].device:
+            if eps_floor is not None and ('eps_floor_t' not in group or group['eps_floor_t'].device != group["params"][0].device):
                 group['eps_floor_t'] = torch.tensor(eps_floor, device=group["params"][0].device)
 
             use_orthograd = group['use_orthograd']
