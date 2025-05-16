@@ -14,7 +14,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError
 from .utils import (copy_stochastic_, NORM_TYPE, agc, 
                     STATE_PRECISION, orthograd, schedule_beta_tc, 
                     spam_grad_clipping, CLIP_TYPE, clean_dict_params,
-                    CosineDecay, spam_grad_clipping_logging, stable_spam_clipping_tensors, SSCCosineDecay)
+                    CosineDecay, spam_grad_clipping_logging, stable_spam_clipping_tensors, SSCCosineDecay, adaptive_eps)
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
@@ -507,11 +507,7 @@ class ADOPTScheduleFree(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if group['step'] == 1:
                     exp_avg_sq.addcmul_(grad, grad.conj())
@@ -822,11 +818,7 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if group['step'] == 1:
                     exp_avg_sq.addcmul_(grad, grad.conj())
@@ -1124,11 +1116,7 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 grad_diff.add_(grad)
 
@@ -1428,12 +1416,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = c_t.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
-
+                curr_eps = adaptive_eps(grad, group)
                 if group['step'] == 1:
                     exp_avg_sq.addcmul_(c_t, c_t.conj())
                 else:
@@ -1708,11 +1691,7 @@ class FADOPTScheduleFree(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if group['step'] == 1:
                     fim.addcmul_(grad, grad.conj()).clamp_(-adopt_clip, adopt_clip)
@@ -2036,11 +2015,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if group['step'] == 1:
                     fim.addcmul_(grad, grad.conj()).clamp_(-adopt_clip, adopt_clip)
@@ -2348,11 +2323,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 grad_diff.add_(grad)
 
@@ -2679,11 +2650,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = c_t.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if group['step'] == 1:
                     fim.addcmul_(c_t, c_t.conj()).clamp_(-adopt_clip, adopt_clip)

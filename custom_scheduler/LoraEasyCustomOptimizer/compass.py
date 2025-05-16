@@ -7,7 +7,7 @@ import torch
 from torch.optim import Optimizer
 from .utils import (orthograd, CosineDecay, CLIP_TYPE, copy_stochastic_, agc, 
                     NORM_TYPE, create_factored_dims, get_denom, update_second_moment, STATE_PRECISION, 
-                    UPDATE_STRATEGY, spam_grad_clipping_logging, spam_grad_clipping, stable_spam_clipping, SSCCosineDecay)
+                    UPDATE_STRATEGY, spam_grad_clipping_logging, spam_grad_clipping, stable_spam_clipping, SSCCosineDecay, adaptive_eps)
 import math
 from torch.nn.functional import softplus
 from typing import Optional
@@ -1392,11 +1392,7 @@ class CompassADOPT(BaseOptimizer):
                 if use_stable_spam_clipping:
                     grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], scale=scale)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if group['step'] == 1:
                     exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta2, True)
@@ -1704,11 +1700,7 @@ class CompassADOPTMARS(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = c_t.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if group['step'] == 1:
                     exp_avg_sq = update_second_moment(exp_avg_sq, c_t, beta2, True)

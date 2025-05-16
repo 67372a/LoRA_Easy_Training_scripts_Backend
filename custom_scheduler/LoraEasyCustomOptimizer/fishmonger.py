@@ -1,7 +1,7 @@
 import torch
 from torch.optim import Optimizer
 
-from .utils import copy_stochastic_
+from .utils import copy_stochastic_, adaptive_eps
 
 from bitsandbytes.functional import quantize_blockwise, dequantize_blockwise
 
@@ -160,11 +160,7 @@ class FishMonger(Optimizer):
                 # Update fim
                 fim.mul_(fim_beta).addcmul_(momentum, momentum, value=1 - fim_beta)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 fim_base = fim.sqrt() + curr_eps
 
@@ -388,7 +384,7 @@ class FishMonger8BitBNB(Optimizer):
                 # Update fim
                 fim.mul_(fim_beta).addcmul_(momentum, momentum, value=1 - fim_beta)
 
-                curr_eps = group["eps"] # To find a better adaptive epsilon later, if at all...
+                curr_eps = adaptive_eps(grad, group)
 
                 fim_base = fim.sqrt() + curr_eps
 

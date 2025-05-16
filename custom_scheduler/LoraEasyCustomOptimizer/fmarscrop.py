@@ -1,6 +1,6 @@
 # FMARSCrop from https://github.com/Clybius/Personalized-Optimizers by Clybius
 import torch
-from .utils import copy_stochastic_, agc, NORM_TYPE, UPDATE_STRATEGY,orthograd
+from .utils import copy_stochastic_, agc, NORM_TYPE, UPDATE_STRATEGY,orthograd, adaptive_eps
 import math
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
@@ -270,11 +270,7 @@ class FMARSCrop(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = c_t.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if diff_mult > 0:
                     # Get previous grad, initialized at 0 (first step is just grad)
@@ -633,11 +629,7 @@ class FMARSCropV2ExMachina(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t = agc(p_fp32, c_t, adaptive_clip, adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = c_t.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if diff_mult > 0:
                     # Get previous grad, initialized at 0 (first step is just grad)
@@ -946,11 +938,7 @@ class FMARSCropV2(BaseOptimizer):
                 else:
                     fim_slow_beta = beta2
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if diff_mult > 0:
                     # Get previous grad, initialized at 0 (first step is just grad)
@@ -1223,11 +1211,7 @@ class FMARSCropV3(Optimizer):
                 if grad_norm > clip_lambda:
                     c_t = c_t * clip_lambda / grad_norm
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if diff_mult > 0:
                     # Get previous grad, initialized at 0 (first step is just grad)
@@ -1564,11 +1548,7 @@ class FMARSCropV3ExMachina(BaseOptimizer):
                 if grad_norm > 1.0:
                     c_t = c_t * 1.0 / grad_norm
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = c_t.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if diff_mult > 0:
                     # Get previous grad, initialized at 0 (first step is just grad)

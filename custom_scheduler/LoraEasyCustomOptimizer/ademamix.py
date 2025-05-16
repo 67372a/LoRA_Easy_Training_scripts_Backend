@@ -9,7 +9,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, agc, stable_spam_clipping, SSCCosineDecay, _paper_orthograd
+from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, agc, stable_spam_clipping, SSCCosineDecay, _paper_orthograd, adaptive_eps
 
 
 class AdEMAMix(BaseOptimizer):
@@ -80,7 +80,7 @@ class AdEMAMix(BaseOptimizer):
             'centralization': centralization,
             'cautious': cautious,
             'update_strategy': update_strategy,
-            'adopt': adopt,
+            'adopt': adopt
         }
 
         super().__init__(params, defaults)
@@ -281,6 +281,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         beta1_warmup: Optional[int] = None,
         min_beta1: float = 0.9,
         eps: float = 1e-8,
+        eps2: float = 1e-2,
         eps_floor: Optional[float] = None,
         use_orthograd: bool = False,
         adaptive_clip: Optional[float] = None,
@@ -290,8 +291,8 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         bias_correction1: bool = False, 
         bias_correction2: bool = True,
         use_stable_spam_clipping:bool = False,
-        ssc_t_max: Optional[int] = None,
         use_adopt: bool = False,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -300,9 +301,6 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         self.validate_non_negative(min_beta1, 'min_beta1')
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
-
-        self.ssc_t_max = ssc_t_max
-        self.warmup = SSCCosineDecay(1.0, ssc_t_max, eta_min=0.5) if ssc_t_max is not None else None
 
         # Override zero to tiny
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
@@ -321,6 +319,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             'weight_decouple': weight_decouple,
             'fixed_decay': fixed_decay,
             'eps': eps,
+            'eps2': eps2,
             'eps_floor': eps_floor,
             'use_orthograd': use_orthograd,
             'adaptive_clip': adaptive_clip,
@@ -331,6 +330,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             'bias_correction2': bias_correction2,
             'use_stable_spam_clipping':use_stable_spam_clipping,
             'use_adopt':use_adopt,
+            'torch_compile': torch_compile,
         }
 
         super().__init__(params, defaults)
@@ -374,16 +374,6 @@ class SimplifiedAdEMAMix(BaseOptimizer):
 
             beta1, beta2 = group['betas']
 
-            eps, eps_floor = group['eps'], group['eps_floor']
-
-            eps = group['eps']
-            if 'eps_t' not in group or group['eps_t'].device != group["params"][0].device:
-                group['eps_t'] = torch.tensor(eps, device=group["params"][0].device)
-
-            eps_floor = group['eps_floor']
-            if eps_floor is not None and ('eps_floor_t' not in group or group['eps_floor_t'].device != group["params"][0].device):
-                group['eps_floor_t'] = torch.tensor(eps_floor, device=group["params"][0].device)
-
             use_orthograd = group['use_orthograd']
             adaptive_clip = group['adaptive_clip']
             adaptive_clip_eps = group['adaptive_clip_eps']
@@ -393,9 +383,6 @@ class SimplifiedAdEMAMix(BaseOptimizer):
 
             use_stable_spam_clipping = group["use_stable_spam_clipping"]
             apply_ortho_to_group = group.get('is_ortho_group', False) # Default to False if key missing
-
-            if use_stable_spam_clipping:
-                scale: float = self.warmup.get_death_rate(group['step']) if self.warmup is not None else 1.0
 
             if group['beta1_warmup']:
                 beta1 = self.linear_hl_warmup_scheduler(
@@ -433,14 +420,9 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if use_stable_spam_clipping:
-                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], scale=scale)
+                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], torch_compile=group['torch_compile'])
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = torch.sqrt(torch.mean(grad.pow(2)))
-                    val_to_bound = 1e-2 * rms_grad
-                    curr_eps = torch.clamp(val_to_bound, min=group['eps_floor_t'], max=group['eps_t'])
-                else:
-                    curr_eps = group['eps_t']
+                curr_eps = adaptive_eps(grad, group)
 
                 if use_adopt and group['step'] == 1:
                     exp_avg_sq.addcmul_(grad, grad)

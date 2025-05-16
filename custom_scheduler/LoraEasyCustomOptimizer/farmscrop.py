@@ -1,7 +1,7 @@
 # FARMSCrop from https://github.com/Clybius/Personalized-Optimizers by Clybius
 import torch
 from torch.optim import Optimizer
-from .utils import copy_stochastic_
+from .utils import copy_stochastic_, adaptive_eps
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
@@ -148,11 +148,7 @@ class FARMSCrop(Optimizer):
 
                 grad_diff_fim.mul_(beta1).addcmul_(grad_diff, grad_diff, value=1 - beta1)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 # Get natural gradient (squared ema, obtained sqrt of ema)
                 diff_fim_base = grad_diff_fim.sqrt().add_(curr_eps)
@@ -377,11 +373,7 @@ class FARMSCropV2(BaseOptimizer):
 
                 fim_slow_beta = ((beta2**step - beta2) / (beta2**step - 1.0)) ** (1/2)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if diff_mult > 0:
                     # Get previous grad, initialized at 0 (first step is just grad)

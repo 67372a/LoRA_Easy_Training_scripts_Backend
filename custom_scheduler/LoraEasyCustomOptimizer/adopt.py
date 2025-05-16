@@ -7,7 +7,7 @@ import math
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
-from .utils import copy_stochastic_, NORM_TYPE, agc, UPDATE_STRATEGY
+from .utils import copy_stochastic_, NORM_TYPE, agc, UPDATE_STRATEGY, adaptive_eps
 
 class ADOPT(BaseOptimizer):
     r"""Modified Adam Can Converge with Any β2 with the Optimal Rate.
@@ -334,11 +334,7 @@ class ADOPTMARS(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = c_t.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if group['step'] == 1:
                     exp_avg_sq.addcmul_(c_t, c_t.conj())
@@ -559,11 +555,7 @@ class FADOPTMARS(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = c_t.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if group['step'] == 1:
                     fim.addcmul_(c_t, c_t.conj()).clamp_(-adopt_clip, adopt_clip)

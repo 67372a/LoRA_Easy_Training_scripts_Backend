@@ -5,7 +5,8 @@ from torch.optim import Optimizer
 from math import sqrt
 from enum import IntEnum
 import math
-from .utils import stable_spam_clipping, copy_stochastic_, orthograd, adagc_global_clipping_calc, _apply_adagc_clipping_and_update_gamma, _paper_orthograd
+from .utils import (stable_spam_clipping, copy_stochastic_, orthograd, adagc_global_clipping_calc, 
+                    _apply_adagc_clipping_and_update_gamma, _paper_orthograd, adaptive_eps)
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from typing import Optional
 
@@ -394,6 +395,7 @@ class SCORNMachina(Optimizer):
         stochastic_fp: bool = True,
         use_stable_spam_clipping: bool = False,
         eps: float = 1e-8,
+        eps2: float = 1e-2,
         eps_floor: float = 1e-16,
         use_adagc: bool = False,
         adagc_warmup_steps: int = 0,
@@ -431,6 +433,7 @@ class SCORNMachina(Optimizer):
             stochastic_fp = stochastic_fp,
             use_stable_spam_clipping = use_stable_spam_clipping,
             eps = eps,
+            eps2 = eps2,
             eps_floor = eps_floor,
             amsgrad = amsgrad,
             amsgrad_decay_rate = amsgrad_decay_rate,
@@ -562,13 +565,7 @@ class SCORNMachina(Optimizer):
                 if use_stable_spam_clipping:
                     grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], eps=group['eps_floor_t'])
 
-
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = torch.sqrt(torch.mean(grad.pow(2)))
-                    val_to_bound = 1e-2 * rms_grad
-                    curr_eps = torch.clamp(val_to_bound, min=group['eps_floor_t'], max=group['eps_t'])
-                else:
-                    curr_eps = group['eps_t']
+                curr_eps = adaptive_eps(grad, group)
 
                 if group["reset_interval"] > 0:
                     if state["steps_since_reset"] // (group["reset_interval"] + (group["reset_increment"] * state["times_zero"])) > 0:

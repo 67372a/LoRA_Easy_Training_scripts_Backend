@@ -1,5 +1,5 @@
 import torch
-from .utils import copy_stochastic_, agc, NORM_TYPE, create_factored_dims, get_denom, update_second_moment
+from .utils import copy_stochastic_, agc, NORM_TYPE, create_factored_dims, get_denom, update_second_moment, adaptive_eps
 import math
 from typing import Optional, Literal
 
@@ -242,11 +242,7 @@ class RMSProp(BaseOptimizer):
                     elif group["weight_decay"] > 0.0:
                         grad.add_(p_fp32, alpha=group["weight_decay"])
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = self.get_rms(grad)
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if not group["rectify_variance"] or n_sma >= group["n_sma_threshold"]:
                     # lr scaler + eps to prevent zero division
@@ -483,11 +479,7 @@ class RMSPropADOPT(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = grad.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if group['step'] == 1:
                     exp_avg_sq = update_second_moment(exp_avg_sq, grad, beta, True)
@@ -746,11 +738,7 @@ class RMSPropADOPTMARS(BaseOptimizer):
                     # Apply Adaptive Gradient Clipping (AGC)
                     c_t = agc(p=p_fp32, grad=c_t, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
-                if eps_floor is not None and eps_floor < eps:
-                    rms_grad = c_t.pow(2).mean().sqrt_()
-                    curr_eps = max(min(eps, eps2 * rms_grad.item()), eps_floor) # Set a floor for eps to avoid NaN
-                else:
-                    curr_eps = eps
+                curr_eps = adaptive_eps(grad, group)
 
                 if group['step'] == 1:
                     exp_avg_sq = update_second_moment(exp_avg_sq, c_t, beta, True)
