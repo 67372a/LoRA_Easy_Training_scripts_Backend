@@ -249,23 +249,16 @@ class CStableAdamW(BaseOptimizer):
                 if use_ssc:
                     eps_clip_for_ssc = ssc_ef
                     if grad_for_processing.numel() > 0:
-                        # This RMS calculation is on CPU if .item() is used.
-                        # For speed, we might consider if this complex eps_clip is critical
-                        # or if a simpler ssc_ef (or main adam_eps) would suffice.
-                        # Keeping original logic for now.
-                        with torch.no_grad(): # Ensure this doesn't affect grad graph
-                             rms_grad_val_scalar = grad_for_processing.pow(2).mean().sqrt().item()
-                        eps_clip_for_ssc = max(min(adam_main_eps, 1e-2 * rms_grad_val_scalar), ssc_ef)
-                    
-                    if eps_clip_for_ssc <= 0:
-                         eps_clip_for_ssc = torch.finfo(grad_for_processing.dtype if grad_for_processing.is_floating_point() else torch.float32).tiny
-                    
+                        rms_grad = torch.sqrt(torch.mean(grad.pow(2)))
+                        val_to_bound = 1e-2 * rms_grad
+                        eps_clip_for_ssc = torch.clamp(val_to_bound, min=ssc_ef, max=adam_main_eps)
+
                     grad_for_processing = self._stable_spam_clipping(
                         state=state,
                         grad=grad_for_processing,
                         group_step=group['step'],
                         ssc_scale=ssc_s,
-                        ssc_eps_clip=eps_clip_for_ssc, # This is a Python float
+                        ssc_eps_clip=eps_clip_for_ssc,
                         ssc_gamma1=ssc_g1,
                         ssc_gamma2=ssc_g2,
                         ssc_gamma3=ssc_g3
