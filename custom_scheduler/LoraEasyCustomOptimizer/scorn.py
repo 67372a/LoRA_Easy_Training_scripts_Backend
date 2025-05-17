@@ -511,13 +511,11 @@ class SCORN(Optimizer):
                     if group['torch_compile']:
                         grad = _stable_spam_clipping_compile_wrapper(state, 
                                             grad, 
-                                            step=group['step'], 
-                                            scale=scale)
+                                            step=group['step'])
                     else:
                         grad = _stable_spam_clipping_impl(state, 
                                             grad, 
-                                            step=group['step'], 
-                                            scale=scale)
+                                            step=group['step'])
 
                 if group["reset_interval"] > 0:
                     if state["steps_since_reset"] // (group["reset_interval"] + (group["reset_increment"] * state["times_zero"])) > 0:
