@@ -12,7 +12,7 @@ from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from .utils import (copy_stochastic_, NORM_TYPE, agc, 
-                    STATE_PRECISION, orthograd, schedule_beta_tc, 
+                    STATE_PRECISION, _paper_orthograd, schedule_beta_tc, 
                     spam_grad_clipping, CLIP_TYPE, clean_dict_params,
                     CosineDecay, spam_grad_clipping_logging, stable_spam_clipping_tensors, SSCCosineDecay, adaptive_eps)
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
@@ -3107,8 +3107,8 @@ class _ADOPTAOScheduleFreeBase(Optimizer):
                         grad_f32 = grad.float()
                         p_f32 = p.float()
 
-                        if group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
-                            grad_f32 = orthograd(p_f32, grad_f32)
+                        if group["use_orthograd"]:
+                            _paper_orthograd(p_f32, grad_f32)
 
                         if group["adaptive_clip"] > 0:
                             grad_f32 = agc(p=p_f32, 
@@ -3362,8 +3362,8 @@ def single_param_ADOPTAOScheduleFree(
         else:
             previous_grad.copy_(temp_grad_f32)
 
-    if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
-        grad_f32 = orthograd(y_f32, grad_f32)
+    if use_orthograd:
+        _paper_orthograd(y_f32, grad_f32)
 
     if spam_clipping_threshold != 0 and apply_spam_clipping and p.numel() >= 2 and p.ndim >= 1:
         grad_f32 = spam_grad_clipping(grad=grad_f32, second_moment=exp_avg_sq_f32, clip_threshold=spam_clipping_threshold, clip_type=spam_clipping_type, spam_clip_eps=spam_clipping_eps)

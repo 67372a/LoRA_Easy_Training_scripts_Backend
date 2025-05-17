@@ -5,7 +5,7 @@ from torch.optim import Optimizer
 from math import sqrt
 from enum import IntEnum
 import math
-from .utils import stable_spam_clipping, orthograd_atan, copy_stochastic_
+from .utils import _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl, orthograd_atan, copy_stochastic_
 
 # https://github.com/kozistr/pytorch_optimizer/blob/6397d56279ad80b26c4bba7fb4b04852b517fdeb/pytorch_optimizer/optimizer/shampoo_utils.py#L533
 def zero_power_via_newton_schulz_5(
@@ -387,6 +387,7 @@ class SCORN(Optimizer):
         cautious_min: float = 1.0,
         stochastic_fp: bool = True,
         use_stable_spam_clipping:bool = False,
+        torch_compile: bool = False,
         **kwargs,
     ):
 
@@ -407,6 +408,7 @@ class SCORN(Optimizer):
             cautious_min = cautious_min,
             stochastic_fp = stochastic_fp,
             use_stable_spam_clipping = use_stable_spam_clipping,
+            torch_compile = torch_compile,
         )
 
         super(SCORN, self).__init__(params, defaults)
@@ -506,7 +508,16 @@ class SCORN(Optimizer):
                     grad = orthograd_atan(p_fp32, grad)
 
                 if use_stable_spam_clipping:
-                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'])
+                    if group['torch_compile']:
+                        grad = _stable_spam_clipping_compile_wrapper(state, 
+                                            grad, 
+                                            step=group['step'], 
+                                            scale=scale)
+                    else:
+                        grad = _stable_spam_clipping_impl(state, 
+                                            grad, 
+                                            step=group['step'], 
+                                            scale=scale)
 
                 if group["reset_interval"] > 0:
                     if state["steps_since_reset"] // (group["reset_interval"] + (group["reset_increment"] * state["times_zero"])) > 0:

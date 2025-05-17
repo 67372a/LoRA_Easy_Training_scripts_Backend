@@ -25,7 +25,6 @@ class AdamW8bitAO(AdamW8bit):
             amsgrad,
             block_size=block_size,
             bf16_stochastic_round=bf16_stochastic_round,
-            is_adamw=True,
         )
 
     def __str__(self) -> str:
@@ -53,7 +52,6 @@ class AdamW4bitAO(AdamW4bit):
             amsgrad,
             block_size=block_size,
             bf16_stochastic_round=bf16_stochastic_round,
-            is_adamw=True,
         )
 
     def __str__(self) -> str:
@@ -81,7 +79,6 @@ class AdamWfp8AO(AdamWFp8):
             amsgrad,
             block_size=block_size,
             bf16_stochastic_round=bf16_stochastic_round,
-            is_adamw=True,
         )
 
     def __str__(self) -> str:

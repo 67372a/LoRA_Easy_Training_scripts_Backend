@@ -330,34 +330,6 @@ def update_second_moment(second_moment: torch.Tensor, grad: torch.Tensor, beta2:
 
 # Implementation from: https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/main/orthograd.py
 @torch.no_grad()
-def orthograd(param: torch.Tensor, grad: torch.Tensor, eps: float = 1e-30):
-    return torch.where(param.norm(2) <= eps,
-                       grad,
-                       _orthograd(param, grad, eps))
-
-@torch.no_grad()
-def _orthograd(param: torch.Tensor, 
-               grad: torch.Tensor, 
-               eps: float = 1e-30):
-    if not param.numel() > 1:
-        return grad
-    
-    grad_shape = grad.shape
-    w = param.view(-1)
-    grad = grad.view(-1)
-
-    # Perturb to prevent perfect alignment
-    w_perturbed = w.clone().add_(eps)
-
-    proj = torch.dot(w_perturbed, grad) / torch.dot(w_perturbed, w_perturbed)
-    g_orth = grad.to(dtype=torch.float32, copy=True).add_(w, alpha=-proj)
-    g_orth_scaled = g_orth.mul_(grad.norm(2) / (g_orth.norm(2) + eps))
-
-    return g_orth_scaled.view(grad_shape)
-
-
-# Implementation from: https://github.com/LucasPrietoAl/grokking-at-the-edge-of-numerical-stability/blob/main/orthograd.py
-@torch.no_grad()
 def orthograd_atan(param: torch.Tensor, grad: torch.Tensor):
     grad_shape = grad.shape
     w = param.view(-1)

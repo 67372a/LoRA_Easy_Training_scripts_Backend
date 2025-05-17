@@ -5,7 +5,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from .utils import copy_stochastic_, UPDATE_STRATEGY, orthograd, SSCCosineDecay
+from .utils import copy_stochastic_, UPDATE_STRATEGY, _paper_orthograd, SSCCosineDecay
 from typing import Optional
 
 class StableSPAM(BaseOptimizer):
@@ -140,8 +140,8 @@ class StableSPAM(BaseOptimizer):
                     p_fp32 = p.to(torch.float32)
                     exp_avg, exp_avg_sq = exp_avg.to(torch.float32), exp_avg_sq.to(torch.float32)
 
-                if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
-                    grad = orthograd(p_fp32, grad)
+                if use_orthograd:
+                    _paper_orthograd(p_fp32, grad)
 
                 self.apply_weight_decay(
                     p_fp32,

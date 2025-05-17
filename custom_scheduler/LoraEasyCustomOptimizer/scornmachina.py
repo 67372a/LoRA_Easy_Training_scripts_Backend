@@ -5,7 +5,7 @@ from torch.optim import Optimizer
 from math import sqrt
 from enum import IntEnum
 import math
-from .utils import (stable_spam_clipping, copy_stochastic_, orthograd, adagc_global_clipping_calc, 
+from .utils import (_stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl, copy_stochastic_, adagc_global_clipping_calc, 
                     _apply_adagc_clipping_and_update_gamma, _paper_orthograd, adaptive_eps)
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from typing import Optional
@@ -563,7 +563,16 @@ class SCORNMachina(Optimizer):
                     grad = _apply_adagc_clipping_and_update_gamma(self, grad=grad, state=state, step=step, warmup_steps=self.adagc_warmup_steps)
 
                 if use_stable_spam_clipping:
-                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], eps=group['eps_floor_t'])
+                    if group['torch_compile']:
+                        grad = _stable_spam_clipping_compile_wrapper(state, 
+                                            grad, 
+                                            step=group['step'], 
+                                            eps=group['eps_floor_t'])
+                    else:
+                        grad = _stable_spam_clipping_impl(state, 
+                                            grad, 
+                                            step=group['step'], 
+                                            eps=group['eps_floor_t'])
 
                 curr_eps = adaptive_eps(grad, group)
 

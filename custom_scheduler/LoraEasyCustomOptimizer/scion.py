@@ -7,7 +7,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, orthograd, agc, stable_spam_clipping, SSCCosineDecay, newton_schulz_
+from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, _paper_orthograd, agc, _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl, SSCCosineDecay, newton_schulz_
 from typing import Dict, Optional
 
 class LMONorm(IntEnum):
@@ -337,6 +337,7 @@ class SCION(BaseOptimizer):
         ssc_t_max: Optional[int] = None,
         use_focus: bool = False,
         focus_beta: float = 0.999,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -366,6 +367,7 @@ class SCION(BaseOptimizer):
             'use_stable_spam_clipping':use_stable_spam_clipping,
             'use_focus':use_focus,
             'focus_beta':focus_beta,
+            'torch_compile': torch_compile,
         }
         super().__init__(params, defaults)
 
@@ -440,14 +442,23 @@ class SCION(BaseOptimizer):
                     p_fp32 = p.to(torch.float32)
                     d = d.to(torch.float32)
 
-                if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
-                    grad = orthograd(p_fp32, grad)
+                if use_orthograd:
+                    _paper_orthograd(p_fp32, grad)
 
                 if adaptive_clip is not None and adaptive_clip > 0:
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if use_stable_spam_clipping:
-                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], scale=scale)
+                    if group['torch_compile']:
+                        grad = _stable_spam_clipping_compile_wrapper(state, 
+                                            grad, 
+                                            step=group['step'], 
+                                            scale=scale)
+                    else:
+                        grad = _stable_spam_clipping_impl(state, 
+                                            grad, 
+                                            step=group['step'], 
+                                            scale=scale)
 
                 d.mul_(1.0 - group['momentum']).add_(grad, alpha=group['momentum'])
 

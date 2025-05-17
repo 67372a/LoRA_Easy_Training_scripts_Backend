@@ -1,6 +1,6 @@
 # FMARSCrop from https://github.com/Clybius/Personalized-Optimizers by Clybius
 import torch
-from .utils import copy_stochastic_, agc, NORM_TYPE, UPDATE_STRATEGY,orthograd, adaptive_eps
+from .utils import copy_stochastic_, agc, NORM_TYPE, UPDATE_STRATEGY,_paper_orthograd, adaptive_eps
 import math
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
@@ -1537,8 +1537,8 @@ class FMARSCropV3ExMachina(BaseOptimizer):
                 # Calculate cₜ (gradient with correction term)
                 c_t = prev_grad.mul(gamma * (beta2 / (1.0 - beta2))).add_(grad)
 
-                if group["use_orthograd"] and p.ndim >= 2:
-                    c_t = orthograd(p_fp32, c_t)
+                if group["use_orthograd"]:
+                    _paper_orthograd(p_fp32, c_t)
 
                 if adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)

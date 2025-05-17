@@ -5,9 +5,9 @@
 
 import torch
 from torch.optim import Optimizer
-from .utils import (orthograd, CosineDecay, CLIP_TYPE, copy_stochastic_, agc, 
+from .utils import (_paper_orthograd, CosineDecay, CLIP_TYPE, copy_stochastic_, agc, 
                     NORM_TYPE, create_factored_dims, get_denom, update_second_moment, STATE_PRECISION, 
-                    UPDATE_STRATEGY, spam_grad_clipping_logging, spam_grad_clipping, stable_spam_clipping, SSCCosineDecay, adaptive_eps)
+                    UPDATE_STRATEGY, spam_grad_clipping_logging, spam_grad_clipping, _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl, SSCCosineDecay, adaptive_eps)
 import math
 from torch.nn.functional import softplus
 from typing import Optional
@@ -252,8 +252,8 @@ class Compass(BaseOptimizer):
                     ema = ema.to(torch.float32)
                     ema_squared = ema_squared.to(torch.float32)
 
-                if group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
-                    grad = orthograd(p_fp32, grad)
+                if group["use_orthograd"]:
+                    _paper_orthograd(p_fp32, grad)
 
                 # center the gradient vector
                 if centralization != 0 and grad.dim() > 1:
@@ -1201,6 +1201,7 @@ class CompassADOPT(BaseOptimizer):
         update_strategy: UPDATE_STRATEGY = 'unmodified',
         use_stable_spam_clipping: bool = False,
         ssc_t_max: Optional[int] = None,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -1243,6 +1244,7 @@ class CompassADOPT(BaseOptimizer):
             'use_orthograd': use_orthograd,
             'update_strategy': update_strategy,
             'use_stable_spam_clipping':use_stable_spam_clipping,
+            'torch_compile': torch_compile,
             **kwargs
         }
         super().__init__(params, defaults)
@@ -1312,9 +1314,6 @@ class CompassADOPT(BaseOptimizer):
             adaptive_clip = group["adaptive_clip"]
             adaptive_clip_type = group["adaptive_clip_type"]
             adaptive_clip_eps = group["adaptive_clip_eps"]
-            eps = group["eps"]
-            eps2 = group["eps2"]
-            eps_floor = group["eps_floor"]
             amp_fac = group["amp_fac"]
             compass_second_moment_smoothing = group["compass_second_moment_smoothing"]
             use_orthograd = group["use_orthograd"]
@@ -1382,15 +1381,24 @@ class CompassADOPT(BaseOptimizer):
                         exp_avg_sq = exp_avg_sq.to(torch.float32)
                     p_fp32 = p.to(dtype=torch.float32, copy=True)
 
-                if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
-                    grad = orthograd(p_fp32, grad)
+                if use_orthograd:
+                    _paper_orthograd(p_fp32, grad)
 
                 if adaptive_clip is not None and adaptive_clip > 0.0:
                     # Apply Adaptive Gradient Clipping (AGC)
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
                 
                 if use_stable_spam_clipping:
-                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], scale=scale)
+                    if group['torch_compile']:
+                        grad = _stable_spam_clipping_compile_wrapper(state, 
+                                            grad, 
+                                            step=group['step'], 
+                                            scale=scale)
+                    else:
+                        grad = _stable_spam_clipping_impl(state, 
+                                            grad, 
+                                            step=group['step'], 
+                                            scale=scale)
 
                 curr_eps = adaptive_eps(grad, group)
 
@@ -2077,8 +2085,8 @@ class _CompassBase(Optimizer):
                             else:
                                 state["previous_grad"].copy_(temp_grad_f32)
 
-                        if group["use_orthograd"] and p.ndim >= 1 and p.numel() >= 2:
-                            grad_f32 = orthograd(p_f32, grad_f32)
+                        if group["use_orthograd"]:
+                            _paper_orthograd(p_f32, grad_f32)
 
                         if group["adaptive_clip"] > 0:
                             grad_f32 = agc(p=p_f32, 
@@ -2301,8 +2309,8 @@ def single_param_compass(
         else:
             previous_grad.copy_(temp_grad_f32)
 
-    if use_orthograd and p.ndim >= 1 and p.numel() >= 2:
-        grad_f32 = orthograd(p_f32, grad_f32)
+    if use_orthograd:
+         _paper_orthograd(p_f32, grad_f32)
 
     if spam_clipping_threshold != 0 and apply_spam_clipping and p.numel() >= 2 and p.ndim >= 1:
         grad_f32 = spam_grad_clipping(grad=grad_f32, second_moment=exp_avg_sq_f32, clip_threshold=spam_clipping_threshold, clip_type=spam_clipping_type, spam_clip_eps=spam_clipping_eps)
