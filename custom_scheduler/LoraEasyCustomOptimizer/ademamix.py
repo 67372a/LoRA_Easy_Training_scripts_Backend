@@ -421,11 +421,11 @@ class SimplifiedAdEMAMix(BaseOptimizer):
 
                 if use_stable_spam_clipping:
                     if group['torch_compile']:
-                        return _stable_spam_clipping_compile_wrapper(state, 
+                        grad = _stable_spam_clipping_compile_wrapper(state, 
                                             grad, 
                                             step=group['step'])
                     else:
-                        return _stable_spam_clipping_impl(state, 
+                        grad = _stable_spam_clipping_impl(state, 
                                             grad, 
                                             step=group['step'])
 
