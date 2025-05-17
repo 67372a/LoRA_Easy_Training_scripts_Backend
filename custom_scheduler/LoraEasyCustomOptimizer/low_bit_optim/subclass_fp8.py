@@ -1,3 +1,8 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD 3-Clause license found in the
+# LICENSE file in the root directory of this source tree.
 import math
 
 import torch
@@ -72,12 +77,6 @@ class OptimStateFp8(TorchAOBaseTensor):
     def zeros(cls, shape, block_size: int = 256, device=None):
         codes = torch.zeros(shape, dtype=DTYPE, device=device)
         scale = torch.zeros(codes.numel() // block_size, device=device)
-        return cls(codes, scale)
-    
-    @classmethod
-    def ones(cls, shape, block_size: int = 256, device=None):
-        codes = torch.ones(shape, dtype=DTYPE, device=device)
-        scale = torch.ones(codes.numel() // block_size, device=device)
         return cls(codes, scale)
 
     def __repr__(self):

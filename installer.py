@@ -13,7 +13,7 @@ def check_version_and_platform() -> bool:
     return False if version.major != 3 and version.minor < 10 else PLATFORM != ""
 
 
-def check_git_install() -> None:
+def check_git_install() -> bool:
     try:
         subprocess.check_call(
             "git --version",
@@ -28,7 +28,7 @@ def check_git_install() -> None:
 
 
 # windows only
-def set_execution_policy() -> None:
+def set_execution_policy() -> bool:
     try:
         subprocess.check_call(str(Path("installables/change_execution_policy.bat")))
     except subprocess.SubprocessError:
@@ -80,23 +80,21 @@ def setup_accelerate(platform: str) -> None:
 
 def setup_venv(venv_pip):
     subprocess.check_call(
-        f"{venv_pip} install -U typing-extensions==4.12.2",
+        f"{venv_pip} install -U typing-extensions==4.13.2",
         shell=PLATFORM == "linux",
     )
 
     subprocess.check_call(
-        f"{venv_pip} install -U torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124",
+        f"{venv_pip} install -U torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128",
         shell=PLATFORM == "linux",
     )
-    if PLATFORM == "windows":
-        subprocess.check_call("venv\\Scripts\\python.exe ..\\fix_torch.py")
         
     subprocess.check_call(
-        f"{venv_pip} install -U --no-deps xformers==0.0.29.post3 --index-url https://download.pytorch.org/whl/cu124",
+        f"{venv_pip} install -U --no-deps xformers==0.0.30 --index-url https://download.pytorch.org/whl/cu128",
         shell=PLATFORM == "linux",
     )
     subprocess.check_call(
-        f"{venv_pip} install -U --no-deps torchao --index-url https://download.pytorch.org/whl/cu124",
+        f"{venv_pip} install -U --no-deps torchao --extra-index-url https://download.pytorch.org/whl/cu128",
         shell=PLATFORM == "linux",
     )
     
@@ -105,9 +103,6 @@ def setup_venv(venv_pip):
         shell=PLATFORM == "linux",
     )
 
-
-
-    
     subprocess.check_call(f"{venv_pip} install -U -r requirements.txt", shell=PLATFORM == "linux")
     subprocess.check_call(f"{venv_pip} install -U ../custom_scheduler/.", shell=PLATFORM == "linux")
     subprocess.check_call(f"{venv_pip} install -U -r ../requirements.txt", shell=PLATFORM == "linux")

@@ -1,3 +1,8 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD 3-Clause license found in the
+# LICENSE file in the root directory of this source tree.
 import math
 
 import torch
@@ -85,16 +90,6 @@ class OptimState4bit(TorchAOBaseTensor):
 
         codes = torch.zeros(n_elems // 2, dtype=torch.uint8, device=device)
         scale = torch.zeros(n_elems // block_size, device=device)
-        qmap = torch.tensor(QMAP_SIGNED if signed else QMAP_UNSIGNED, device=device)
-        return cls(codes, scale, qmap, signed, shape)
-    
-    @classmethod
-    def ones(cls, shape, signed: bool = True, block_size: int = 128, device=None):
-        shape = (shape,) if isinstance(shape, int) else shape
-        n_elems = math.prod(shape)
-
-        codes = torch.ones(n_elems // 2, dtype=torch.uint8, device=device)
-        scale = torch.ones(n_elems // block_size, device=device)
         qmap = torch.tensor(QMAP_SIGNED if signed else QMAP_UNSIGNED, device=device)
         return cls(codes, scale, qmap, signed, shape)
 

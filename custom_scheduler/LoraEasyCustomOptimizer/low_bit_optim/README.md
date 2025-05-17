@@ -1,11 +1,12 @@
-# Low-bit optimizers
+# Low-bit and specialized optimizers
 
-This folder implements:
+This module implements:
 
 - 8-bit optimizers as outlined in https://arxiv.org/abs/2110.02861
 - 4-bit optimizers as outlined in https://arxiv.org/abs/2309.01507
 - FP8 optimizers using the native `torch.float8_e4m3fn` dtype (experimental)
 - Stochastic rounding for BF16 weight (https://arxiv.org/abs/2010.06192, experimental)
+- CPU offload optimizers for single GPU training
 
 The implementation is fully done in Python (with tensor subclass) and relies on `torch.compile()` to generate efficient fused kernel. Thus, your platform must support `torch.compile()` to use these optimizers. We only test on CPU and CUDA, so there might be bugs or errors on other platforms.
 
@@ -14,7 +15,7 @@ The implementation is fully done in Python (with tensor subclass) and relies on 
 This is a drop-in replacement for `torch.optim.Adam`
 
 ```python
-from torchao.prototype.low_bit_optim import Adam8bit
+from torchao.optim import Adam8bit
 
 model = ...
 optim = Adam8bit(model.parameters())
@@ -69,7 +70,7 @@ Note that our optimizer step calculations are always done in FP32 to ensure accu
 
 ```python
 # a clone of torch.optim.AdamW with extra features
-from torchao.prototype.low_bit_optim import _AdamW
+from torchao.optim import _AdamW
 
 model = ...
 model_bf16 = model.bfloat16()
@@ -84,7 +85,7 @@ This folder also implements optimizer CPU offload (i.e. ZeRO-Offload) for single
 
 ```python
 import torch
-from torchao.prototype.low_bit_optim import CPUOffloadOptimizer
+from torchao.optim import CPUOffloadOptimizer
 
 model = ...
 

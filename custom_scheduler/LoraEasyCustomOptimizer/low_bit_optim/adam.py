@@ -1,3 +1,8 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD 3-Clause license found in the
+# LICENSE file in the root directory of this source tree.
 from typing import Optional
 
 import torch
@@ -78,6 +83,11 @@ class _AdamBase(Optimizer):
                 stride=p.stride(),
             )
 
+        # when there is CPU offload, p.device is cpu, but device_mesh.device_type is cuda.
+        # DTensor.from_local() will move local_tensor to device_mesh.device_type.
+        # hence, we need to manually move it back to CPU.
+        # https://github.com/pytorch/pytorch/blob/bc4cf1c1/torch/distributed/tensor/_api.py#L410-L415
+        out = out.to(p.device)
         return out
 
     @torch.no_grad()
