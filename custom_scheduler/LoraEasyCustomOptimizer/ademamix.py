@@ -9,7 +9,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
-from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, agc, stable_spam_clipping, SSCCosineDecay, _paper_orthograd, adaptive_eps
+from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, agc, stable_spam_clipping, SSCCosineDecay, _paper_orthograd, adaptive_eps, _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl
 
 
 class AdEMAMix(BaseOptimizer):
@@ -190,7 +190,7 @@ class AdEMAMix(BaseOptimizer):
 
                 # Clip the gradient 
                 if clip > 0.0:
-                    grad.div_((self.get_rms(grad).add_(eps) / clip).clamp_(min=1.0))
+                    grad.div_(((self.get_rms(grad) + eps) / clip).clamp_(min=1.0))
 
                 exp_avg, exp_avg_sq, exp_avg_slow = state['exp_avg'], state['exp_avg_sq'], state['exp_avg_slow']
 
@@ -420,7 +420,15 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                     grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if use_stable_spam_clipping:
-                    grad = stable_spam_clipping(state=state, grad=grad, step=group['step'], torch_compile=group['torch_compile'])
+                    if group['torch_compile']:
+                        return _stable_spam_clipping_compile_wrapper(state, 
+                                            grad, 
+                                            step=group['step'])
+                    else:
+                        return _stable_spam_clipping_impl(state, 
+                                            grad, 
+                                            step=group['step'])
+
 
                 curr_eps = adaptive_eps(grad, group)
 
