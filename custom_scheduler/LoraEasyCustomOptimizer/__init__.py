@@ -41,6 +41,7 @@ from LoraEasyCustomOptimizer.racs import RACS
 from LoraEasyCustomOptimizer.alice import Alice
 from LoraEasyCustomOptimizer.fira import Fira
 from LoraEasyCustomOptimizer.vsgd import VSGD
+from LoraEasyCustomOptimizer.cstableadamw import CStableAdamW
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ADOPT,
@@ -65,6 +66,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     CompassADOPT,
     CompassADOPTMARS,
     CompassPlus,
+    CStableAdamW,
     FADOPTMARSScheduleFree,
     FADOPTScheduleFree,
     FARMSCrop,
