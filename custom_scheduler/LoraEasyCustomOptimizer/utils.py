@@ -919,7 +919,7 @@ def find_closest_orthogonal_matrix(self, A: torch.Tensor, max_iter: int = 8) -> 
     return L
 
 @torch.no_grad()
-def adaptive_eps(grad: torch.Tensor, group:dict) -> torch.Tensor:
+def adaptive_eps(grad: torch.Tensor, group:dict, rms_grad: torch.Tensor = None) -> torch.Tensor:
     if 'eps_t' not in group or group['eps_t'].device != group["params"][0].device:
         group['eps_t'] = torch.tensor(group['eps'], device=group["params"][0].device)
     if group['eps_floor'] is not None and group['eps_floor'] < group['eps']:
@@ -928,9 +928,9 @@ def adaptive_eps(grad: torch.Tensor, group:dict) -> torch.Tensor:
         if 'eps_floor_t' not in group or group['eps_floor_t'].device != group["params"][0].device:
             group['eps_floor_t'] = torch.tensor(group['eps_floor'], device=group["params"][0].device)
 
-        rms_grad = torch.sqrt(torch.mean(grad.pow(2)))
+        if rms_grad is None:
+            rms_grad = torch.sqrt(torch.mean(grad.pow(2)))
         val_to_bound = group['eps2_t'] * rms_grad
         return torch.clamp(val_to_bound, min=group['eps_floor'], max=group['eps'])
     else:
-        curr_eps = group['eps_t']
-    return curr_eps
+        return group['eps_t']

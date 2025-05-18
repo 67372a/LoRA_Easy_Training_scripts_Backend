@@ -496,10 +496,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
     :param min_beta1: float. minimum value of beta1 to start from.
     :param weight_decay: float. weight decay (L2 penalty).
     :param weight_decouple: bool. the optimizer uses decoupled weight decay as in AdamW.
-    :param fixed_decay: bool. fix weight decay.
     :param eps: float. term added to the denominator to improve numerical stability.
-    :param bias_correction1: bool. whether to use bias_correction in numerator
-    :param bias_correction2: bool. whether to use bias_correction in denominator
     """
 
     def __init__(
@@ -509,17 +506,15 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         betas: BETAS = (0.99, 0.997),
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
-        alpha: float = 1.0,
+        alpha: float = 2.0,
         beta1_warmup: Optional[int] = None,
         min_beta1: float = 0.9,
         eps: float = 1e-8,
-        eps2: float = 1e-2,
         eps_floor: Optional[float] = 1e-12,
-        use_orthograd: bool = False,
+        use_orthograd: bool = True,
         update_strategy: UPDATE_STRATEGY = 'unmodified',
-        bias_correction1: bool = False, 
         use_stable_spam_clipping:bool = True,
-        use_adopt: bool = True,
+        use_compass: bool = False,
         torch_compile: bool = True,
         **kwargs,
     ):
@@ -546,13 +541,12 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             'weight_decay': weight_decay,
             'weight_decouple': weight_decouple,
             'eps': eps,
-            'eps2': eps2,
+            'eps2': 1e-2,
             'eps_floor': eps_floor,
             'use_orthograd': use_orthograd,
             'update_strategy': update_strategy,
-            'bias_correction1': bias_correction1,
             'use_stable_spam_clipping':use_stable_spam_clipping,
-            'use_adopt':use_adopt,
+            'use_compass': use_compass,
             'torch_compile': torch_compile,
         }
 
@@ -600,11 +594,13 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             beta1, beta2 = group['betas']
 
             use_orthograd = group['use_orthograd']
+            use_compass = group['use_compass']
             update_strategy  = group['update_strategy']
-            use_adopt  = group['use_adopt']
 
             use_stable_spam_clipping = group["use_stable_spam_clipping"]
             apply_ortho_to_group = group.get('is_ortho_group', False) # Default to False if key missing
+
+            eps_floor = group['eps_floor']
 
             if group['beta1_warmup']:
                 beta1 = self.linear_hl_warmup_scheduler(
@@ -612,6 +608,8 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                 )
 
             beta2 = ((beta2 ** step - beta2) / (beta2 ** step - 1.0))
+
+            bias_correction = 1 - beta1 ** step
 
             for p in group['params']:
                 if p.grad is None:
@@ -627,7 +625,6 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                 if len(state) == 0:
                     state['exp_avg'] = torch.zeros_like(p)
                     state['exp_avg_sq'] = torch.zeros_like(p)
-                    state['num_sum'] = 0.0
                     state['den_sum'] = 0.0
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
@@ -644,54 +641,71 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                     if group['torch_compile']:
                         grad = _stable_spam_clipping_compile_wrapper(state, 
                                             grad, 
-                                            step=step)
+                                            step=step,
+                                            eps=eps_floor)
                     else:
                         grad = _stable_spam_clipping_impl(state, 
                                             grad, 
-                                            step=step)
+                                            step=step,
+                                            eps=eps_floor)
 
+                # Calculate RMS of grad once
+                rms_grad = torch.sqrt(torch.mean(grad.pow(2)))
+                curr_eps = adaptive_eps(grad, group, rms_grad=rms_grad)
 
-                curr_eps = adaptive_eps(grad, group)
+                # RMS Norm
+                grad_normed = grad.div(rms_grad.clamp_min_(1))
 
-                if use_adopt and step == 1:
-                    exp_avg_sq.addcmul_(grad, grad)
+                # Adaptive ema
+                mask = (grad_normed * exp_avg > 0).to(grad_normed.dtype)
+                mask.clamp_min_(beta1)
+                mask.div_(mask.mean().clamp_(min=1e-3)) # Divide by mean (0.001-1.0)
+                exp_avg.mul_(mask)
+
+                exp_avg.mul_(beta1).add_(grad_normed, alpha=1.0 - beta1)
+
+                state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
+
+                # Compass amplification + beta1 Bias correction
+                if use_compass:
+                    c_t = grad_normed.add(exp_avg.div(bias_correction), alpha=group['alpha'])
                 else:
-                    exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+                    c_t = grad_normed
 
-                    state['num_sum'] = beta1 * state['num_sum'] + 1.0
-                    state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
+                if step == 1:
+                    exp_avg_sq.addcmul_(c_t, c_t)
+                else:
+                    de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
+                    new_exp_avg_sq = exp_avg_sq.mul(beta2).addcmul_(c_t, c_t, value=1.0 - beta2)
 
-                    if use_adopt:
-                        de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
-                        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-                    else:   
-                        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-                        de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
+                    # Decaying amsgrad
+                    torch.maximum(exp_avg_sq.mul(min(beta2, 0.99), new_exp_avg_sq, out=exp_avg_sq))
 
-                    update = (group['alpha'] * grad + exp_avg)
+                    if use_compass:
+                        update = c_t
+                    else:
+                        update = (group['alpha'] * grad_normed + exp_avg)
 
                     if update_strategy in {'cautious','grams','both'}:
                         if update_strategy in {'cautious','both'}:
-                            mask = (update * grad > 0).to(grad.dtype)
+                            mask = (update * grad_normed > 0).to(grad_normed.dtype)
                             mask.div_(mask.mean().clamp_(min=1e-3))
                             update = update * mask
                         if update_strategy in {'grams','both'}:
-                            update.copy_(torch.sign(grad) * update.abs())
+                            update.copy_(torch.sign(grad_normed) * update.abs())
 
                     update.div_(de_nom)
 
-                    if group['bias_correction1']:
-                        update.div_(state['num_sum'])
+                    update.div_(bias_correction)
 
-                    # Bias correction
+                    # beta2 Bias correction
                     update.mul_(math.sqrt(state['den_sum']))
 
-                    if use_adopt:
-                        update.clamp_(-adopt_clip, adopt_clip)
+                    update.clamp_(-adopt_clip, adopt_clip)
 
                     self.apply_weight_decay(
                         p=p_fp32,
-                        grad=grad,
+                        grad=grad_normed,
                         lr=group['lr'],
                         weight_decay=group['weight_decay'],
                         weight_decouple=group['weight_decouple'],
