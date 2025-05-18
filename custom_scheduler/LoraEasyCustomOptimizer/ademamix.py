@@ -679,7 +679,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                     new_exp_avg_sq = exp_avg_sq.mul(beta2).addcmul_(c_t, c_t, value=1.0 - beta2)
 
                     # Decaying amsgrad
-                    torch.maximum(exp_avg_sq.mul(min(beta2, 0.99)), new_exp_avg_sq, out=exp_avg_sq))
+                    torch.maximum(exp_avg_sq.mul(min(beta2, 0.99)), new_exp_avg_sq, out=exp_avg_sq)
 
                     if use_compass:
                         update = c_t
