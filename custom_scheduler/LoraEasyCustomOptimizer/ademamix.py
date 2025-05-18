@@ -484,3 +484,225 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                         copy_stochastic_(p, p_fp32)
 
         return loss
+    
+class SimplifiedAdEMAMixExM(BaseOptimizer):
+    r"""Connections between Schedule-Free Optimizers, AdEMAMix, and Accelerated SGD Variants.
+
+    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param lr: float. learning rate.
+    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+    :param alpha: float. coefficient for mixing the current gradient and EMA.
+    :param beta1_warmup: Optional[int]. number of warmup steps used to increase beta1.
+    :param min_beta1: float. minimum value of beta1 to start from.
+    :param weight_decay: float. weight decay (L2 penalty).
+    :param weight_decouple: bool. the optimizer uses decoupled weight decay as in AdamW.
+    :param fixed_decay: bool. fix weight decay.
+    :param eps: float. term added to the denominator to improve numerical stability.
+    :param bias_correction1: bool. whether to use bias_correction in numerator
+    :param bias_correction2: bool. whether to use bias_correction in denominator
+    """
+
+    def __init__(
+        self,
+        params: PARAMETERS,
+        lr: float|torch.Tensor = 1e-4,
+        betas: BETAS = (0.99, 0.997),
+        weight_decay: float = 0.0,
+        weight_decouple: bool = True,
+        alpha: float = 1.0,
+        beta1_warmup: Optional[int] = None,
+        min_beta1: float = 0.9,
+        eps: float = 1e-8,
+        eps2: float = 1e-2,
+        eps_floor: Optional[float] = 1e-12,
+        use_orthograd: bool = False,
+        update_strategy: UPDATE_STRATEGY = 'unmodified',
+        bias_correction1: bool = False, 
+        use_stable_spam_clipping:bool = True,
+        use_adopt: bool = True,
+        torch_compile: bool = True,
+        **kwargs,
+    ):
+        self.validate_learning_rate(lr)
+        self.validate_betas(betas)
+        self.validate_non_negative(alpha, 'alpha')
+        self.validate_non_negative(min_beta1, 'min_beta1')
+        self.validate_non_negative(weight_decay, 'weight_decay')
+        self.validate_non_negative(eps, 'eps')
+
+        # Override zero to tiny
+        if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
+            eps_floor = torch.finfo(torch.float32).tiny
+
+        if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams', 'both'}:
+            raise ValueError("Invalid update strategy: {}".format(update_strategy))
+
+        defaults: DEFAULTS = {
+            'lr': lr,
+            'betas': betas,
+            'alpha': alpha,
+            'beta1_warmup': beta1_warmup,
+            'min_beta1': min_beta1,
+            'weight_decay': weight_decay,
+            'weight_decouple': weight_decouple,
+            'eps': eps,
+            'eps2': eps2,
+            'eps_floor': eps_floor,
+            'use_orthograd': use_orthograd,
+            'update_strategy': update_strategy,
+            'bias_correction1': bias_correction1,
+            'use_stable_spam_clipping':use_stable_spam_clipping,
+            'use_adopt':use_adopt,
+            'torch_compile': torch_compile,
+        }
+
+        super().__init__(params, defaults)
+
+    def __str__(self) -> str:
+        return 'SimplifiedAdEMAMixExM'
+
+    @torch.no_grad()
+    def reset(self):
+        pass
+
+    @staticmethod
+    def linear_hl_warmup_scheduler(step: int, beta_end: float, beta_start: float = 0.0, warmup: int = 1) -> float:
+
+        def f(beta: float, eps: float = 1e-8) -> float:
+            return math.log(0.5) / math.log(beta + eps) - 1.0
+
+        def f_inv(t: float) -> float:
+            return math.pow(0.5, 1.0 / (t + 1))
+
+        if step < warmup:
+            a: float = step / float(warmup)
+            return f_inv((1.0 - a) * f(beta_start) + a * f(beta_end))
+
+        return beta_end
+
+    @torch.no_grad()
+    def step(self, closure: CLOSURE = None) -> LOSS:
+        loss: LOSS = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+
+            step = group['step']
+
+            adopt_clip: float = (step-1)**0.25
+
+            beta1, beta2 = group['betas']
+
+            use_orthograd = group['use_orthograd']
+            update_strategy  = group['update_strategy']
+            use_adopt  = group['use_adopt']
+
+            use_stable_spam_clipping = group["use_stable_spam_clipping"]
+            apply_ortho_to_group = group.get('is_ortho_group', False) # Default to False if key missing
+
+            if group['beta1_warmup']:
+                beta1 = self.linear_hl_warmup_scheduler(
+                    step, beta_end=beta1, beta_start=group['min_beta1'], warmup=group['beta1_warmup']
+                )
+
+            beta2 = ((beta2 ** step - beta2) / (beta2 ** step - 1.0))
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                p_fp32 = p
+                grad = p.grad
+                if grad.is_sparse:
+                    raise NoSparseGradientError(str(self))
+
+                state = self.state[p]
+
+                if len(state) == 0:
+                    state['exp_avg'] = torch.zeros_like(p)
+                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    state['num_sum'] = 0.0
+                    state['den_sum'] = 0.0
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+
+                if p.dtype == torch.bfloat16:
+                    grad = grad.to(torch.float32)
+                    p_fp32 = p.to(torch.float32)
+                    exp_avg, exp_avg_sq = exp_avg.to(torch.float32), exp_avg_sq.to(torch.float32)
+
+                if apply_ortho_to_group and use_orthograd:
+                    _paper_orthograd(param=p_fp32, grad=grad)
+
+                if use_stable_spam_clipping:
+                    if group['torch_compile']:
+                        grad = _stable_spam_clipping_compile_wrapper(state, 
+                                            grad, 
+                                            step=step)
+                    else:
+                        grad = _stable_spam_clipping_impl(state, 
+                                            grad, 
+                                            step=step)
+
+
+                curr_eps = adaptive_eps(grad, group)
+
+                if use_adopt and step == 1:
+                    exp_avg_sq.addcmul_(grad, grad)
+                else:
+                    exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+
+                    state['num_sum'] = beta1 * state['num_sum'] + 1.0
+                    state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
+
+                    if use_adopt:
+                        de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
+                        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                    else:   
+                        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                        de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
+
+                    update = (group['alpha'] * grad + exp_avg)
+
+                    if update_strategy in {'cautious','grams','both'}:
+                        if update_strategy in {'cautious','both'}:
+                            mask = (update * grad > 0).to(grad.dtype)
+                            mask.div_(mask.mean().clamp_(min=1e-3))
+                            update = update * mask
+                        if update_strategy in {'grams','both'}:
+                            update.copy_(torch.sign(grad) * update.abs())
+
+                    update.div_(de_nom)
+
+                    if group['bias_correction1']:
+                        update.div_(state['num_sum'])
+
+                    # Bias correction
+                    update.mul_(math.sqrt(state['den_sum']))
+
+                    if use_adopt:
+                        update.clamp_(-adopt_clip, adopt_clip)
+
+                    self.apply_weight_decay(
+                        p=p_fp32,
+                        grad=grad,
+                        lr=group['lr'],
+                        weight_decay=group['weight_decay'],
+                        weight_decouple=group['weight_decouple'],
+                        fixed_decay=False,
+                    )
+
+                    p_fp32.add_(update, alpha=-group['lr'])
+
+                    if p.dtype == torch.bfloat16:
+                        copy_stochastic_(state["exp_avg"], exp_avg)
+                        copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
+                        copy_stochastic_(p, p_fp32)
+
+        return loss
