@@ -513,10 +513,12 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         eps_floor: Optional[float] = 1e-12,
         use_orthograd: bool = True,
         update_strategy: UPDATE_STRATEGY = 'unmodified',
+        update_strategy_scale: float = 1.0,
         use_stable_spam_clipping:bool = True,
         use_compass: bool = False,
         use_adabelief: bool = False,
         torch_compile: bool = True,
+        amsgrad_max_decay_rate: float = 0.98,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -526,6 +528,9 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
+        if not (0.0 <= update_strategy_scale <= 1.0):
+            raise ValueError(f"update_strategy_scale ({update_strategy_scale}) must lie in [0.0, 1.0].")
+        
         # Override zero to tiny
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = torch.finfo(torch.float32).tiny
@@ -546,10 +551,12 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             'eps_floor': eps_floor,
             'use_orthograd': use_orthograd,
             'update_strategy': update_strategy,
+            'update_strategy_scale': update_strategy_scale,
             'use_stable_spam_clipping':use_stable_spam_clipping,
             'use_compass': use_compass,
             'use_adabelief': use_adabelief,
             'torch_compile': torch_compile,
+            'amsgrad_max_decay_rate': amsgrad_max_decay_rate,
         }
 
         super().__init__(params, defaults)
@@ -599,6 +606,8 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             use_compass = group['use_compass']
             use_adabelief = group['use_adabelief']
             update_strategy  = group['update_strategy']
+            update_strategy_scale  = group['update_strategy_scale']
+            amsgrad_max_decay_rate  = group['amsgrad_max_decay_rate']
 
             use_stable_spam_clipping = group["use_stable_spam_clipping"]
             apply_ortho_to_group = group.get('is_ortho_group', False) # Default to False if key missing
@@ -691,20 +700,14 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                         new_exp_avg_sq = exp_avg_sq.mul(beta2).addcmul_(c_t, c_t, value=1.0 - beta2)
 
                     # Decaying amsgrad
-                    torch.maximum(exp_avg_sq.mul(min(beta2, 0.99)), new_exp_avg_sq, out=exp_avg_sq)
+                    torch.maximum(exp_avg_sq.mul(min(beta2, amsgrad_max_decay_rate)), new_exp_avg_sq, out=exp_avg_sq)
 
                     if use_compass:
                         update = c_t
                     else:
                         update = (group['alpha'] * grad_normed + exp_avg)
 
-                    if update_strategy in {'cautious','grams','both'}:
-                        if update_strategy in {'cautious','both'}:
-                            mask = (update * grad_normed > 0).to(grad_normed.dtype)
-                            mask.div_(mask.mean().clamp_(min=1e-3))
-                            update = update * mask
-                        if update_strategy in {'grams','both'}:
-                            update.copy_(torch.sign(grad_normed) * update.abs())
+                    update = apply_update_strategies(update, grad_normed, update_strategy, update_strategy_scale)
 
                     update.div_(de_nom)
 
@@ -733,3 +736,54 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                         copy_stochastic_(p, p_fp32)
 
         return loss
+    
+def apply_update_strategies(update, grad, update_strategy, scale=1.0):
+    """
+    Applies update strategies with scaling factors.
+
+    Args:
+        update (torch.Tensor): The current update tensor to be modified.
+        grad_normed (torch.Tensor): The normalized gradient.
+        update_strategy (str): One of 'cautious', 'grams', 'both'.
+        scale (float): Scaling factor for the Grams strategies.
+
+    Returns:
+        torch.Tensor: The modified update tensor.
+    """
+    if scale > 0 and update_strategy in {'cautious', 'grams', 'both'}:
+        # Keep a reference to the update before cautious strategy (if applied)
+        # This is the 'original' for the cautious interpolation
+        update_before_cautious = update.clone()
+
+        if update_strategy in {'cautious', 'both'}:
+            # 1. Calculate the "fully cautious" update
+            mask = (update_before_cautious * grad > 0).to(grad.dtype)
+            mask_mean = mask.mean().clamp_(min=1e-3) # Avoid division by zero or tiny numbers
+            if mask_mean > 0: # Ensure mask_mean is positive before division
+                mask.div_(mask_mean)
+            else: # If mask_mean is zero (e.g. all products were <=0), mask becomes zeros
+                    # which means update_if_fully_cautious will be zero.
+                    # Or, decide on alternative behavior, e.g., mask = torch.ones_like(mask)
+                    # For now, let's stick to making it zero if mean is zero.
+                pass
+
+            update_if_fully_cautious = update_before_cautious * mask
+
+            # 2. Interpolate between original and fully cautious update
+            # update = original * (1-scale) + modified * scale
+            update = (1 - scale) * update_before_cautious + scale * update_if_fully_cautious
+        # If cautious_scale is 0, 'update' remains 'update_before_cautious'
+
+        # 'update' now potentially contains the cautious-modified version.
+        # This becomes the 'original' for the Grams interpolation.
+        update_before_grams = update.clone()
+
+        if update_strategy in {'grams', 'both'}:
+            # 1. Calculate the "fully Grams-aligned" update
+            update_if_fully_grams = torch.sign(grad) * update_before_grams.abs()
+
+            # 2. Interpolate between current update and fully Grams-aligned update
+            update = (1 - scale) * update_before_grams + scale * update_if_fully_grams
+            # If grams_scale is 0, 'update' remains 'update_before_grams'
+
+    return update
