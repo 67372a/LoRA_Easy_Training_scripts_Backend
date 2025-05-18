@@ -457,7 +457,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                         if update_strategy in {'grams','both'}:
                             update.copy_(torch.sign(grad) * update.abs())
 
-                    update.div_(de_nom).mul_(math.sqrt(state['den_sum']))
+                    update.div_(de_nom)
 
                     if group['bias_correction1']:
                         update.div_(state['num_sum'])

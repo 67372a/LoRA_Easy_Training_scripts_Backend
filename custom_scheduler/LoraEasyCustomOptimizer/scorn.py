@@ -77,7 +77,7 @@ class Norm:
         r"""Initialize parameter."""
         return x
 
-    def lmo(self, grad: torch.Tensor) -> torch.Tensor:
+    def lmo(self, grad: torch.Tensor, eps: float) -> torch.Tensor:
         r"""Get LMO."""
         return grad
 
