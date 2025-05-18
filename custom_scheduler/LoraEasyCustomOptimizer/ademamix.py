@@ -502,7 +502,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float|torch.Tensor = 1e-4,
+        lr: float|torch.Tensor = 3e-4,
         betas: BETAS = (0.99, 0.997),
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
@@ -515,6 +515,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         update_strategy: UPDATE_STRATEGY = 'unmodified',
         use_stable_spam_clipping:bool = True,
         use_compass: bool = False,
+        use_adabelief: bool = False,
         torch_compile: bool = True,
         **kwargs,
     ):
@@ -547,6 +548,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             'update_strategy': update_strategy,
             'use_stable_spam_clipping':use_stable_spam_clipping,
             'use_compass': use_compass,
+            'use_adabelief': use_adabelief,
             'torch_compile': torch_compile,
         }
 
@@ -595,6 +597,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
 
             use_orthograd = group['use_orthograd']
             use_compass = group['use_compass']
+            use_adabelief = group['use_adabelief']
             update_strategy  = group['update_strategy']
 
             use_stable_spam_clipping = group["use_stable_spam_clipping"]
@@ -673,10 +676,19 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                     c_t = grad_normed
 
                 if step == 1:
-                    exp_avg_sq.addcmul_(c_t, c_t)
+                    if use_adabelief:
+                        grad_residual = grad_normed - exp_avg
+                        exp_avg_sq.addcmul_(grad_residual, grad_residual)
+                    else:
+                        exp_avg_sq.addcmul_(c_t, c_t)
                 else:
                     de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
-                    new_exp_avg_sq = exp_avg_sq.mul(beta2).addcmul_(c_t, c_t, value=1.0 - beta2)
+
+                    if use_adabelief:
+                        grad_residual = grad_normed - exp_avg
+                        new_exp_avg_sq = exp_avg_sq.mul(beta2).addcmul_(grad_residual, grad_residual, value=1.0 - beta2)
+                    else:
+                        new_exp_avg_sq = exp_avg_sq.mul(beta2).addcmul_(c_t, c_t, value=1.0 - beta2)
 
                     # Decaying amsgrad
                     torch.maximum(exp_avg_sq.mul(min(beta2, 0.99)), new_exp_avg_sq, out=exp_avg_sq)
@@ -696,7 +708,8 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
 
                     update.div_(de_nom)
 
-                    update.div_(bias_correction)
+                    if not use_compass:
+                        update.div_(bias_correction)
 
                     # beta2 Bias correction
                     update.mul_(math.sqrt(state['den_sum']))
