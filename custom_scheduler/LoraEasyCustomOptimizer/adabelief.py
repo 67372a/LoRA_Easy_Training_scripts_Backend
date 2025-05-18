@@ -166,6 +166,7 @@ class AdaBelief(BaseOptimizer):
                 if p.dtype in {torch.float16, torch.bfloat16}:
                     grad = grad.to(torch.float32)
                     p_fp32 = p.clone().to(torch.float32)
+                    exp_avg, exp_avg_var = exp_avg.to(torch.float32), exp_avg_var.to(torch.float32)
                     if group['adanorm']:
                         exp_grad_norm = exp_grad_norm.to(torch.float32)
                     if group['ams_bound']:
