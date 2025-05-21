@@ -12,6 +12,70 @@ from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETE
 from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, agc, _paper_orthograd, adaptive_eps, _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl
 
 
+# https://github.com/kozistr/pytorch_optimizer/blob/6397d56279ad80b26c4bba7fb4b04852b517fdeb/pytorch_optimizer/optimizer/shampoo_utils.py#L533
+@torch.no_grad()
+def zero_power_via_newton_schulz_6(grad: torch.Tensor) -> torch.Tensor:
+    r"""Compute the zeroth power / orthogonalization of G.
+
+    Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a quintic iteration
+    whose coefficients are selected to maximize the slope at zero. For the purpose of minimizing steps, it turns out
+    to be empirically effective to keep increasing the slope at zero even beyond the point where the iteration no
+    longer converges all the way to one everywhere on the interval. This iteration therefore does not produce UV^T but
+    rather something like US'V^T where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt
+    model performance at all relative to UV^T, where USV^T = G is the SVD.
+
+    :param grad: torch.Tensor. matrix.
+    """
+    # Inline reshaping step within the method itself.
+    G_shape = grad.shape
+    grad = grad.view(grad.size(0), -1)
+
+    abc_list = [
+      (3955/1024, -8306/1024, 5008/1024),
+      (3735/1024, -6681/1024, 3463/1024),
+      (3799/1024, -6499/1024, 3211/1024),
+      (4019/1024, -6385/1024, 2906/1024),
+      (2677/1024, -3029/1024, 1162/1024),
+      (2172/1024, -1833/1024,  682/1024)
+   ]
+
+    X = grad.float()
+    if grad.size(0) > grad.size(1):
+        X = X.T
+
+    X = X.div(X.norm().add(1e-16))# ensure top singular value <= 1
+    #for _ in range(num_steps):
+    for a,b,c in abc_list:
+        A = X @ X.T
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+
+    if grad.size(0) > grad.size(1):
+        X = X.T
+
+    # Gradient scaling adaptation from: https://github.com/leloykun/adaptive-muon
+    X = torch.einsum('ij,ij->', grad.type_as(X), X).clamp(-1.0, 1.0) * X
+
+    return X.view(G_shape)
+
+@torch._dynamo.utils.disable_cache_limit()
+@torch.compile(fullgraph=True, mode="reduce-overhead")
+def zero_power_via_newton_schulz_6_compile(grad: torch.Tensor) -> torch.Tensor:
+    return zero_power_via_newton_schulz_6(grad)
+
+@torch.no_grad()
+
+def bias_rms(grad: torch.Tensor) -> torch.Tensor:
+    rms_value = torch.sqrt(torch.sum(grad.pow(2), dim=0, keepdim=True))
+    grad = grad.div(rms_value.add_(1e-16))
+    return grad
+
+@torch._dynamo.utils.disable_cache_limit()
+@torch.compile(fullgraph=True, mode="reduce-overhead")
+def bias_rms_compile(grad: torch.Tensor) -> torch.Tensor:
+    return bias_rms(grad)
+
+
 class AdEMAMix(BaseOptimizer):
     r"""Better, Faster, Older.
 
@@ -502,11 +566,11 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
     def __init__(
         self,
         params: PARAMETERS,
-        lr: float|torch.Tensor = 3e-4,
-        betas: BETAS = (0.99, 0.997),
+        lr: float|torch.Tensor = 2e-4,
+        betas: BETAS = (0.95, 0.997),
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
-        alpha: float = 2.0,
+        alpha: float = 1.5,
         beta1_warmup: Optional[int] = None,
         min_beta1: float = 0.9,
         eps: float = 1e-8,
@@ -517,8 +581,9 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         use_stable_spam_clipping:bool = True,
         use_compass: bool = False,
         use_adabelief: bool = False,
-        torch_compile: bool = True,
+        use_newton_schulz: bool = True,
         amsgrad_max_decay_rate: float = 0.98,
+        torch_compile: bool = True,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -557,6 +622,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             'use_adabelief': use_adabelief,
             'torch_compile': torch_compile,
             'amsgrad_max_decay_rate': amsgrad_max_decay_rate,
+            'use_newton_schulz':use_newton_schulz,
         }
 
         super().__init__(params, defaults)
@@ -605,9 +671,11 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             use_orthograd = group['use_orthograd']
             use_compass = group['use_compass']
             use_adabelief = group['use_adabelief']
+            use_newton_schulz = group['use_newton_schulz']
             update_strategy  = group['update_strategy']
             update_strategy_scale  = group['update_strategy_scale']
             amsgrad_max_decay_rate  = group['amsgrad_max_decay_rate']
+            torch_compile = group['torch_compile']
 
             use_stable_spam_clipping = group["use_stable_spam_clipping"]
             apply_ortho_to_group = group.get('is_ortho_group', False) # Default to False if key missing
@@ -650,7 +718,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                     _paper_orthograd(param=p_fp32, grad=grad)
 
                 if use_stable_spam_clipping:
-                    if group['torch_compile']:
+                    if torch_compile:
                         grad = _stable_spam_clipping_compile_wrapper(state, 
                                             grad, 
                                             step=step,
@@ -668,6 +736,18 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                 # RMS Norm
                 grad_normed = grad.div(rms_grad.clamp_min_(1))
 
+                if use_newton_schulz:
+                    if grad_normed.ndim > 0:
+                        if torch_compile:
+                            grad_normed = zero_power_via_newton_schulz_6_compile(grad_normed)
+                        else:
+                            grad_normed = zero_power_via_newton_schulz_6(grad_normed)
+                    elif grad_normed.numel() > 1:
+                        if torch_compile:
+                            grad_normed = bias_rms_compile(grad_normed)
+                        else:
+                            grad_normed = bias_rms(grad_normed)
+                            
                 # Adaptive ema
                 mask = (grad_normed * exp_avg > 0).to(grad_normed.dtype)
                 mask.clamp_min_(beta1)
