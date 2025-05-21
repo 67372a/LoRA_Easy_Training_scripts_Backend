@@ -86,7 +86,7 @@ def agc(p: torch.Tensor,
         grad: torch.Tensor, 
         agc_clip_val: float, 
         agc_eps: float = 1e-3, 
-        eps: Optional[float] = None, 
+        eps: float = 1e-16, 
         norm_type: NORM_TYPE = 'layer') -> torch.Tensor:
     r"""Clip gradient values in excess of the norm.
         Clip updates to be at most clipping * parameter_norm.
@@ -171,7 +171,7 @@ def spam_grad_clipping(grad: torch.Tensor,
                        second_moment: torch.Tensor, 
                        clip_threshold: float, 
                        clip_type: CLIP_TYPE = 'element', 
-                       spam_clip_eps: float = 1e-37) -> torch.Tensor:
+                       spam_clip_eps: float = 1e-16) -> torch.Tensor:
     if spam_clip_eps is None or spam_clip_eps == 0:
         spam_clip_eps = torch.finfo(torch.float32).tiny
     
@@ -206,7 +206,7 @@ def spam_grad_clipping_logging(grad: torch.Tensor,
                                second_moment: torch.Tensor, 
                                clip_threshold: float, 
                                clip_type: str = 'element', 
-                               spam_clip_eps: float = 1e-37) -> torch.Tensor:
+                               spam_clip_eps: float = 1e-16) -> torch.Tensor:
     if spam_clip_eps is None or spam_clip_eps == 0:
         spam_clip_eps = torch.finfo(torch.float32).tiny
 
