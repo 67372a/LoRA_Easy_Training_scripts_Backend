@@ -556,7 +556,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
     :param lr: float. learning rate.
     :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
     :param alpha: float. coefficient for mixing the current gradient and EMA.
-    :param beta1_warmup: Optional[int]. number of warmup steps used to increase beta1.
+    :param beta1_warmup: Optional[int]. number of warmup steps used to increase beta1. Recommend setting to iteration/step count.
     :param min_beta1: float. minimum value of beta1 to start from.
     :param weight_decay: float. weight decay (L2 penalty).
     :param weight_decouple: bool. the optimizer uses decoupled weight decay as in AdamW.
@@ -568,11 +568,11 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         params: PARAMETERS,
         lr: float|torch.Tensor = 2e-4,
         betas: BETAS = (0.95, 0.997),
+        min_beta1: float = 0.95,
+        beta1_warmup: Optional[int] = None,
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
-        alpha: float = 1.5,
-        beta1_warmup: Optional[int] = None,
-        min_beta1: float = 0.9,
+        alpha: float = 1.0,
         eps: float = 1e-8,
         eps_floor: Optional[float] = 1e-12,
         use_orthograd: bool = True,
@@ -580,9 +580,10 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         update_strategy_scale: float = 1.0,
         use_stable_spam_clipping:bool = True,
         use_compass: bool = False,
-        use_adabelief: bool = False,
+        use_adabelief: bool = True,
         use_newton_schulz: bool = True,
-        amsgrad_max_decay_rate: float = 0.98,
+        amsgrad_min_decay_rate: float = 0.96,
+        amsgrad_max_decay_rate: float = 0.96,
         torch_compile: bool = True,
         **kwargs,
     ):
@@ -622,6 +623,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             'use_adabelief': use_adabelief,
             'torch_compile': torch_compile,
             'amsgrad_max_decay_rate': amsgrad_max_decay_rate,
+            'amsgrad_min_decay_rate': amsgrad_min_decay_rate,
             'use_newton_schulz':use_newton_schulz,
         }
 
@@ -674,6 +676,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             use_newton_schulz = group['use_newton_schulz']
             update_strategy  = group['update_strategy']
             update_strategy_scale  = group['update_strategy_scale']
+            amsgrad_min_decay_rate  = group['amsgrad_min_decay_rate']
             amsgrad_max_decay_rate  = group['amsgrad_max_decay_rate']
             torch_compile = group['torch_compile']
 
@@ -689,7 +692,8 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
 
             beta2 = ((beta2 ** step - beta2) / (beta2 ** step - 1.0))
 
-            bias_correction = 1 - beta1 ** step
+            bias_correction1 = 1 - beta1 ** step
+            bias_correction2_sqrt = (1 - beta2 ** step) ** (1/2)
 
             for p in group['params']:
                 if p.grad is None:
@@ -705,7 +709,6 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                 if len(state) == 0:
                     state['exp_avg'] = torch.zeros_like(p)
                     state['exp_avg_sq'] = torch.zeros_like(p)
-                    state['den_sum'] = 0.0
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
 
@@ -756,11 +759,9 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
 
                 exp_avg.mul_(beta1).add_(grad_normed, alpha=1.0 - beta1)
 
-                state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
-
                 # Compass amplification + beta1 Bias correction
                 if use_compass:
-                    c_t = grad_normed.add(exp_avg.div(bias_correction), alpha=group['alpha'])
+                    c_t = grad_normed.add(exp_avg.div(bias_correction1), alpha=group['alpha'])
                 else:
                     c_t = grad_normed
 
@@ -771,7 +772,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                     else:
                         exp_avg_sq.addcmul_(c_t, c_t)
                 else:
-                    de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
+                    de_nom = exp_avg_sq.sqrt().div_(bias_correction2_sqrt).add_(curr_eps)
 
                     if use_adabelief:
                         grad_residual = grad_normed - exp_avg
@@ -780,7 +781,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                         new_exp_avg_sq = exp_avg_sq.mul(beta2).addcmul_(c_t, c_t, value=1.0 - beta2)
 
                     # Decaying amsgrad
-                    torch.maximum(exp_avg_sq.mul(min(beta2, amsgrad_max_decay_rate)), new_exp_avg_sq, out=exp_avg_sq)
+                    torch.maximum(exp_avg_sq.mul(max(min(beta2, amsgrad_max_decay_rate), amsgrad_min_decay_rate)), new_exp_avg_sq, out=exp_avg_sq)
 
                     if use_compass:
                         update = c_t
@@ -792,10 +793,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                     update.div_(de_nom)
 
                     if not use_compass:
-                        update.div_(bias_correction)
-
-                    # beta2 Bias correction
-                    update.mul_(math.sqrt(state['den_sum']))
+                        update.div_(bias_correction1)
 
                     update.clamp_(-adopt_clip, adopt_clip)
 
@@ -816,7 +814,8 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                         copy_stochastic_(p, p_fp32)
 
         return loss
-    
+
+@torch.no_grad()
 def apply_update_strategies(update, grad, update_strategy, scale=1.0):
     """
     Applies update strategies with scaling factors.
@@ -831,39 +830,23 @@ def apply_update_strategies(update, grad, update_strategy, scale=1.0):
         torch.Tensor: The modified update tensor.
     """
     if scale > 0 and update_strategy in {'cautious', 'grams', 'both'}:
-        # Keep a reference to the update before cautious strategy (if applied)
-        # This is the 'original' for the cautious interpolation
-        update_before_cautious = update.clone()
-
         if update_strategy in {'cautious', 'both'}:
+            update_before_cautious = update
+
             # 1. Calculate the "fully cautious" update
             mask = (update_before_cautious * grad > 0).to(grad.dtype)
             mask_mean = mask.mean().clamp_(min=1e-3) # Avoid division by zero or tiny numbers
-            if mask_mean > 0: # Ensure mask_mean is positive before division
-                mask.div_(mask_mean)
-            else: # If mask_mean is zero (e.g. all products were <=0), mask becomes zeros
-                    # which means update_if_fully_cautious will be zero.
-                    # Or, decide on alternative behavior, e.g., mask = torch.ones_like(mask)
-                    # For now, let's stick to making it zero if mean is zero.
-                pass
+            mask.div_(mask_mean)
 
             update_if_fully_cautious = update_before_cautious * mask
 
-            # 2. Interpolate between original and fully cautious update
-            # update = original * (1-scale) + modified * scale
             update = (1 - scale) * update_before_cautious + scale * update_if_fully_cautious
-        # If cautious_scale is 0, 'update' remains 'update_before_cautious'
-
-        # 'update' now potentially contains the cautious-modified version.
-        # This becomes the 'original' for the Grams interpolation.
-        update_before_grams = update.clone()
 
         if update_strategy in {'grams', 'both'}:
-            # 1. Calculate the "fully Grams-aligned" update
+            update_before_grams = update
+
             update_if_fully_grams = torch.sign(grad) * update_before_grams.abs()
 
-            # 2. Interpolate between current update and fully Grams-aligned update
             update = (1 - scale) * update_before_grams + scale * update_if_fully_grams
-            # If grams_scale is 0, 'update' remains 'update_before_grams'
 
     return update
