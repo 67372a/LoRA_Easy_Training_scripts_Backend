@@ -798,7 +798,7 @@ def _paper_orthograd_compile(param, grad, alpha: float = 1.0, eps: float|torch.T
     g_orth_scaled = g_orth.mul_(grad.norm(2) / (g_orth.norm(2) + eps))
 
     # Update the gradient in-place with the orthogonal component
-    grad.copy_(torch.where(w_norm_sq > eps, g_orth_scaled, grad))
+    grad.copy_(torch.where(w_norm_sq > eps, g_orth_scaled.view_as(grad), grad))
     # Else: w_norm_sq is too small, leave p.grad as is.
 
 @torch.no_grad()
