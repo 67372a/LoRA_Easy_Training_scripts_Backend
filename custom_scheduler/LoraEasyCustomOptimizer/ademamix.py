@@ -761,21 +761,27 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
 
                 # Compass amplification + beta1 Bias correction
                 if use_compass:
-                    c_t = grad_normed.add(exp_avg.div(bias_correction1), alpha=group['alpha'])
+                    bias_corrected_axp_avg = exp_avg.div(bias_correction1)
+                    c_t = grad_normed.add(bias_corrected_axp_avg, alpha=group['alpha'])
                 else:
                     c_t = grad_normed
 
                 if step == 1:
-                    if use_adabelief:
-                        grad_residual = grad_normed - exp_avg
-                        exp_avg_sq.addcmul_(grad_residual, grad_residual)
+                    if use_compass:
+                        # Try adding residual to c_t
+                        grad_residual = c_t.add(grad_normed.add(bias_corrected_axp_avg, alpha=-1))
                     else:
-                        exp_avg_sq.addcmul_(c_t, c_t)
+                        grad_residual = grad_normed - exp_avg
+                    exp_avg_sq.addcmul_(grad_residual, grad_residual)
                 else:
                     de_nom = exp_avg_sq.sqrt().div_(bias_correction2_sqrt).add_(curr_eps)
 
                     if use_adabelief:
-                        grad_residual = grad_normed - exp_avg
+                        if use_compass:
+                            # Try adding residual to c_t
+                            grad_residual = c_t.add(grad_normed.add(bias_corrected_axp_avg, alpha=-1))
+                        else:
+                            grad_residual = grad_normed - exp_avg
                         new_exp_avg_sq = exp_avg_sq.mul(beta2).addcmul_(grad_residual, grad_residual, value=1.0 - beta2)
                     else:
                         new_exp_avg_sq = exp_avg_sq.mul(beta2).addcmul_(c_t, c_t, value=1.0 - beta2)
