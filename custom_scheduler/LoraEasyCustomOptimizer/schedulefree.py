@@ -12,7 +12,7 @@ from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from .utils import (copy_stochastic_, NORM_TYPE, agc, 
-                    STATE_PRECISION, _paper_orthograd, schedule_beta_tc, 
+                    STATE_PRECISION, _paper_orthograd, _paper_orthograd_compile, schedule_beta_tc, 
                     spam_grad_clipping, CLIP_TYPE, clean_dict_params,
                     CosineDecay, spam_grad_clipping_logging, stable_spam_clipping_tensors, SSCCosineDecay, adaptive_eps)
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
@@ -3363,7 +3363,7 @@ def single_param_ADOPTAOScheduleFree(
             previous_grad.copy_(temp_grad_f32)
 
     if use_orthograd:
-        _paper_orthograd(y_f32, grad_f32)
+        _paper_orthograd_compile(y_f32, grad_f32)
 
     if spam_clipping_threshold != 0 and apply_spam_clipping and p.numel() >= 2 and p.ndim >= 1:
         grad_f32 = spam_grad_clipping(grad=grad_f32, second_moment=exp_avg_sq_f32, clip_threshold=spam_clipping_threshold, clip_type=spam_clipping_type, spam_clip_eps=spam_clipping_eps)

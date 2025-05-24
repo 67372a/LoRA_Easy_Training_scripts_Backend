@@ -770,6 +770,38 @@ def _paper_orthograd(param, grad, alpha: float = 1.0, eps: float|torch.Tensor = 
     # Else: w_norm_sq is too small, leave p.grad as is.
 
 @torch.no_grad()
+def _paper_orthograd_compile(param, grad, alpha: float = 1.0, eps: float|torch.Tensor = 1e-20):
+    """Applies orthogonal projection to a single parameter's gradient."""
+
+    # Skip for scalars
+    if param.ndim == 0 or param.numel() <= 1:
+        return
+
+    # Flatten parameter and gradient
+    w = param.view(-1) # Use p.data to avoid graph tracking if not needed
+    g = grad.view(-1)
+
+    w_norm_sq = torch.dot(w, w)
+
+    # Only project if the weight norm is significant
+    # If w_norm_sq is near zero, the parameter contributes little,
+    # and projection is ill-defined or numerically unstable.
+    # Leave the gradient untouched in this case.
+
+    # Calculate projection of g onto w: (w·g / w·w) * w
+    proj_coeff = torch.dot(w, g) / w_norm_sq # Note: w_norm_sq already > eps
+    g_parallel = proj_coeff * w
+
+    # Subtract the parallel component to get the orthogonal one
+    g_orth = g - alpha * g_parallel
+    # Apply scaled orthogonalization
+    g_orth_scaled = g_orth.mul_(grad.norm(2) / (g_orth.norm(2) + eps))
+
+    # Update the gradient in-place with the orthogonal component
+    grad.copy_(torch.where(w_norm_sq > eps, g_orth_scaled, grad))
+    # Else: w_norm_sq is too small, leave p.grad as is.
+
+@torch.no_grad()
 def apply_cautious(update: torch.Tensor, grad: torch.Tensor) -> None:
     r"""Apply the Cautious Optimizer feature.
 
