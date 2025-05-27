@@ -837,22 +837,34 @@ def apply_update_strategies(update, grad, update_strategy, scale=1.0):
     """
     if scale > 0 and update_strategy in {'cautious', 'grams', 'both'}:
         if update_strategy in {'cautious', 'both'}:
-            update_before_cautious = update
+            if scale >= 1.0:
+                update_before_cautious = update
 
-            # 1. Calculate the "fully cautious" update
-            mask = (update_before_cautious * grad > 0).to(grad.dtype)
-            mask_mean = mask.mean().clamp_(min=1e-3) # Avoid division by zero or tiny numbers
-            mask.div_(mask_mean)
+                # 1. Calculate the "fully cautious" update
+                mask = (update_before_cautious * grad > 0).to(grad.dtype)
+                mask_mean = mask.mean().clamp_(min=1e-3) # Avoid division by zero or tiny numbers
+                mask.div_(mask_mean)
+                update = update.mul(mask)
+            else:
+                update_before_cautious = update
 
-            update_if_fully_cautious = update_before_cautious * mask
+                # 1. Calculate the "fully cautious" update
+                mask = (update_before_cautious * grad > 0).to(grad.dtype)
+                mask_mean = mask.mean().clamp_(min=1e-3) # Avoid division by zero or tiny numbers
+                mask.div_(mask_mean)
 
-            update = (1 - scale) * update_before_cautious + scale * update_if_fully_cautious
+                update_if_fully_cautious = update_before_cautious * mask
+
+                update = (1 - scale) * update_before_cautious + scale * update_if_fully_cautious
 
         if update_strategy in {'grams', 'both'}:
-            update_before_grams = update
+            if scale >= 1.0:
+                update = torch.sign(grad).mul_(update.abs())
+            else:
+                update_before_grams = update
 
-            update_if_fully_grams = torch.sign(grad) * update_before_grams.abs()
+                update_if_fully_grams = torch.sign(grad).mul_(update_before_grams.abs())
 
-            update = (1 - scale) * update_before_grams + scale * update_if_fully_grams
+                update = (1 - scale) * update_before_grams + scale * update_if_fully_grams
 
     return update
