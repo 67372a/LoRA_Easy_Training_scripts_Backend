@@ -114,8 +114,8 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
             if arg == "optimizer_args":
                 vals = []
                 for k, v in val.items():
-                    if v in ["true", "false"]:
-                        v = v.capitalize()
+                    if isinstance(v, str) and v.strip().lower() in ["true", "false"]:
+                        v = v.strip().capitalize()
                     vals.append(f"{k}={v}")
                 val = vals
             if arg == "lr_scheduler_args":
@@ -130,9 +130,9 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
                 (isinstance(value, bool) and value == False)):
                 continue
             if isinstance(val, str):
-                if val.lower() == "true":
+                if val.strip().lower() == "true":
                     val = True
-                elif val.lower() == "false":
+                elif val.strip().lower() == "false":
                     continue
             output_args[arg] = val
         if "fa" in value:
