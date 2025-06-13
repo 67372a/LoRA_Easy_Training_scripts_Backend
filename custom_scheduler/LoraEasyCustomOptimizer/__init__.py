@@ -15,6 +15,7 @@ from LoraEasyCustomOptimizer.fcompass import FCompass, FCompassPlus, FCompassADO
 from LoraEasyCustomOptimizer.fishmonger import FishMonger, FishMonger8BitBNB
 from LoraEasyCustomOptimizer.fmarscrop import FMARSCrop, FMARSCropV2, FMARSCropV2ExMachina, FMARSCropV3, FMARSCropV3ExMachina
 from LoraEasyCustomOptimizer.galore import GaLore
+from LoraEasyCustomOptimizer.gooddog import GOODDOG
 from LoraEasyCustomOptimizer.grokfast import GrokFastAdamW
 from LoraEasyCustomOptimizer.laprop import LaProp
 from LoraEasyCustomOptimizer.lpfadamw import LPFAdamW
@@ -87,6 +88,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     FishMonger8BitBNB,
     GaLore,
     Glyph,
+    GOODDOG,
     GrokFastAdamW,
     LPFAdamW,
     LaProp,
