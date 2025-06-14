@@ -582,8 +582,8 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         use_compass: bool = False,
         use_adabelief: bool = True,
         use_newton_schulz: bool = True,
-        amsgrad_min_decay_rate: float = 0.96,
-        amsgrad_max_decay_rate: float = 0.96,
+        amsgrad_min_decay_rate: float = 0.98,
+        amsgrad_max_decay_rate: float = 0.98,
         torch_compile: bool = True,
         **kwargs,
     ):
