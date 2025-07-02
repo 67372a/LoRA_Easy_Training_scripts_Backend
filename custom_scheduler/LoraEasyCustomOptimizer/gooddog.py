@@ -81,6 +81,7 @@ class GOODDOG(Optimizer):
     GOODDOG: Getting Over Obstacles via Dual Denominator Orthogonal Gradients. 
     
     Utilizing a short and long-term denominator to flatten the landscape, along with magnitude-decoupled sign-based momentum. We also make use of atan2 for further scale invariance to stabilize potentially sharp updates.
+    Or "fetching the goal", for short.
 
     Arguments:
         params (iterable):
@@ -98,8 +99,12 @@ class GOODDOG(Optimizer):
             Divide the gradient using .atan2 instead of .div for stability and scale-invariance, removes epsilon/eps - https://arxiv.org/abs/2407.05872 (default: True).
         stage2_atan2 (bool):
             Divide the smooth gradient using .atan2 instead of .div for further stability and scale-invariance, removes epsilon/eps - https://arxiv.org/abs/2407.05872 (default: True).
+        invariant (bool):
+            Scale the latent into -1 to 1 space via .arctan().sin(), then later divide by the original grad's .arctan().cos(). Its been tested a bit, with the general result of speeding up descent. (default: False).
         adaptive_muon (bool):
             Utilize six optimized Newton-Schulz iterations per step to compute the orthogonalization of the gradient, and adapt to the gradient norm - https://arxiv.org/abs/2410.21265 - https://github.com/leloykun/adaptive-muon (default: True).
+        orthograd (bool):
+            Modify the gradient to apply an orthogonal gradient update, - https://arxiv.org/abs/2501.04697 - extended with atan2 in place of epsilon - https://arxiv.org/abs/2407.05872 (default: False).
         stochastic_fp (bool):
             Utilize stochastic rounding for bf16 and fp16 tensors. (default: True).
     """
@@ -113,6 +118,7 @@ class GOODDOG(Optimizer):
         weight_decay_rate: float = 0.995,
         stage1_atan2: bool = True,
         stage2_atan2: bool = True,
+        invariant: bool = False,
         adaptive_muon: bool = True,
         orthograd: bool = False,
         stochastic_fp: bool = True,
@@ -127,6 +133,7 @@ class GOODDOG(Optimizer):
             weight_decay_rate = weight_decay_rate,
             stage1_atan2 = stage1_atan2,
             stage2_atan2 = stage2_atan2,
+            invariant = invariant,
             adaptive_muon = adaptive_muon,
             orthograd = orthograd,
             stochastic_fp = stochastic_fp,
@@ -148,11 +155,18 @@ class GOODDOG(Optimizer):
         g_orth = g_atansin.sub(w.atan().sin_(), alpha=sin_dot_product).div(g_atancos)
 
         g_orth_scaled = g_orth.mul(g.norm(2).div_(g_orth.norm(2).clamp_min_(1e-16)))
-        #proj = torch.dot(w, g).div(torch.dot(w, w).add_(1e-30))
-        #g_orth = g.to(dtype=torch.float32, copy=True).sub(w, alpha=proj)
-        #g_orth_scaled = g_orth.mul(g.norm(2).div_(g_orth.norm(2).clamp_(min=1e-30)))
 
         grad.copy_(g_orth_scaled.view_as(grad))
+    
+    @torch.no_grad()
+    def invariance(self, grad, degrad = None):
+        if degrad is None:
+            g_atansin = grad.atan().sin_()
+            g_atancos = grad.atan().cos_()
+
+            return g_atansin, g_atancos
+        else:
+            return grad.atan2(degrad).mul_(1.27323954474)
 
     @torch.no_grad()
     def reset(self):
@@ -213,9 +227,15 @@ class GOODDOG(Optimizer):
                 # Absmax clip value for early stability
                 clip_lambda = step**0.25
 
+                rms = grad.pow(2).mean().sqrt_().clamp_min_(1)
+                grad = grad.div(rms)
+
                 # Orthograd
                 if group["orthograd"] and p_fp32.data.nelement() > 1: # Might just be me, but I've had the most success via ndim > 1
                     self.orthograd_atan2sin(p_fp32, grad)
+                
+                if group["invariant"] and grad.nelement() > 0:
+                    grad, degrad = self.invariance(grad)
 
                 # Update sign momentum
                 sign_momentum = sign_momentum.lerp(grad.sign(), weight=1. - betas[0])
@@ -254,13 +274,16 @@ class GOODDOG(Optimizer):
                 # Apply sign momentum to the gradient
                 full_step = full_step.abs().mul_(sign_momentum)
 
+                if group["invariant"] and grad.nelement() > 0:
+                    full_step = self.invariance(full_step, degrad)
+
                 # Perform weight decay
                 if weight_decay != 0:
                     grad_weights = p_fp32.data
 
                     full_step = full_step.add(grad_weights, alpha=weight_decay * weight_decay_rate**group["step"])
 
-                p_fp32.data.add_(full_step, alpha=-lr / (1. - betas[0]**step))
+                p_fp32.data.add_(full_step, alpha=-lr)
                 if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
                     copy_stochastic_(state["stage1_emasq"], stage1_emasq)
                     copy_stochastic_(state["stage2_emasq"], stage2_emasq)
