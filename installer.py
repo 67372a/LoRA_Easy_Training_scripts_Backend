@@ -85,7 +85,7 @@ def setup_venv(venv_pip):
     )
 
     subprocess.check_call(
-        f"{venv_pip} install -U torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128",
+        f"{venv_pip} install -U torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128",
         shell=PLATFORM == "linux",
     )
         
