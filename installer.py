@@ -80,7 +80,7 @@ def setup_accelerate(platform: str) -> None:
 
 def setup_venv(venv_pip):
     subprocess.check_call(
-        f"{venv_pip} install -U typing-extensions==4.13.2",
+        f"{venv_pip} install -U typing-extensions==4.14.1",
         shell=PLATFORM == "linux",
     )
 
@@ -90,7 +90,7 @@ def setup_venv(venv_pip):
     )
         
     subprocess.check_call(
-        f"{venv_pip} install -U --no-deps xformers==0.0.30 --index-url https://download.pytorch.org/whl/cu128",
+        f"{venv_pip} install -U --no-deps xformers==0.0.32.dev1062",
         shell=PLATFORM == "linux",
     )
     subprocess.check_call(
