@@ -44,6 +44,7 @@ from LoraEasyCustomOptimizer.fira import Fira
 from LoraEasyCustomOptimizer.vsgd import VSGD
 from LoraEasyCustomOptimizer.cstableadamw import CStableAdamW
 from LoraEasyCustomOptimizer.dehaze import Dehaze
+from LoraEasyCustomOptimizer.talon import TALON
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ADOPT,
@@ -111,6 +112,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     SimplifiedAdEMAMix,
     SimplifiedAdEMAMixExM,
     StableSPAM,
+    TALON,
     VSGD,
 ]
 

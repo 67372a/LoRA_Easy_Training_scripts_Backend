@@ -1,4 +1,4 @@
-# GOODDOG from https://github.com/Clybius/Personalized-Optimizers by Clybius
+# TALON from https://github.com/Clybius/Personalized-Optimizers by Clybius
 
 import torch
 from torch.optim import Optimizer
@@ -76,12 +76,11 @@ def zero_power_via_newton_schulz_6(
 
     return x
 
-class GOODDOG(Optimizer):
+class TALON(Optimizer):
     r"""
-    GOODDOG: Getting Over Obstacles via Dual Denominator Orthogonal Gradients. 
+    TALON: Temporal Adaptation via Level and Orientation Normalization. 
     
-    Utilizing a short and long-term denominator to flatten the landscape, along with magnitude-decoupled sign-based momentum. We also make use of atan2 for further scale invariance to stabilize potentially sharp updates.
-    Or "fetching the goal", for short.
+    Cuts through noise by decoupling the gradient's sign and magnitude into two different momentum states, with a denominator for adaptive learning.
 
     Arguments:
         params (iterable):
@@ -90,15 +89,13 @@ class GOODDOG(Optimizer):
         lr (float):
             Learning rate parameter (default 0.0001).
         betas (float, float, float):
-            Coefficient used for computing the sign momentum, stage1 (short-term) squared running average, and the stage2 (long-term) squared running average (default: 0.9, 0.96, 0.9999999)
+            Coefficient used for computing the sign momentum, running average, and the long-term squared running average (default: 0.9, 0.99, 0.9999999)
         weight_decay (float):
             AdamW-like weight decay, i.e. a L2 penalty (default: 0.0).
         weight_decay_rate (float):
             Decay the multiplier at which rate weight decay is applied, weight_decay * weight_decay_rate**step (default: 0.995).
-        stage1_atan2 (bool):
-            Divide the gradient using .atan2 instead of .div for stability and scale-invariance, removes epsilon/eps - https://arxiv.org/abs/2407.05872 (default: True).
-        stage2_atan2 (bool):
-            Divide the smooth gradient using .atan2 instead of .div for further stability and scale-invariance, removes epsilon/eps - https://arxiv.org/abs/2407.05872 (default: True).
+        denom_atan2 (bool):
+            Divide the smooth gradient using .atan2 instead of .div for stability and scale-invariance, removes epsilon/eps - https://arxiv.org/abs/2407.05872 (default: True).
         invariant (bool):
             Scale the latent into -1 to 1 space via .arctan().sin(), then later divide by the original grad's .arctan().cos(). Its been tested a bit, with the general result of speeding up descent. (default: False).
         adaptive_muon (bool):
@@ -113,11 +110,10 @@ class GOODDOG(Optimizer):
         self,
         params,
         lr: float = 1e-4,
-        betas: tuple = (0.9, 0.96, 1. - 1e-7),
+        betas: tuple = (0.9, 0.99, 1. - 1e-7),
         weight_decay: float = 0.0,
         weight_decay_rate: float = 0.995,
-        stage1_atan2: bool = True,
-        stage2_atan2: bool = True,
+        denom_atan2: bool = True,
         invariant: bool = False,
         adaptive_muon: bool = True,
         orthograd: bool = False,
@@ -132,15 +128,14 @@ class GOODDOG(Optimizer):
             betas = betas,
             weight_decay = weight_decay,
             weight_decay_rate = weight_decay_rate,
-            stage1_atan2 = stage1_atan2,
-            stage2_atan2 = stage2_atan2,
+            denom_atan2 = denom_atan2,
             invariant = invariant,
             adaptive_muon = adaptive_muon,
             orthograd = orthograd,
             stochastic_fp = stochastic_fp,
         )
 
-        super(GOODDOG, self).__init__(params, defaults)
+        super(TALON, self).__init__(params, defaults)
 
     @torch.no_grad()
     def orthograd_atan2sin(self, p, grad):
@@ -202,21 +197,21 @@ class GOODDOG(Optimizer):
                 # State initialization
                 if len(state) == 0:
                     # Exponential moving average of gradient values
-                    state["stage1_emasq"] = torch.ones_like(p.data)
+                    state["value_momentum"] = torch.ones_like(p.data)
                     # Exponential moving average of squared gradient values
                     state["stage2_emasq"] = torch.ones_like(p.data)
                     state["sign_momentum"] = torch.zeros_like(grad)
 
                 # Detach
                 p_fp32 = p.detach().clone()
-                stage1_emasq = state["stage1_emasq"].detach().clone()
+                value_momentum = state["value_momentum"].detach().clone()
                 stage2_emasq = state["stage2_emasq"].detach().clone()
                 sign_momentum = state["sign_momentum"].detach().clone()
 
                 # Unpack
                 if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
                     grad = grad.to(torch.float32)
-                    stage1_emasq = state['stage1_emasq'].detach().clone().to(torch.float32)
+                    value_momentum = state['value_momentum'].detach().clone().to(torch.float32)
                     stage2_emasq = state['stage2_emasq'].detach().clone().to(torch.float32)
                     sign_momentum = state['sign_momentum'].detach().clone().to(torch.float32)
                     p_fp32 = p.detach().clone().to(torch.float32)
@@ -234,9 +229,6 @@ class GOODDOG(Optimizer):
                 # Orthograd
                 if group["orthograd"] and p_fp32.data.nelement() > 1: # Might just be me, but I've had the most success via ndim > 1
                     self.orthograd_atan2sin(p_fp32, grad)
-                
-                if group["invariant"] and grad.nelement() > 0:
-                    grad, degrad = self.invariance(grad)
 
                 # Update sign momentum
                 sign_momentum = sign_momentum.lerp(grad.sign(), weight=1. - betas[0])
@@ -244,13 +236,6 @@ class GOODDOG(Optimizer):
                 # Adaptive Muon / Newton Schulz iters
                 if grad.ndim > 0 and group["adaptive_muon"]:
                     grad = zero_power_via_newton_schulz_6(grad.view(len(grad), -1)).view(grad.shape)
-
-                # Denom (Stage 1)
-                if group["stage1_atan2"]:
-                    c_t = grad.atan2(stage1_emasq.sqrt()).mul_(1.27323954474)
-                else:
-                    stage1_denom = torch.clamp(stage1_emasq.sqrt(), 1e-16)
-                    c_t = grad.div(stage1_denom).clamp_(-clip_lambda, clip_lambda)
 
                 # Clip grad to prevent INF
                 grad = torch.where(
@@ -260,20 +245,23 @@ class GOODDOG(Optimizer):
                 )
 
                 # ADOPT-style update squared momentum (Stage 1)
-                stage1_emasq = stage1_emasq.mul(slow_beta1).addcmul_(grad, grad, value=1 - slow_beta1)
+                value_momentum = value_momentum.mul(slow_beta1).add_(grad.abs(), alpha=1 - slow_beta1)
+
+                # Denom (Stage 1)
+                c_t = value_momentum.mul(sign_momentum)
+
+                if group["invariant"] and c_t.nelement() > 0:
+                    c_t, degrad = self.invariance(c_t)
 
                 # Denom (Stage 2)
-                if group["stage2_atan2"]:
+                if group["denom_atan2"]:
                     full_step = c_t.atan2(stage2_emasq.sqrt()).mul_(1.27323954474)
                 else:
                     stage2_denom = torch.clamp(stage2_emasq.sqrt(), 1e-16)
                     full_step = c_t.div(stage2_denom).clamp_(-clip_lambda, clip_lambda)
 
                 # ADOPT-style update squared momentum (Stage 2)
-                stage2_emasq = stage2_emasq.mul(slow_beta2).addcmul_(c_t, c_t, value=1 - slow_beta2)
-
-                # Apply sign momentum to the gradient
-                full_step = full_step.abs().mul_(sign_momentum)
+                stage2_emasq = stage2_emasq.mul(slow_beta2).addcmul_(grad, grad, value=1 - slow_beta2)
 
                 if group["invariant"] and grad.nelement() > 0:
                     full_step = self.invariance(full_step, degrad)
@@ -286,12 +274,12 @@ class GOODDOG(Optimizer):
 
                 p_fp32.data.add_(full_step, alpha=-lr)
                 if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
-                    copy_stochastic_(state["stage1_emasq"], stage1_emasq)
+                    copy_stochastic_(state["value_momentum"], value_momentum)
                     copy_stochastic_(state["stage2_emasq"], stage2_emasq)
                     copy_stochastic_(state["sign_momentum"], sign_momentum)
                     copy_stochastic_(p, p_fp32)
                 else:
-                    state["stage1_emasq"].copy_(stage1_emasq)
+                    state["value_momentum"].copy_(value_momentum)
                     state["stage2_emasq"].copy_(stage2_emasq)
                     state["sign_momentum"].copy_(sign_momentum)
                     p.copy_(p_fp32)
