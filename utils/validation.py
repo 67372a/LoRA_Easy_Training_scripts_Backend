@@ -218,6 +218,10 @@ def validate_subset(args: dict) -> tuple[bool, list[str], dict]:
         errors.append(f"Image directory path for '{name}' does not exist")
     else:
         output_args["image_dir"] = Path(output_args["image_dir"]).as_posix()
+        
+    if "target_image_dir" in output_args and Path(output_args["target_image_dir"]).exists():
+        output_args["target_image_dir"] = Path(output_args["target_image_dir"]).as_posix()
+
     return passed_validation, errors, output_args
 
 
