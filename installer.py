@@ -90,7 +90,7 @@ def setup_venv(venv_pip):
     )
         
     subprocess.check_call(
-        f"{venv_pip} install -U --no-deps xformers==0.0.32.dev1062",
+        f"{venv_pip} install -U --no-deps xformers==0.0.31.post1 --index-url https://download.pytorch.org/whl/cu128",
         shell=PLATFORM == "linux",
     )
     subprocess.check_call(
