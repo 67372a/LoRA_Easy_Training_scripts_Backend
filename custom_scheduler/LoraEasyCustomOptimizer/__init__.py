@@ -45,6 +45,7 @@ from LoraEasyCustomOptimizer.vsgd import VSGD
 from LoraEasyCustomOptimizer.cstableadamw import CStableAdamW
 from LoraEasyCustomOptimizer.dehaze import Dehaze
 from LoraEasyCustomOptimizer.talon import TALON
+from LoraEasyCustomOptimizer.fftdescent import FFTDescent
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ADOPT,
@@ -87,6 +88,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     FMARSCropV3ExMachina,
     FishMonger,
     FishMonger8BitBNB,
+    FFTDescent,
     GaLore,
     Glyph,
     GOODDOG,
