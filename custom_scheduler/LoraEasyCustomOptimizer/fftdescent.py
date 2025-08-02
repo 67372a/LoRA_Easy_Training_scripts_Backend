@@ -201,7 +201,7 @@ class FFTDescent(Optimizer):
         # Loop over the keys in the kwargs dictionary
         for key in kwargs:
             logging.warning(
-                f"Optimizer argument '{key}' passed into TALON. It will be ignored."
+                f"Optimizer argument '{key}' passed into FFTDescent. It will be ignored."
             )
 
 
