@@ -286,7 +286,7 @@ class FFTDescent(Optimizer):
                 if dimcount > 0:
                     grad = filter_grad(grad, fft_alpha=group["lowpass_grad"]).abs().mul_(grad.sign())
 
-                clip = (step-1)**0.25
+                clip = (step-1)**0.75
                 grad.clamp_(-clip, clip)
 
                 # Decouple momentum from direction if using sign_momentum parameter (highly recommended)
