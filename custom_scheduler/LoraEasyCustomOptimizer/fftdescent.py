@@ -101,7 +101,7 @@ def _spectral_clip(W: torch.Tensor, sigma_min: float=-1., sigma_max: float=1., o
 @torch.no_grad()
 def spectral_clip_func(W: torch.Tensor, sigma_min: float=-1., sigma_max: float=1., ortho_dtype=None, num_ns_steps=len(NS_COEFFS), adaptive=False):
     if ortho_dtype is None:
-        ortho_dtype = torch.bfloat16
+        ortho_dtype = torch.float32
     return  _spectral_clip(W, sigma_min=sigma_min, sigma_max=sigma_max, ortho_dtype=ortho_dtype, num_ns_steps=num_ns_steps, adaptive=adaptive)
 
 @torch._dynamo.utils.disable_cache_limit()
