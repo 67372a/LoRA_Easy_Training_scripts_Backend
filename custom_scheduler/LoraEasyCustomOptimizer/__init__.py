@@ -46,6 +46,7 @@ from LoraEasyCustomOptimizer.cstableadamw import CStableAdamW
 from LoraEasyCustomOptimizer.dehaze import Dehaze
 from LoraEasyCustomOptimizer.talon import TALON
 from LoraEasyCustomOptimizer.fftdescent import FFTDescent
+from LoraEasyCustomOptimizer.singstate import SingState
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ADOPT,
@@ -113,6 +114,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     SCORNMachina,
     SimplifiedAdEMAMix,
     SimplifiedAdEMAMixExM,
+    SingState,
     StableSPAM,
     TALON,
     VSGD,
