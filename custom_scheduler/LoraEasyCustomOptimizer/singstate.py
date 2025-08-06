@@ -418,7 +418,7 @@ class SingState(Optimizer):
         # Loop over the keys in the kwargs dictionary
         for key in kwargs:
             logging.warning(
-                f"Optimizer argument '{key}' passed into TALON. It will be ignored."
+                f"Optimizer argument '{key}' passed into SingState. It will be ignored."
             )
 
         self._init_lr = lr
@@ -508,7 +508,7 @@ class SingState(Optimizer):
 
                 denom = momentum.abs()
 
-                momentum = momentum.lerp(grad.abs().clamp_min_(1).mul_(grad.sign()), weight=1. - beta)#.abs_().lerp_(grad.sign(), weight=1. - beta)
+                momentum = momentum.lerp(grad.sign(), weight=1. - beta)#.abs_().lerp_(grad.sign(), weight=1. - beta)
 
                 c_t = grad.abs().lerp(momentum.abs(), weight=beta)
 
@@ -534,8 +534,8 @@ class SingState(Optimizer):
                     full_step = c_t.atan2(denom).mul_(1.27323954474)
 
                 #rms = momentum.pow(2).mean().sqrt_().clamp_min_(1.0)
-                #nesterov_direction = grad.sign().lerp_(momentum, weight=beta)
-                full_step = full_step.mul(momentum.clamp(-1.0, 1.0))
+                nesterov_direction = grad.sign().lerp_(momentum, weight=beta)
+                full_step = full_step.mul(nesterov_direction)
 
                 # Perform weight decay
                 if weight_decay != 0:
