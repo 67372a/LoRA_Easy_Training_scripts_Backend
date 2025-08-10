@@ -9,6 +9,7 @@ from .utils import (_stable_spam_clipping_compile_wrapper, _stable_spam_clipping
                     _apply_adagc_clipping_and_update_gamma, _paper_orthograd, adaptive_eps)
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from typing import Optional
+import logging
 
 # https://github.com/kozistr/pytorch_optimizer/blob/6397d56279ad80b26c4bba7fb4b04852b517fdeb/pytorch_optimizer/optimizer/shampoo_utils.py#L533
 def zero_power_via_newton_schulz_6(
@@ -401,8 +402,15 @@ class SCORNMachina(Optimizer):
         adagc_warmup_steps: int = 0,
         amsgrad: bool = False,
         amsgrad_decay_rate: Optional[float] = None,
+        torch_compile: bool = False,
         **kwargs,
     ):
+        
+        # Loop over the keys in the kwargs dictionary
+        for key in kwargs:
+            logging.warning(
+                f"Optimizer argument '{key}' passed into SCORNMachina. It will be ignored."
+            )
 
         self._init_lr = lr
         self.use_adagc = use_adagc
@@ -437,6 +445,7 @@ class SCORNMachina(Optimizer):
             eps_floor = eps_floor,
             amsgrad = amsgrad,
             amsgrad_decay_rate = amsgrad_decay_rate,
+            torch_compile = torch_compile,
         )
 
         super(SCORNMachina, self).__init__(params, defaults)
