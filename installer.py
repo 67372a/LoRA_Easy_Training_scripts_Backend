@@ -80,21 +80,21 @@ def setup_accelerate(platform: str) -> None:
 
 def setup_venv(venv_pip):
     subprocess.check_call(
-        f"{venv_pip} install -U typing-extensions==4.14.1",
+        f"{venv_pip} install -U typing-extensions==4.15.0",
         shell=PLATFORM == "linux",
     )
 
     subprocess.check_call(
-        f"{venv_pip} install -U torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128",
+        f"{venv_pip} install -U torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu129",
         shell=PLATFORM == "linux",
     )
         
     subprocess.check_call(
-        f"{venv_pip} install -U --no-deps xformers==0.0.31.post1 --index-url https://download.pytorch.org/whl/cu128",
+        f"{venv_pip} install -U --no-deps xformers==0.0.32.post2 --index-url https://download.pytorch.org/whl/cu129",
         shell=PLATFORM == "linux",
     )
     subprocess.check_call(
-        f"{venv_pip} install -U --no-deps torchao --extra-index-url https://download.pytorch.org/whl/cu128",
+        f"{venv_pip} install -U --no-deps torchao --extra-index-url https://download.pytorch.org/whl/cu129",
         shell=PLATFORM == "linux",
     )
     
