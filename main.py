@@ -257,7 +257,7 @@ uvi_config = uvicorn.Config(
     app,
     host=config_data.get("host", "0.0.0.0"),
     loop="asyncio",
-    log_level="error",
+    log_level="critical",
     port=config_data.get("port", 8000),
 )
 server = uvicorn.Server(config=uvi_config)
