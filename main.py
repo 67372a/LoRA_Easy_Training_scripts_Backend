@@ -255,9 +255,9 @@ if config_data.get("remote", False):
         app.state.TUNNEL.run_tunnel(port=config_data.get("port", 8000))
 uvi_config = uvicorn.Config(
     app,
-    host="0.0.0.0",
+    host=config_data.get("host", "0.0.0.0"),
     loop="asyncio",
-    log_level="critical",
+    log_level="error",
     port=config_data.get("port", 8000),
 )
 server = uvicorn.Server(config=uvi_config)
