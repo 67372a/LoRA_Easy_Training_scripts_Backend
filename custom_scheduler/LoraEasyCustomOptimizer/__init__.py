@@ -46,6 +46,7 @@ from LoraEasyCustomOptimizer.cstableadamw import CStableAdamW
 from LoraEasyCustomOptimizer.dehaze import Dehaze
 from LoraEasyCustomOptimizer.talon import TALON
 from LoraEasyCustomOptimizer.fftdescent import FFTDescent
+from LoraEasyCustomOptimizer.scgopt import SCGOpt
 from LoraEasyCustomOptimizer.singstate import SingState
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
@@ -109,6 +110,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     SCION,
     SGDSaI,
     ScalableShampoo,
+    SCGOpt,
     ScheduleFreeWrapper,
     SCORN,
     SCORNMachina,
