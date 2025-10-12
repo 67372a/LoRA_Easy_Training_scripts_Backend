@@ -70,6 +70,9 @@ class ADOPT(BaseOptimizer):
     def __str__(self) -> str:
         return 'ADOPT'
     
+    def init_group(self, group, **kwargs) -> None:
+        pass
+    
     @staticmethod
     def get_rms(x: torch.Tensor) -> float:
         r"""Get RMS."""
@@ -253,6 +256,9 @@ class ADOPTMARS(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'ADOPTMARS'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):
@@ -476,6 +482,9 @@ class FADOPTMARS(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'FADOPTMARS'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):

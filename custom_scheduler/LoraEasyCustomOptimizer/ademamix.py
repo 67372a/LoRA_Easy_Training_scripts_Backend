@@ -151,6 +151,9 @@ class AdEMAMix(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'AdEMAMix'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):
@@ -401,6 +404,9 @@ class SimplifiedAdEMAMix(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'SimplifiedAdEMAMix'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):
@@ -631,6 +637,9 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'SimplifiedAdEMAMixExM'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):

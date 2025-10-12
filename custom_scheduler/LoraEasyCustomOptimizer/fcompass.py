@@ -293,6 +293,9 @@ class FCompassADOPT(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'FCompassADOPT'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):
@@ -545,6 +548,9 @@ class FCompassADOPTMARS(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'FCompassADOPTMARS'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):
@@ -829,6 +835,9 @@ class FCompassPlus(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'FCompassPlus'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
     
     @torch.no_grad()
     def reset(self):

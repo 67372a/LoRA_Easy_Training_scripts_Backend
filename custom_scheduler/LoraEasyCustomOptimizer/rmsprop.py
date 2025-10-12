@@ -106,6 +106,9 @@ class RMSProp(BaseOptimizer):
     def __str__(self) -> str:
         return 'RMSProp'
     
+    def init_group(self, group, **kwargs) -> None:
+        pass
+    
     @staticmethod
     def get_rms(x: torch.Tensor) -> float:
         r"""Get RMS."""
@@ -362,6 +365,9 @@ class RMSPropADOPT(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'RMSPropADOPT'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):
@@ -610,6 +616,9 @@ class RMSPropADOPTMARS(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'RMSPropADOPTMARS'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):

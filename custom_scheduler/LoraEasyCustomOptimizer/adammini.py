@@ -68,6 +68,9 @@ class AdamMini(BaseOptimizer):  # pragma: no cover
 
     def __str__(self) -> str:
         return 'AdamMini'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     def get_optimizer_groups(self, weight_decay: float):
         groups = []

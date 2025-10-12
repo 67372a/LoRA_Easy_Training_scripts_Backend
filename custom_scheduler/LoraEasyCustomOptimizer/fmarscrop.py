@@ -169,6 +169,9 @@ class FMARSCrop(BaseOptimizer):
     def __str__(self) -> str:
         return 'FMARSCrop'
     
+    def init_group(self, group, **kwargs) -> None:
+        pass
+    
     @torch.no_grad()
     def reset(self):
         for group in self.param_groups:
@@ -517,6 +520,9 @@ class FMARSCropV2ExMachina(BaseOptimizer):
     def __str__(self) -> str:
         return 'FMARSCropV2ExMachina'
     
+    def init_group(self, group, **kwargs) -> None:
+        pass
+    
     @torch.no_grad()
     def reset(self):
         for group in self.param_groups:
@@ -845,6 +851,12 @@ class FMARSCropV2(BaseOptimizer):
         )
 
         super(FMARSCropV2, self).__init__(params, defaults)
+
+    def __str__(self) -> str:
+        return 'FMARSCropV2'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):
@@ -1437,6 +1449,9 @@ class FMARSCropV3ExMachina(BaseOptimizer):
     def __str__(self) -> str:
         return 'FMARSCropV3ExMachina'
     
+    def init_group(self, group, **kwargs) -> None:
+        pass
+
     @torch.no_grad()
     def reset(self):
         for group in self.param_groups:

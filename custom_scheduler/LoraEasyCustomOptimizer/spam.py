@@ -77,6 +77,9 @@ class StableSPAM(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'StableSPAM'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):

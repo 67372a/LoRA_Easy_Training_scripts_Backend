@@ -87,6 +87,9 @@ class Lamb(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'Lamb'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):

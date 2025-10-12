@@ -76,6 +76,9 @@ class AdaBelief(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'AdaBelief'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):

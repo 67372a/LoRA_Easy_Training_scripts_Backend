@@ -113,6 +113,9 @@ class CStableAdamW(BaseOptimizer):
         # However, defaults.get is probably fine if groups don't override this flag.
         is_ssc_used = any(group.get('use_stable_spam_clipping', False) for group in self.param_groups)
         return 'CStableAdamW_with_SSC' if is_ssc_used else 'CStableAdamW'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):

@@ -297,6 +297,9 @@ class FARMSCropV2(BaseOptimizer):
     def __str__(self) -> str:
         return 'FARMSCropV2'
     
+    def init_group(self, group, **kwargs) -> None:
+        pass
+    
     @torch.no_grad()
     def reset(self):
         for group in self.param_groups:

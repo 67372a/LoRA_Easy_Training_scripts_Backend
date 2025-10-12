@@ -154,6 +154,9 @@ class Compass(BaseOptimizer):
     def __str__(self) -> str:
         return 'Compass'
     
+    def init_group(self, group, **kwargs) -> None:
+        pass
+    
     @staticmethod
     def get_rms(x: torch.Tensor) -> float:
         r"""Get RMS."""
@@ -535,6 +538,9 @@ class CompassPlus(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'CompassPlus'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
     
     @torch.no_grad()
     def reset(self):
@@ -1251,6 +1257,9 @@ class CompassADOPT(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'CompassADOPT'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):
@@ -1571,6 +1580,9 @@ class CompassADOPTMARS(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'CompassADOPTMARS'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):

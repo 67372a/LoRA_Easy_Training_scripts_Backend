@@ -96,6 +96,9 @@ class ScheduleFreeWrapper(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'ScheduleFreeWrapper'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def reset(self):
@@ -370,6 +373,9 @@ class ADOPTScheduleFree(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'ADOPTScheduleFree'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def eval(self):
@@ -653,6 +659,9 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'ADOPTEMAMixScheduleFree'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def eval(self):
@@ -970,6 +979,9 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'ADOPTNesterovScheduleFree'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def eval(self):
@@ -1275,6 +1287,9 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'ADOPTMARSScheduleFree'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def eval(self):
@@ -1557,6 +1572,9 @@ class FADOPTScheduleFree(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'FADOPTScheduleFree'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def eval(self):
@@ -1851,6 +1869,9 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'FADOPTEMAMixScheduleFree'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def eval(self):
@@ -2176,6 +2197,9 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'FADOPTNesterovScheduleFree'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def eval(self):
@@ -2502,6 +2526,9 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
 
     def __str__(self) -> str:
         return 'FADOPTMARSScheduleFree'
+    
+    def init_group(self, group, **kwargs) -> None:
+        pass
 
     @torch.no_grad()
     def eval(self):

@@ -66,6 +66,9 @@ class VSGD(BaseOptimizer):
     def __str__(self) -> str:
         return 'VSGD'
     
+    def init_group(self, group, **kwargs) -> None:
+        pass
+    
     @torch.no_grad()
     def reset(self):
         pass
