@@ -33,10 +33,10 @@ from LoraEasyCustomOptimizer.sgd import SGDSaI
 from LoraEasyCustomOptimizer.shampoo import ScalableShampoo
 from LoraEasyCustomOptimizer.adam import AdamW8bitAO, AdamW4bitAO, AdamWfp8AO
 from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
-from .prodigy_plus.prodigy_plus_schedulefree import ProdigyPlusExMachinaScheduleFree
 from LoraEasyCustomOptimizer.scorn import SCORN
 from LoraEasyCustomOptimizer.scornmachina import SCORNMachina
 from LoraEasyCustomOptimizer.mythical import Mythical
+from LoraEasyCustomOptimizer.ocgopt import OCGOpt
 from LoraEasyCustomOptimizer.glyph import Glyph
 from LoraEasyCustomOptimizer.racs import RACS
 from LoraEasyCustomOptimizer.alice import Alice
@@ -99,8 +99,8 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     LaProp,
     MomentusCaution,
     Mythical,
+    OCGOpt,
     ProdigyPlusScheduleFree,
-    ProdigyPlusExMachinaScheduleFree,
     RACS,
     REMASTER,
     RMSProp,
