@@ -70,16 +70,14 @@ def orthogonalize(M: torch.Tensor, num_ns_steps=len(NS_COEFFS), ortho_dtype=None
     transpose = M.shape[0] < M.shape[1]
     if transpose:
         M = M.T
-    M = M / (torch.linalg.norm(M) + 1e-20)
     for a, b, c in NS_COEFFS[:num_ns_steps]:
+        M = M / (torch.linalg.norm(M).clamp_min_(1e-8))
         A = M.T @ M
         I = torch.eye(A.shape[0], dtype=M.dtype, device=M.device)
         M = M @ (a * I + b * A + c * A @ A)
     if transpose:
         M = M.T
     if adaptive:
-        #M = (M_orig * M).sum() * M
-        #M = (M_orig * M).sum(dim=(0,1), keepdim=True) * M
         M = torch.einsum('ij,ij,ab->ab', M_orig.type_as(M), M, M)
     if ortho_dtype is not None:
         M = M.to(orig_dtype)
@@ -177,7 +175,7 @@ class OCGOpt(Optimizer):
     r"""
     OCGOpt: Orthogonal Centralized Gradient Optimization.
 
-    Separates momentum states into full gradient and centralized gradient for smoother and faster descent. Featuring orthogonalization, RMS normalization, and dual-normed adaptive gradient magnitudes.
+    Separates momentum states into full gradient and centralized gradient for smoother and faster descent. Featuring orthogonalization, RMS normalization, cautious stepping, and dual-normed adaptive update magnitudes.
 
     Arguments:
         params (iterable):
@@ -190,7 +188,7 @@ class OCGOpt(Optimizer):
         weight_decay (float):
             AdamW-like weight decay, i.e. a L2 penalty (default: 0.0).
         weight_decay_rate (float):
-            Decay the multiplier at which rate weight decay is applied, weight_decay * weight_decay_rate**step (default: 0.995).
+            Decay the multiplier at which rate weight decay is applied, weight_decay * weight_decay_rate**step - Visualization: https://www.desmos.com/calculator/ipgbjovebr - (default: 0.995).
         centralization (float):
             Subtract the full gradient momentum from the current gradient at this ratio (default: 1.0).
         spectral_adaptive (bool):
@@ -223,7 +221,7 @@ class OCGOpt(Optimizer):
         lr: float = 1e-4,
         betas: float = (0.95, 0.9999999, 0.9999999),
         weight_decay: float = 0.0,
-        weight_decay_rate: float = 0.998,
+        weight_decay_rate: float = 0.995,
         centralization: float = 1.0,
         spectral_adaptive: bool = True,
         spectral_clip_compile: bool = True,
@@ -440,12 +438,14 @@ class OCGOpt(Optimizer):
 
                 # Stochastic update
                 if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
-                    #copy_stochastic_(state["denom"], denom)
+                    if dimcount < 1:
+                        copy_stochastic_(state["denom"], denom)
                     copy_stochastic_(state["value_momentum"], value_momentum)
                     copy_stochastic_(state["centralized_momentum"], centralized_momentum)
                     copy_stochastic_(p, p_fp32)
                 else:
-                    #state["denom"].copy_(denom)
+                    if dimcount < 1:
+                        state["denom"].copy_(denom)
                     state["value_momentum"].copy_(value_momentum)
                     state["centralized_momentum"].copy_(centralized_momentum)
                     p.copy_(p_fp32)
