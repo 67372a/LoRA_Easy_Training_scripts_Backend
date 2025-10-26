@@ -8,7 +8,7 @@ from torch import nn
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss
 
 
 class AdamMini(BaseOptimizer):  # pragma: no cover
@@ -18,7 +18,7 @@ class AdamMini(BaseOptimizer):  # pragma: no cover
     :param model_sharding: bool. set to True if you are using model parallelism with more than 1 GPU, including FSDP
         and zero_1, 2, 3 in Deepspeed. Set to False if otherwise.
     :param lr: float. learning rate.
-    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+    :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
     :param weight_decay: float. weight decay (L2 penalty).
     :param num_embeds: int. number of embedding dimensions. could be unspecified if you are training non-transformer
         models.
@@ -32,7 +32,7 @@ class AdamMini(BaseOptimizer):  # pragma: no cover
         self,
         model: nn.Module,
         lr: float = 1.0,
-        betas: BETAS = (0.9, 0.999),
+        betas: Betas = (0.9, 0.999),
         weight_decay: float = 0.1,
         model_sharding: bool = False,
         num_embeds: int = 2048,
@@ -63,7 +63,7 @@ class AdamMini(BaseOptimizer):  # pragma: no cover
 
         groups = self.get_optimizer_groups(weight_decay)
 
-        defaults: DEFAULTS = {'lr': lr, 'betas': betas, 'eps': eps}
+        defaults: Defaults = {'lr': lr, 'betas': betas, 'eps': eps}
         super().__init__(groups, defaults)
 
     def __str__(self) -> str:
@@ -264,8 +264,8 @@ class AdamMini(BaseOptimizer):  # pragma: no cover
         p.add_(update, alpha=-lr)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

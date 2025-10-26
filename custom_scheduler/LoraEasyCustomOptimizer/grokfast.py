@@ -8,7 +8,7 @@ from torch import nn
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from .utils import copy_stochastic_
 
 FILTER_TYPE = Literal['mean', 'sum']
@@ -103,9 +103,9 @@ def gradfilter_ema(
 class GrokFastAdamW(BaseOptimizer):
     r"""Accelerated Grokking by Amplifying Slow Gradients with AdamW.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
-    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+    :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
     :param grokfast: bool. whether to use grokfast.
     :param grokfast_alpha: float. momentum hyperparameter of the EMA.
     :param grokfast_lamb: float. amplifying factor hyperparameter of the filter..
@@ -118,9 +118,9 @@ class GrokFastAdamW(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-4,
-        betas: BETAS = (0.9, 0.99),
+        betas: Betas = (0.9, 0.99),
         grokfast: bool = True,
         grokfast_alpha: float = 0.98,
         grokfast_lamb: float = 2.0,
@@ -141,7 +141,7 @@ class GrokFastAdamW(BaseOptimizer):
         if grokfast and normalize_lr:
             lr /= 1.0 + grokfast_lamb
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -172,8 +172,8 @@ class GrokFastAdamW(BaseOptimizer):
                 state['exp_avg_sq'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

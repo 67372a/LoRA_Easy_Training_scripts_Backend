@@ -5,7 +5,7 @@ import torch
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 
 from .utils import copy_stochastic_, debias_beta
 
@@ -14,7 +14,7 @@ from .utils import copy_stochastic_, debias_beta
 class RACS(BaseOptimizer):
     r"""Row and Column Scaled SGD.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
     :param beta: float. momentum factor.
     :param alpha: float. scaler.
@@ -27,7 +27,7 @@ class RACS(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 0.01,
         beta: float = 0.9,
         alpha: float = 0.02,
@@ -36,7 +36,7 @@ class RACS(BaseOptimizer):
         weight_decouple: bool = True,
         eps: float = 1e-8,
         adam_lr: float = 5e-4,
-        adam_betas: BETAS = (0.9, 0.999),
+        adam_betas: Betas = (0.9, 0.999),
         adam_weight_decay: float = 0.0,
         **kwargs,
     ):
@@ -50,7 +50,7 @@ class RACS(BaseOptimizer):
         self.validate_non_negative(adam_weight_decay, 'adam_weight_decay')
         self.validate_non_negative(eps, 'eps')
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             '_lr_ratio': (adam_lr / lr) if lr > 0 else 0,
             'beta': beta,
@@ -76,8 +76,8 @@ class RACS(BaseOptimizer):
         pass
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

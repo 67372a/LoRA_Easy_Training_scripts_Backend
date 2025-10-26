@@ -5,7 +5,7 @@ from typing import Optional, Literal
 
 from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Closure, Defaults, Loss, ParamGroup
 
 CLIP_LOC = Literal['gradient', 'update', 'both']
 
@@ -43,7 +43,7 @@ class RMSProp(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-3,
         betas: float = 0.95, # normal default is 0.999, but was accidently 0.9 for awhile, so adjusting to 0.95 for now
         eps: float = 1e-8,
@@ -79,7 +79,7 @@ class RMSProp(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr':lr,
             'betas':betas,
             'weight_decay' : weight_decay,
@@ -126,8 +126,8 @@ class RMSProp(BaseOptimizer):
                 state["exp_avg_sq"] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -321,7 +321,7 @@ class RMSPropADOPT(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 5e-4,
         betas: float = 0.9999,
         weight_decay: float = 0.0,
@@ -346,7 +346,7 @@ class RMSPropADOPT(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -401,8 +401,8 @@ class RMSPropADOPT(BaseOptimizer):
                     state['exp_avg_sq'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -570,7 +570,7 @@ class RMSPropADOPTMARS(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 5e-4,
         betas: float = 0.9999,
         weight_decay: float = 0.0,
@@ -596,7 +596,7 @@ class RMSPropADOPTMARS(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -653,8 +653,8 @@ class RMSPropADOPTMARS(BaseOptimizer):
                     state['exp_avg_sq'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

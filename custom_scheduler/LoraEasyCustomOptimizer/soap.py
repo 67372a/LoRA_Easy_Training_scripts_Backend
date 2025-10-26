@@ -9,7 +9,7 @@ import torch
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from pytorch_optimizer.optimizer.shampoo_utils import merge_small_dims
 
 DATA_FORMAT = Literal['channels_first', 'channels_last']
@@ -17,9 +17,9 @@ DATA_FORMAT = Literal['channels_first', 'channels_last']
 class SOAP(BaseOptimizer):
     r"""Improving and Stabilizing Shampoo using Adam.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
-    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace
+    :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace
     :param shampoo_beta: Optional[float]. if not None, use this beta for the pre-conditioner (L and R in paper,
         state['GG'] below) moving average instead of betas[1].
     :param weight_decay: float. weight decay (L2 penalty).
@@ -34,9 +34,9 @@ class SOAP(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 3e-3,
-        betas: BETAS = (0.95, 0.95),
+        betas: Betas = (0.95, 0.95),
         shampoo_beta: Optional[float] = None,
         weight_decay: float = 1e-2,
         precondition_frequency: int = 10,
@@ -58,7 +58,7 @@ class SOAP(BaseOptimizer):
 
         self.data_format = data_format
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'shampoo_beta': shampoo_beta,
@@ -242,8 +242,8 @@ class SOAP(BaseOptimizer):
             state['Q'] = self.get_orthogonal_matrix_qr(state, max_precondition_dim, merge_dims)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

@@ -9,7 +9,7 @@ import logging
 from collections import defaultdict
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from .utils import (copy_stochastic_, NORM_TYPE, agc, 
                     STATE_PRECISION, _paper_orthograd, _paper_orthograd_compile, schedule_beta_tc, 
@@ -44,7 +44,7 @@ class ScheduleFreeWrapper(BaseOptimizer):
         our experiments. This approach to decay only works correctly if the base
         optimizer uses group["lr"] as the current learning rate. 
 
-        params (PARAMETERS): 
+        params (ParamGroup): 
             iterable of parameters to optimize or dicts defining parameter groups.
         base_optimizer (OPTIMIZER): 
             PyTorch optimizer object, in Kohya's pass in an additional optimizer arg called 
@@ -66,7 +66,7 @@ class ScheduleFreeWrapper(BaseOptimizer):
             (default 2.0).
     """
     def __init__(self, 
-                 params: PARAMETERS,
+                 params: ParamGroup,
                  base_optimizer : OPTIMIZER, 
                  sf_weight_decay_at_y : float = 0.0,
                  sf_momentum : float = 0.9,
@@ -85,7 +85,7 @@ class ScheduleFreeWrapper(BaseOptimizer):
         self.sf_momentum = sf_momentum
         self.train_mode = False
 
-        defaults: DEFAULTS = {'sf_weight_decay_at_y': sf_weight_decay_at_y, 'sf_momentum': sf_momentum, 'sf_weight_lr_power': sf_weight_lr_power, 'sf_r': sf_r}
+        defaults: Defaults = {'sf_weight_decay_at_y': sf_weight_decay_at_y, 'sf_momentum': sf_momentum, 'sf_weight_lr_power': sf_weight_lr_power, 'sf_r': sf_r}
         defaults.update(kwargs)
         super().__init__(params, defaults)
 
@@ -174,12 +174,12 @@ class ScheduleFreeWrapper(BaseOptimizer):
         #x.view(torch.uint8).bitwise_xor_(y.view(torch.uint8))
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
+    def step(self, closure: Closure = None) -> Loss:
         if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")
-        loss: LOSS = None
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -323,9 +323,9 @@ class ADOPTScheduleFree(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9, 0.9999),
+        betas: Betas = (0.9, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         stable_weight_decay: bool = False,
@@ -351,7 +351,7 @@ class ADOPTScheduleFree(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -437,12 +437,12 @@ class ADOPTScheduleFree(BaseOptimizer):
                 state['exp_avg_sq'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
+    def step(self, closure: Closure = None) -> Loss:
         if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")
-        loss: LOSS = None
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -603,9 +603,9 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9, 0.9999, 0.9999),
+        betas: Betas = (0.9, 0.9999, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         stable_weight_decay: bool = False,
@@ -634,7 +634,7 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -745,12 +745,12 @@ class ADOPTEMAMixScheduleFree(BaseOptimizer):
         )
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
+    def step(self, closure: Closure = None) -> Loss:
         if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")
-        loss: LOSS = None
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -925,9 +925,9 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9, 0.92, 0.9999),
+        betas: Betas = (0.9, 0.92, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         stable_weight_decay: bool = False,
@@ -955,7 +955,7 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -1045,12 +1045,12 @@ class ADOPTNesterovScheduleFree(BaseOptimizer):
                 state['previous_grad'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
+    def step(self, closure: Closure = None) -> Loss:
         if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")
-        loss: LOSS = None
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -1235,9 +1235,9 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9, 0.9999),
+        betas: Betas = (0.9, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         stable_weight_decay: bool = False,
@@ -1264,7 +1264,7 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -1352,8 +1352,8 @@ class ADOPTMARSScheduleFree(BaseOptimizer):
                 state['previous_grad'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -1519,9 +1519,9 @@ class FADOPTScheduleFree(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9, 0.9999),
+        betas: Betas = (0.9, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         stable_weight_decay: bool = False,
@@ -1548,7 +1548,7 @@ class FADOPTScheduleFree(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -1636,8 +1636,8 @@ class FADOPTScheduleFree(BaseOptimizer):
                 state['exp_avg_sq'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -1810,9 +1810,9 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9, 0.9999, 0.9999),
+        betas: Betas = (0.9, 0.9999, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         stable_weight_decay: bool = False,
@@ -1842,7 +1842,7 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -1955,12 +1955,12 @@ class FADOPTEMAMixScheduleFree(BaseOptimizer):
         )
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
+    def step(self, closure: Closure = None) -> Loss:
         if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")
-        loss: LOSS = None
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -2141,9 +2141,9 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9, 0.92, 0.9999),
+        betas: Betas = (0.9, 0.92, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         stable_weight_decay: bool = False,
@@ -2172,7 +2172,7 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -2263,12 +2263,12 @@ class FADOPTNesterovScheduleFree(BaseOptimizer):
                 state['previous_grad'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
+    def step(self, closure: Closure = None) -> Loss:
         if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")
-        loss: LOSS = None
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -2465,9 +2465,9 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9, 0.9999),
+        betas: Betas = (0.9, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         weight_decay_lr_decouple: bool = False,
@@ -2500,7 +2500,7 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -2591,12 +2591,12 @@ class FADOPTMARSScheduleFree(BaseOptimizer):
                 state['previous_grad'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
+    def step(self, closure: Closure = None) -> Loss:
         if not self.train_mode:
             raise Exception("Optimizer was not in train mode when step is called. "
                             "Please insert .train() and .eval() calls on the "
                             "optimizer. See documentation for details.")
-        loss: LOSS = None
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

@@ -5,16 +5,16 @@ import torch
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 
 from .utils import copy_stochastic_, debias_beta
 
 class Alice(BaseOptimizer):
     r"""Adaptive low-dimensional subspace estimation.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
-    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+    :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
         beta3=0 for Alice-0 optimizer.
     :param alpha: float. scaler.
     :param alpha_c: float. compensation scaler.
@@ -30,9 +30,9 @@ class Alice(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 0.01,
-        betas: BETAS = (0.9, 0.9, 0.999),
+        betas: Betas = (0.9, 0.9, 0.999),
         alpha: float = 0.25,
         alpha_c: float = 0.2,
         update_interval: int = 10,
@@ -43,7 +43,7 @@ class Alice(BaseOptimizer):
         weight_decouple: bool = True,
         eps: float = 1e-8,
         adam_lr: float = 5e-4,
-        adam_betas: BETAS = (0.9, 0.999),
+        adam_betas: Betas = (0.9, 0.999),
         adam_weight_decay: float = 0.0,
         **kwargs,
     ):
@@ -63,7 +63,7 @@ class Alice(BaseOptimizer):
         self.validate_betas(adam_betas)
 
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             '_lr_ratio': (adam_lr / lr) if lr > 0 else 0,
             'betas': betas,
@@ -234,8 +234,8 @@ class Alice(BaseOptimizer):
         return c_t, phi
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

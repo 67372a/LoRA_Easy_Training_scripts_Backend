@@ -2,13 +2,13 @@ import torch
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Closure, Defaults, Loss, ParamGroup
 from .utils import copy_stochastic_
 
 class SGDSaI(BaseOptimizer):
     r"""No More Adam: Learning Rate Scaling at Initialization is All You Need.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
     :param momentum: float.  coefficients used for computing running averages of gradient.
     :param weight_decay: float. weight decay (L2 penalty).
@@ -18,7 +18,7 @@ class SGDSaI(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-2,
         momentum: float = 0.9,
         weight_decay: float = 1e-2,
@@ -34,7 +34,7 @@ class SGDSaI(BaseOptimizer):
 
         self.has_warmup: bool = False
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'momentum': momentum,
             'weight_decay': weight_decay,
@@ -61,8 +61,8 @@ class SGDSaI(BaseOptimizer):
                     state['momentum_buffer'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def warmup_step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def warmup_step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -92,11 +92,11 @@ class SGDSaI(BaseOptimizer):
         return loss
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
+    def step(self, closure: Closure = None) -> Loss:
         if not self.has_warmup:
             self.warmup_step(closure)
 
-        loss: LOSS = None
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

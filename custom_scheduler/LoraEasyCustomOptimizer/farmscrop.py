@@ -5,7 +5,7 @@ from .utils import copy_stochastic_, adaptive_eps
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from typing import Literal
 
 MASK_GRADS = Literal['grad', 'approx_grad_nat' 'grad_nat']
@@ -249,9 +249,9 @@ class FARMSCropV2(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-4,
-        betas: BETAS = (0.999, 0.9999),
+        betas: Betas = (0.999, 0.9999),
         eps: float = 1e-6,
         eps2: float = 1e-2,
         eps_floor: float = None,
@@ -276,7 +276,7 @@ class FARMSCropV2(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr':lr,
             'betas':betas,
             'eps':eps,
@@ -316,8 +316,8 @@ class FARMSCropV2(BaseOptimizer):
                     state["grad_diff_fim"] = torch.ones_like(p.data)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

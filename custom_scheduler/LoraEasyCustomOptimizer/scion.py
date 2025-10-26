@@ -6,7 +6,7 @@ import torch
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Closure, Defaults, Loss, ParamGroup
 from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, _paper_orthograd, agc, _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl, SSCCosineDecay, newton_schulz_
 from typing import Dict, Optional
 
@@ -304,7 +304,7 @@ class SCION(BaseOptimizer):
 
         For more details, checkout here https://github.com/LIONS-EPFL/scion/tree/main?tab=readme-ov-file#examples
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
     :param momentum: float. momentum factor. 1.0 - usual momentum.
     :param constraint: bool. whether to use a constraint SCG or not.
@@ -319,7 +319,7 @@ class SCION(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-3,
         momentum: float = 0.1,
         constraint: bool = False,
@@ -350,7 +350,7 @@ class SCION(BaseOptimizer):
         if norm_kwargs is None:
             norm_kwargs = {}
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'momentum': momentum,
             'constraint': constraint,
@@ -395,8 +395,8 @@ class SCION(BaseOptimizer):
                     state['pbar'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

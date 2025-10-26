@@ -4,7 +4,7 @@ from .utils import copy_stochastic_, agc, NORM_TYPE, UPDATE_STRATEGY,_paper_orth
 import math
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from torch.optim import Optimizer
 
 # From pytorch_optimizer: https://github.com/kozistr/pytorch_optimizer
@@ -109,9 +109,9 @@ class FMARSCrop(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 5e-4,
-        betas: BETAS = (0.999, 0.9999),
+        betas: Betas = (0.999, 0.9999),
         eps: float = 1e-6,
         eps2: float = 1e-2,
         eps_floor: float = None,
@@ -141,7 +141,7 @@ class FMARSCrop(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr':lr,
             'betas':betas,
             'eps':eps,
@@ -189,8 +189,8 @@ class FMARSCrop(BaseOptimizer):
                     state["grad_diff_fim"] = torch.ones_like(p.data)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -449,9 +449,9 @@ class FMARSCropV2ExMachina(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 5e-4,
-        betas: BETAS = (0.99,0.9999,0.999),
+        betas: Betas = (0.99,0.9999,0.999),
         eps: float = 1e-6,
         eps2: float = 1e-2,
         eps_floor: float = None,
@@ -490,7 +490,7 @@ class FMARSCropV2ExMachina(BaseOptimizer):
         if cautious:
             update_strategy = 'cautious'
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr':lr,
             'betas':betas,
             'eps':eps,
@@ -540,8 +540,8 @@ class FMARSCropV2ExMachina(BaseOptimizer):
                     state["grad_diff_fim"] = torch.ones_like(p.data)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -1374,9 +1374,9 @@ class FMARSCropV3ExMachina(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 5e-4,
-        betas: BETAS = (0.99, 0.95),
+        betas: Betas = (0.99, 0.95),
         eps: float = 1e-6,
         eps2: float = 1e-2,
         eps_floor: float = None,
@@ -1417,7 +1417,7 @@ class FMARSCropV3ExMachina(BaseOptimizer):
         if cautious:
             update_strategy = 'cautious'
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr':lr,
             'betas':betas,
             'eps':eps,
@@ -1469,8 +1469,8 @@ class FMARSCropV3ExMachina(BaseOptimizer):
                     state["grad_diff_fim"] = torch.ones_like(p.data)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

@@ -5,7 +5,7 @@ import torch
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from .shampoo_utils import (
     LayerWiseGrafting,
     PreConditioner,
@@ -31,9 +31,9 @@ class ScalableShampoo(BaseOptimizer):
 
         Reference : https://github.com/google-research/google-research/blob/master/scalable_shampoo/pytorch/shampoo.py.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
-    :param betas: BETAS. beta1, beta2.
+    :param betas: Betas. beta1, beta2.
     :param moving_average_for_momentum: bool. perform moving_average for momentum (beta1).
     :param weight_decay: float. weight decay (L2 penalty).
     :param decoupled_weight_decay: bool. use decoupled weight_decay.
@@ -68,9 +68,9 @@ class ScalableShampoo(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-3,
-        betas: BETAS = (0.9, 0.999),
+        betas: Betas = (0.9, 0.999),
         moving_average_for_momentum: bool = False,
         weight_decay: float = 0.0,
         decoupled_weight_decay: bool = False,
@@ -114,7 +114,7 @@ class ScalableShampoo(BaseOptimizer):
         self.matrix_eps = matrix_eps
         self.use_svd = use_svd
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -157,8 +157,8 @@ class ScalableShampoo(BaseOptimizer):
         return step >= self.start_preconditioning_step
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

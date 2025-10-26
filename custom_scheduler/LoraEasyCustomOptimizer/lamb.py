@@ -4,7 +4,7 @@ import torch
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from pytorch_optimizer.optimizer.utils import get_global_gradient_norm
 from .utils import copy_stochastic_
 
@@ -14,9 +14,9 @@ class Lamb(BaseOptimizer):
 
         This Lamb implementation is based on the paper v3, which does not use de-biasing.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
-    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+    :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
     :param weight_decay: float. weight decay (L2 penalty).
     :param weight_decouple: bool. the optimizer uses decoupled weight decay as in AdamW.
     :param fixed_decay: bool. fix weight decay.
@@ -37,9 +37,9 @@ class Lamb(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-3,
-        betas: BETAS = (0.9, 0.999),
+        betas: Betas = (0.9, 0.999),
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
         fixed_decay: bool = False,
@@ -66,7 +66,7 @@ class Lamb(BaseOptimizer):
         self.n_sma_threshold = n_sma_threshold
         self.pre_norm = pre_norm
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -114,8 +114,8 @@ class Lamb(BaseOptimizer):
         return torch.clamp(self.defaults['max_grad_norm'] / global_grad_norm, max=1.0)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

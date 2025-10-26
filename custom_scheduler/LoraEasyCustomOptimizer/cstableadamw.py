@@ -6,7 +6,7 @@ from torch import Tensor # For type hinting
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 
 from .utils import _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl
 
@@ -17,9 +17,9 @@ class CStableAdamW(BaseOptimizer):
     with optional Kahan summation, optional RMS-based scaling, optional Adam-atan2 updates,
     and optional ADOPT (Adam with Offload of the Previous grad for the second moment).
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
-    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+    :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
     :param kahan_sum: bool. Enables Kahan summation for more accurate parameter updates when training in low precision.
     :param weight_decay: float. weight decay (L2 penalty).
     :param weight_decouple: bool. decoupled weight decay (à la AdamW).
@@ -43,9 +43,9 @@ class CStableAdamW(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-3,
-        betas: BETAS = (0.9, 0.999),
+        betas: Betas = (0.9, 0.999),
         kahan_sum: bool = True,
         weight_decay: float = 1e-2,
         weight_decouple: bool = True,
@@ -85,7 +85,7 @@ class CStableAdamW(BaseOptimizer):
             raise ValueError(f"ssc_gamma3 ({ssc_gamma3}) must be between 0.0 and 1.0.")
         self.validate_non_negative(ssc_eps_floor, 'ssc_eps_floor')
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'kahan_sum': kahan_sum,
@@ -183,8 +183,8 @@ class CStableAdamW(BaseOptimizer):
                                 gamma3=ssc_gamma3)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

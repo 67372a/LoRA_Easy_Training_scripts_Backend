@@ -5,7 +5,7 @@ import torch
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from pytorch_optimizer.optimizer.gradient_centralization import centralize_gradient
 from pytorch_optimizer.optimizer.utils import get_global_gradient_norm
 from .utils import copy_stochastic_, UPDATE_STRATEGY
@@ -14,9 +14,9 @@ from .utils import copy_stochastic_, UPDATE_STRATEGY
 class Adan(BaseOptimizer):
     r"""Adaptive Nesterov Momentum Algorithm for Faster Optimizing Deep Models.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
-    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+    :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
     :param weight_decay: float. weight decay (L2 penalty).
     :param weight_decouple: bool. decoupled weight decay.
     :param max_grad_norm: float. max gradient norm to clip.
@@ -33,9 +33,9 @@ class Adan(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-3,
-        betas: BETAS = (0.98, 0.92, 0.99),
+        betas: Betas = (0.98, 0.92, 0.99),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         max_grad_norm: float = 0.0,
@@ -63,7 +63,7 @@ class Adan(BaseOptimizer):
         self.max_grad_norm = max_grad_norm
         self.use_gc = use_gc
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -110,8 +110,8 @@ class Adan(BaseOptimizer):
         return torch.clamp(self.defaults['max_grad_norm'] / global_grad_norm, max=1.0)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

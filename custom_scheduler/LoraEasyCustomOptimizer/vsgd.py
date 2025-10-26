@@ -6,14 +6,14 @@ import torch
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Closure, Defaults, Loss, ParamGroup
 from .utils import copy_stochastic_
 
 
 class VSGD(BaseOptimizer):
     r"""Variational Stochastic Gradient Descent for Deep Neural Networks. https://arxiv.org/abs/2404.06549
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
     :param ghattg: float. prior variance ratio between ghat and g, Var(ghat_t-g_t)/Var(g_t-g_{t-1}).
     :param ps: float. prior strength.
@@ -27,7 +27,7 @@ class VSGD(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-1,
         ghattg: float = 30.0,
         ps: float = 1e-8,
@@ -49,7 +49,7 @@ class VSGD(BaseOptimizer):
 
         self.maximize = maximize
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'tau1': tau1,
             'tau2': tau2,
@@ -90,8 +90,8 @@ class VSGD(BaseOptimizer):
                 state['bhg'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

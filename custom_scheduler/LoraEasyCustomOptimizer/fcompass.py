@@ -6,7 +6,7 @@ from torch.nn.functional import softplus
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from pytorch_optimizer.optimizer.gradient_centralization import centralize_gradient
 from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
 
@@ -241,9 +241,9 @@ class FCompassADOPT(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-4,
-        betas: BETAS = (0.97, 0.9999),
+        betas: Betas = (0.97, 0.9999),
         amp_fac: float = 2.0,
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
@@ -270,7 +270,7 @@ class FCompassADOPT(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'amp_fac': amp_fac,
@@ -309,8 +309,8 @@ class FCompassADOPT(BaseOptimizer):
                 state['fim'] = torch.ones_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -494,9 +494,9 @@ class FCompassADOPTMARS(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-4,
-        betas: BETAS = (0.97, 0.9999),
+        betas: Betas = (0.97, 0.9999),
         amp_fac: float = 2.0,
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
@@ -524,7 +524,7 @@ class FCompassADOPTMARS(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'amp_fac': amp_fac,
@@ -565,8 +565,8 @@ class FCompassADOPTMARS(BaseOptimizer):
                 state['previous_grad'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -722,9 +722,9 @@ class FCompassPlus(BaseOptimizer):
             * Amsgrad - https://arxiv.org/pdf/1904.09237
 
     Arguments:
-        :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+        :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
         :param lr: float. learning rate.
-        :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+        :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
         :param use_softplus: bool. use softplus to smooth the updaate denominator.
         :param beta_softplus: float. beta for softplus.
         :param threshold_softplus: float. threshold after which scaling returns to linear. Originally set to 20 by default, instead follows adaptive eps when set to 0.
@@ -732,7 +732,7 @@ class FCompassPlus(BaseOptimizer):
         :param amp_fac: float. amplification factor for the first moment filter.
         :param centralize_gradients: bool. use GC both convolution & fc layers. Can be selectively applied an int: disabled(0), gradient(1), update(2), both(3)
         :param normalize_gradients: bool. use gradient normalization.  Can be selectively applied using an int: disabled(0), gradient(1), update(2), both(3)
-        :param use_lookahead: bool. use lookahead. ADDS 1 STATE
+        :param use_lookahead: bool. use lookahead. ADDS 1 State
         :param lookahead_merge_time: int. merge time.
         :param lookahead_blending_alpha: float. blending alpha.
         :param weight_decay: float. weight decay (L2 penalty).
@@ -740,8 +740,8 @@ class FCompassPlus(BaseOptimizer):
         :param fixed_decay: bool. fix weight decay.
         :param norm_loss_factor: float. norm loss factor.
         :param norm_loss_eps: float. Eps is the term added to the denominator to improve numerical stability.
-        :param amsgrad: bool. If true, maintains and uses the max ema squared. ADDS 1 STATE
-        :param use_pnm: bool. use positive negative momentum. ADDS 1 STATE
+        :param amsgrad: bool. If true, maintains and uses the max ema squared. ADDS 1 State
+        :param use_pnm: bool. use positive negative momentum. ADDS 1 State
         :param pnm_beta: float. Manages the amplitude of the noise introduced by positive negative momentum. Negative values are valid.
         :param diff_amp: float. Accelerate the difference between the current and past gradient by this multiplicative value. 0 is off. ADDS 2 STATES
         :param diff_amp_beta: float. Coefficient used for computing running average of the current and past gradients
@@ -752,9 +752,9 @@ class FCompassPlus(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-4,
-        betas: BETAS = (0.97, 0.999),
+        betas: Betas = (0.97, 0.999),
         amp_fac: float = 2.0,
         centralize_gradients: int = 1,
         normalize_gradients: int = 0,
@@ -784,7 +784,7 @@ class FCompassPlus(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr':lr,
             'betas':betas,
             'amp_fac':amp_fac,
@@ -866,8 +866,8 @@ class FCompassPlus(BaseOptimizer):
                     state["previous_grad"] = grad.data.clone().mul_(-1.0)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

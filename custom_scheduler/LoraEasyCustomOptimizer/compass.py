@@ -16,7 +16,7 @@ import logging
 from bitsandbytes.functional import quantize_blockwise, dequantize_blockwise
 from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParameterSizeError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from pytorch_optimizer.optimizer.gradient_centralization import centralize_gradient
 from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
@@ -85,9 +85,9 @@ class Compass(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1.4e-4, #Original default 1e-3
-        betas: BETAS = (0.975, 0.999), #Original default 0.99, 0.999
+        betas: Betas = (0.975, 0.999), #Original default 0.99, 0.999
         weight_decay: float = 0.001, #Original default 0
         weight_decouple: bool = True,
         stable_weight_decay: bool = False,
@@ -117,7 +117,7 @@ class Compass(BaseOptimizer):
         if cautious:
             update_strategy = 'cautious'
         
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr':lr,
             'betas':betas,
             'weight_decay' : weight_decay,
@@ -177,8 +177,8 @@ class Compass(BaseOptimizer):
                 state["ema_squared"] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -351,9 +351,9 @@ class CompassPlus(BaseOptimizer):
             * Variance Rectification - https://arxiv.org/abs/1908.03265 (RAdam)
 
     Arguments:
-        :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+        :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
         :param lr: float. learning rate.
-        :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+        :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
         :param use_softplus: bool. use softplus to smooth the updaate denominator.
         :param beta_softplus: float. beta for softplus.
         :param threshold_softplus: float. threshold after which scaling returns to linear. Originally set to 20 by default, instead follows adaptive eps when set to 0.
@@ -362,7 +362,7 @@ class CompassPlus(BaseOptimizer):
         :param amp_fac: float. amplification factor for the first moment filter.
         :param centralize_gradients: bool. use GC both convolution & fc layers. Can be selectively applied an int: disabled(0), gradient(1), update(2), both(3)
         :param normalize_gradients: bool. use gradient normalization.  Can be selectively applied using an int: disabled(0), gradient(1), update(2), both(3)
-        :param use_lookahead: bool. use lookahead. ADDS 1 STATE
+        :param use_lookahead: bool. use lookahead. ADDS 1 State
         :param lookahead_merge_time: int. merge time.
         :param lookahead_blending_alpha: float. blending alpha.
         :param weight_decay: float. weight decay (L2 penalty).
@@ -373,10 +373,10 @@ class CompassPlus(BaseOptimizer):
         :param norm_loss_factor: float. norm loss factor.
         :param norm_loss_eps: float. Eps is the term added to the denominator to improve numerical stability.
         :param adam_debias: bool. Only correct the denominator to avoid inflating step sizes early in training.
-        :param amsgrad: bool. If true, maintains and uses the max ema squared. ADDS 1 STATE
-        :param use_pnm: bool. use positive negative momentum. ADDS 1 STATE
+        :param amsgrad: bool. If true, maintains and uses the max ema squared. ADDS 1 State
+        :param use_pnm: bool. use positive negative momentum. ADDS 1 State
         :param pnm_beta: float. Manages the amplitude of the noise introduced by positive negative momentum. Negative values are valid.
-        :param use_slow_ema: bool. use slow ema like that from AdEMAMix. ADDS 1 STATE
+        :param use_slow_ema: bool. use slow ema like that from AdEMAMix. ADDS 1 State
         :param slow_ema_alpha: float. usually between 4 and 10 would work well. The multipler for application of the slow ema to the update.
         :param slow_ema_beta: float. coefficient used for computing running slow average of gradient.
         :param slow_ema_t_alpha_beta: Optional[float]. total number of iterations is preferred when needed. The warmup of slow_ema_alpha and slow_ema_beta over iterations. Results in more stablity.
@@ -393,9 +393,9 @@ class CompassPlus(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1.4e-4,
-        betas: BETAS = (0.975, 0.999),
+        betas: Betas = (0.975, 0.999),
         weight_decay: float = 0.0005,
         weight_decouple: bool = True,
         lr_decouple: bool = False,
@@ -455,7 +455,7 @@ class CompassPlus(BaseOptimizer):
         self.validate_range(diff_amp_beta, 'diff_amp_beta', 0.0, 1.0, range_type='[]')
         self.validate_range(slow_ema_beta, 'slow_ema_beta', 0.0, 1.0, range_type='[]')
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay' : weight_decay,
@@ -607,8 +607,8 @@ class CompassPlus(BaseOptimizer):
         )
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -1185,9 +1185,9 @@ class CompassADOPT(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-4,
-        betas: BETAS = (0.95, 0.9999),
+        betas: Betas = (0.95, 0.9999),
         amp_fac: float = 2.0,
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
@@ -1229,7 +1229,7 @@ class CompassADOPT(BaseOptimizer):
         if cautious:
             update_strategy = 'cautious'
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'amp_fac': amp_fac,
@@ -1295,8 +1295,8 @@ class CompassADOPT(BaseOptimizer):
                     state['exp_avg_sq'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -1526,9 +1526,9 @@ class CompassADOPTMARS(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-4,
-        betas: BETAS = (0.95, 0.9999),
+        betas: Betas = (0.95, 0.9999),
         amp_fac: float = 2.0,
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
@@ -1556,7 +1556,7 @@ class CompassADOPTMARS(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'amp_fac': amp_fac,
@@ -1619,8 +1619,8 @@ class CompassADOPTMARS(BaseOptimizer):
                     state['exp_avg_sq'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

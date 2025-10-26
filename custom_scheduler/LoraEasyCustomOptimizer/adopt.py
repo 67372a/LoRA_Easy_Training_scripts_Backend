@@ -5,16 +5,16 @@ import torch
 import math
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS, OPTIMIZER
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup, OPTIMIZER
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from .utils import copy_stochastic_, NORM_TYPE, agc, UPDATE_STRATEGY, adaptive_eps
 
 class ADOPT(BaseOptimizer):
     r"""Modified Adam Can Converge with Any β2 with the Optimal Rate.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
-    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+    :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
     :param weight_decay: float. weight decay (L2 penalty).
     :param weight_decouple: bool. the optimizer uses decoupled weight decay as in AdamW.
     :param fixed_decay: bool. fix weight decay.
@@ -29,9 +29,9 @@ class ADOPT(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-3,
-        betas: BETAS = (0.9, 0.9999),
+        betas: Betas = (0.9, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         fixed_decay: bool = False,
@@ -53,7 +53,7 @@ class ADOPT(BaseOptimizer):
         if cautious:
             update_strategy = 'cautious'
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -89,8 +89,8 @@ class ADOPT(BaseOptimizer):
                 state['exp_avg_sq'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -212,9 +212,9 @@ class ADOPTMARS(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9, 0.9999),
+        betas: Betas = (0.9, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         stable_weight_decay: bool = False,
@@ -237,7 +237,7 @@ class ADOPTMARS(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -273,8 +273,8 @@ class ADOPTMARS(BaseOptimizer):
                 state['previous_grad'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -436,9 +436,9 @@ class FADOPTMARS(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 2.5e-3,
-        betas: BETAS = (0.9, 0.9999),
+        betas: Betas = (0.9, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         stable_weight_decay: bool = False,
@@ -462,7 +462,7 @@ class FADOPTMARS(BaseOptimizer):
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = 1e-37
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -499,8 +499,8 @@ class FADOPTMARS(BaseOptimizer):
                 state['previous_grad'] = torch.zeros_like(p)
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

@@ -4,16 +4,16 @@ import torch
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from .utils import copy_stochastic_, UPDATE_STRATEGY, _paper_orthograd, SSCCosineDecay
 from typing import Optional
 
 class StableSPAM(BaseOptimizer):
     r"""How to Train in 4-Bit More Stably than 16-Bit Adam.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
-    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+    :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
     :param gamma1: float.
     :param gamma2: float.
     :param gamma3: float.
@@ -26,9 +26,9 @@ class StableSPAM(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-3,
-        betas: BETAS = (0.9, 0.999),
+        betas: Betas = (0.9, 0.999),
         gamma1: float = 0.85,
         gamma2: float = 0.99999,
         gamma3: float = 0.999,
@@ -64,7 +64,7 @@ class StableSPAM(BaseOptimizer):
 
         self.total_step: int = 0
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr, 
             'betas': betas, 
             'weight_decay': weight_decay, 
@@ -95,8 +95,8 @@ class StableSPAM(BaseOptimizer):
                 state['step'] = 0
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()

@@ -8,7 +8,7 @@ import torch
 
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import BETAS, CLOSURE, DEFAULTS, LOSS, PARAMETERS
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, agc, _paper_orthograd, adaptive_eps, _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl
 
 
@@ -79,9 +79,9 @@ def bias_rms_compile(grad: torch.Tensor) -> torch.Tensor:
 class AdEMAMix(BaseOptimizer):
     r"""Better, Faster, Older.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
-    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+    :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
     :param weight_decay: float. weight decay (L2 penalty).
     :param weight_decouple: bool. the optimizer uses decoupled weight decay as in AdamW.
     :param fixed_decay: bool. fix weight decay.
@@ -99,9 +99,9 @@ class AdEMAMix(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float = 1e-3,
-        betas: BETAS = (0.9, 0.999, 0.9999),
+        betas: Betas = (0.9, 0.999, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = False,
         fixed_decay: bool = False,
@@ -131,7 +131,7 @@ class AdEMAMix(BaseOptimizer):
         if cautious:
             update_strategy = 'cautious'
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'weight_decay': weight_decay,
@@ -198,8 +198,8 @@ class AdEMAMix(BaseOptimizer):
         return x.norm(2) / math.sqrt(x.numel())
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -322,9 +322,9 @@ class AdEMAMix(BaseOptimizer):
 class SimplifiedAdEMAMix(BaseOptimizer):
     r"""Connections between Schedule-Free Optimizers, AdEMAMix, and Accelerated SGD Variants.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
-    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+    :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
     :param alpha: float. coefficient for mixing the current gradient and EMA.
     :param beta1_warmup: Optional[int]. number of warmup steps used to increase beta1.
     :param min_beta1: float. minimum value of beta1 to start from.
@@ -338,9 +338,9 @@ class SimplifiedAdEMAMix(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float|torch.Tensor = 1e-4,
-        betas: BETAS = (0.99, 0.95),
+        betas: Betas = (0.99, 0.95),
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
         fixed_decay: bool = False,
@@ -376,7 +376,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams', 'both'}:
             raise ValueError("Invalid update strategy: {}".format(update_strategy))
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'alpha': alpha,
@@ -428,8 +428,8 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         return beta_end
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
@@ -558,9 +558,9 @@ class SimplifiedAdEMAMix(BaseOptimizer):
 class SimplifiedAdEMAMixExM(BaseOptimizer):
     r"""Connections between Schedule-Free Optimizers, AdEMAMix, and Accelerated SGD Variants.
 
-    :param params: PARAMETERS. iterable of parameters to optimize or dicts defining parameter groups.
+    :param params: ParamGroup. iterable of parameters to optimize or dicts defining parameter groups.
     :param lr: float. learning rate.
-    :param betas: BETAS. coefficients used for computing running averages of gradient and the squared hessian trace.
+    :param betas: Betas. coefficients used for computing running averages of gradient and the squared hessian trace.
     :param alpha: float. coefficient for mixing the current gradient and EMA.
     :param beta1_warmup: Optional[int]. number of warmup steps used to increase beta1. Recommend setting to iteration/step count.
     :param min_beta1: float. minimum value of beta1 to start from.
@@ -571,9 +571,9 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
 
     def __init__(
         self,
-        params: PARAMETERS,
+        params: ParamGroup,
         lr: float|torch.Tensor = 2e-4,
-        betas: BETAS = (0.95, 0.997),
+        betas: Betas = (0.95, 0.997),
         min_beta1: float = 0.95,
         beta1_warmup: Optional[int] = None,
         weight_decay: float = 0.0,
@@ -610,7 +610,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams', 'both'}:
             raise ValueError("Invalid update strategy: {}".format(update_strategy))
 
-        defaults: DEFAULTS = {
+        defaults: Defaults = {
             'lr': lr,
             'betas': betas,
             'alpha': alpha,
@@ -661,8 +661,8 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         return beta_end
 
     @torch.no_grad()
-    def step(self, closure: CLOSURE = None) -> LOSS:
-        loss: LOSS = None
+    def step(self, closure: Closure = None) -> Loss:
+        loss: Loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
