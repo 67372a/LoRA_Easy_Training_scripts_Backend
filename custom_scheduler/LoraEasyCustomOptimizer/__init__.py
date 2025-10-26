@@ -36,6 +36,7 @@ from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
 from LoraEasyCustomOptimizer.scorn import SCORN
 from LoraEasyCustomOptimizer.scornmachina import SCORNMachina
 from LoraEasyCustomOptimizer.mythical import Mythical
+from LoraEasyCustomOptimizer.oagopt import OAGOpt
 from LoraEasyCustomOptimizer.ocgopt import OCGOpt
 from LoraEasyCustomOptimizer.glyph import Glyph
 from LoraEasyCustomOptimizer.racs import RACS
@@ -99,6 +100,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     LaProp,
     MomentusCaution,
     Mythical,
+    OAGOpt,
     OCGOpt,
     ProdigyPlusScheduleFree,
     RACS,
