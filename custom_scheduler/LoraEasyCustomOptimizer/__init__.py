@@ -49,6 +49,7 @@ from LoraEasyCustomOptimizer.talon import TALON
 from LoraEasyCustomOptimizer.fftdescent import FFTDescent
 from LoraEasyCustomOptimizer.scgopt import SCGOpt
 from LoraEasyCustomOptimizer.singstate import SingState
+from LoraEasyCustomOptimizer.snoo_asgd import SNOO_ASGD
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ADOPT,
@@ -119,6 +120,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     SimplifiedAdEMAMix,
     SimplifiedAdEMAMixExM,
     SingState,
+    SNOO_ASGD,
     StableSPAM,
     TALON,
     VSGD,
