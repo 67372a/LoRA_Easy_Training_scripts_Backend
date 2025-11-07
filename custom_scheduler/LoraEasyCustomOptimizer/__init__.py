@@ -50,6 +50,7 @@ from LoraEasyCustomOptimizer.fftdescent import FFTDescent
 from LoraEasyCustomOptimizer.scgopt import SCGOpt
 from LoraEasyCustomOptimizer.singstate import SingState
 from LoraEasyCustomOptimizer.snoo_asgd import SNOO_ASGD
+from adv_optm.optim import AdamW_adv, Adopt_adv, Simplified_AdEMAMix as Simplified_AdEMAMix_adv, Lion_adv
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ADOPT,
@@ -63,9 +64,11 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdaGC,
     AdamMini,
     Adan,
+    AdamW_adv,
     AdamW4bitAO,
     AdamW8bitAO,
     AdamWfp8AO,
+    Adopt_adv,
     Alice,
     CAME,
     Compass,
@@ -99,6 +102,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     GrokFastAdamW,
     LPFAdamW,
     LaProp,
+    Lion_adv,
     MomentusCaution,
     Mythical,
     OAGOpt,
@@ -117,6 +121,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     ScheduleFreeWrapper,
     SCORN,
     SCORNMachina,
+    Simplified_AdEMAMix_adv,
     SimplifiedAdEMAMix,
     SimplifiedAdEMAMixExM,
     SingState,
