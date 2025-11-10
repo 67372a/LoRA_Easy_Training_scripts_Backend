@@ -51,8 +51,10 @@ from LoraEasyCustomOptimizer.scgopt import SCGOpt
 from LoraEasyCustomOptimizer.singstate import SingState
 from LoraEasyCustomOptimizer.snoo_asgd import SNOO_ASGD
 from adv_optm.optim import AdamW_adv, Adopt_adv, Simplified_AdEMAMix as Simplified_AdEMAMix_adv, Lion_adv
+from LoraEasyCustomOptimizer.abmog import ABMOG
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
+    ABMOG,
     ADOPT,
     ADOPTAOScheduleFree,
     ADOPTEMAMixScheduleFree,
