@@ -616,9 +616,9 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         amsgrad_min_decay_rate: float = 0.98,
         amsgrad_max_decay_rate: float = 0.98,
         torch_compile: bool = True,
-        chunk_size=64,
-        dtype=torch.bfloat16,
-        storage_device="cpu",
+        chunk_size: int = 128,
+        dtype: str|torch.dtype = torch.bfloat16,
+        storage_device: str = "cpu",
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -628,8 +628,21 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
+        if isinstance(dtype, str):
+            normalized_str_dtype = dtype.strip().lower()
+            if normalized_str_dtype == "float32":
+                final_dtype = torch.float32
+            elif normalized_str_dtype == "float16":
+                final_dtype = torch.float16
+            elif normalized_str_dtype == "bfloat16":
+                final_dtype = torch.bfloat16
+            else:
+                final_dtype = torch.bfloat16
+        else:
+            final_dtype = dtype
+
         self.chunk_size = chunk_size
-        self.optim_state_dtype = dtype
+        self.optim_state_dtype = final_dtype
         self.optim_state_device = storage_device
 
         if not (0.0 <= update_strategy_scale <= 1.0):
