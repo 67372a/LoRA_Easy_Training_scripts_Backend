@@ -6,16 +6,21 @@ from math import sqrt
 from typing import Callable, Tuple
 import math
 
-def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
+def copy_stochastic_(target: torch.Tensor, source: torch.Tensor, seed=0):
     # thanks to Nerogar for fast stochastic pytorch implementation
     # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
     with torch.no_grad():
-        # create a random 16 bit integer
-        result = torch.randint_like(
-            source,
-            dtype=torch.int32,
+        generator = torch.Generator(device=source.device)
+        generator.manual_seed(seed)
+
+        # create a random 16 bit integer using torch.randint with explicit shape
+        result = torch.randint(
             low=0,
             high=(1 << 16),
+            size=source.shape,
+            dtype=torch.int32,
+            device=source.device,
+            generator=generator,
         )
 
         # add the random number to the lower 16 bit of the mantissa
@@ -25,7 +30,7 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
         result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
 
         # copy the higher 16 bit into the target tensor
-        target.copy_(result.view(dtype=torch.float32))
+        target.copy_(result.view(dtype=torch.float32), non_blocking=True)
 
 # Original Spectral Clipping code by leloykun (https://leloykun.github.io/ponder/spectral-clipping/ https://github.com/leloykun/spectral_clip)
 
@@ -234,7 +239,29 @@ class OCGOpt(Optimizer):
         sim_match: bool = False,
         cautious_min: float = 0.0,
         stochastic_fp: bool = True,
+        chunk_size: int = 128,
+        dtype: str|torch.dtype = torch.bfloat16,
+        storage_device: str = "cpu",
+        **kwargs,
     ):
+
+        if isinstance(dtype, str):
+            normalized_str_dtype = dtype.strip().lower()
+            if normalized_str_dtype == "float32":
+                final_dtype = torch.float32
+            elif normalized_str_dtype == "float16":
+                final_dtype = torch.float16
+            elif normalized_str_dtype == "bfloat16":
+                final_dtype = torch.bfloat16
+            else:
+                final_dtype = torch.bfloat16
+        else:
+            final_dtype = dtype
+
+        self.chunk_size = chunk_size
+        self.optim_state_dtype = final_dtype
+        self.optim_state_device = storage_device
+
 
         self._init_lr = lr
 
@@ -264,6 +291,9 @@ class OCGOpt(Optimizer):
             sim_match = sim_match,
             cautious_min = cautious_min,
             stochastic_fp = stochastic_fp,
+            chunk_size = chunk_size,
+            dtype = dtype,
+            storage_device = storage_device,
         )
 
         super(OCGOpt, self).__init__(params, defaults)
@@ -293,38 +323,84 @@ class OCGOpt(Optimizer):
 
             step = group['step']
 
-            for p in group["params"]:
+            for i, p in enumerate(group["params"]):
                 if p.grad is None:
                     continue
                 state = self.state[p]
+                device = p.device
 
                 grad = p.grad.data
 
                 dimcount = grad.ndim
 
-                # State initialization
                 if len(state) == 0:
-                    # Exponential moving average of gradient values
-                    if dimcount < 1:
-                        state["denom"] = torch.ones_like(grad)
-                    state["value_momentum"] = torch.zeros_like(grad)
-                    state["centralized_momentum"] = torch.zeros_like(grad)
+                    if self.optim_state_device == "cpu":
+                        if dimcount < 1:
+                            state["denom"] = torch.ones_like(
+                                p.data, 
+                                dtype=self.optim_state_dtype, 
+                                device=self.optim_state_device
+                            ).pin_memory()
 
-                # Detach
-                p_fp32 = p.detach().clone()
+                        state["value_momentum"] = torch.zeros_like(
+                            p.data, 
+                            dtype=self.optim_state_dtype, 
+                            device=self.optim_state_device
+                        ).pin_memory()
+                        state["centralized_momentum"] = torch.zeros_like(
+                            p.data, 
+                            dtype=self.optim_state_dtype, 
+                            device=self.optim_state_device
+                        ).pin_memory()
+                    else:
+                        if dimcount < 1:
+                            state["denom"] = torch.ones_like(
+                                p.data, 
+                                dtype=self.optim_state_dtype, 
+                                device=self.optim_state_device
+                            )
+
+                        state["value_momentum"] = torch.zeros_like(
+                            p.data, 
+                            dtype=self.optim_state_dtype, 
+                            device=self.optim_state_device
+                        )
+                        state["centralized_momentum"] = torch.zeros_like(
+                            p.data, 
+                            dtype=self.optim_state_dtype, 
+                            device=self.optim_state_device
+                        )
+
+                # ========= Asynchronously queue all operations for this parameter =========
+                # Determine target GPU device for computation
+                if device.type == "cpu":
+                    # If param is on CPU, use default GPU for computation
+                    compute_device = torch.cuda.current_device()
+                else:
+                    # If param is on GPU, use its device
+                    compute_device = device
+
+                # 1. Queue Host-to-Device copy
                 if dimcount < 1:
-                    denom = state["denom"].detach().clone()
-                value_momentum = state["value_momentum"].detach().clone()
-                centralized_momentum = state["centralized_momentum"].detach().clone()
-
-                # Unpack
-                if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
-                    grad = grad.to(torch.float32)
-                    if dimcount < 1:
-                        denom = state['denom'].detach().clone().to(torch.float32)
-                    value_momentum = state['value_momentum'].detach().clone().to(torch.float32)
-                    centralized_momentum = state['centralized_momentum'].detach().clone().to(torch.float32)
-                    p_fp32 = p.detach().clone().to(torch.float32)
+                    denom = state["denom"].to(
+                        compute_device, 
+                        non_blocking=True, 
+                        dtype=torch.float32
+                    )
+                value_momentum = state["value_momentum"].to(
+                    compute_device, 
+                    non_blocking=True, 
+                    dtype=torch.float32
+                )
+                centralized_momentum = state["centralized_momentum"].to(
+                    compute_device, 
+                    non_blocking=True, 
+                    dtype=torch.float32
+                )
+                grad = grad.to(torch.float32).to(compute_device, non_blocking=True)
+                p_fp32 = (
+                    p.to(compute_device, dtype=torch.float32, non_blocking=True)
+                )
 
                 # Averaged beta (step 1 = 0, step 2 = 0.5, step 3 = 0.6667, step 4 = 0.75...)
                 slow_beta2 = ((beta2**(step) - beta2) / (beta2**(step) - 1.0))
@@ -435,18 +511,41 @@ class OCGOpt(Optimizer):
                     full_step = full_step.add(grad_weights, alpha=weight_decay * weight_decay_rate**group["step"])
 
                 p_fp32.data.add_(full_step, alpha=-lr)
-
-                # Stochastic update
-                if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
+  
+                # 3. Queue Device-to-Host copy
+                # only use stochastic rounding if using bf16
+                if device.type == "cpu":
+                    if p.dtype == torch.bfloat16:
+                        copy_stochastic_(p.data, p_fp32, group['step'] + 42)
+                    else:
+                        p.data.copy_(p_fp32)
+                else:
+                    # Original GPU path
+                    if p.dtype == torch.bfloat16:
+                        copy_stochastic_(p, p_fp32, group['step'] + 42)
+                    else:
+                        p.data.copy_(p_fp32, non_blocking=True)
+                if self.optim_state_dtype == torch.bfloat16:
                     if dimcount < 1:
-                        copy_stochastic_(state["denom"], denom)
-                    copy_stochastic_(state["value_momentum"], value_momentum)
-                    copy_stochastic_(state["centralized_momentum"], centralized_momentum)
-                    copy_stochastic_(p, p_fp32)
+                        copy_stochastic_(state["denom"], denom, group['step'] + 67)
+                    copy_stochastic_(state["value_momentum"], value_momentum, group['step'] + 69)
+                    copy_stochastic_(
+                        state["centralized_momentum"], centralized_momentum, group['step'] + 420
+                    )
                 else:
                     if dimcount < 1:
-                        state["denom"].copy_(denom)
-                    state["value_momentum"].copy_(value_momentum)
-                    state["centralized_momentum"].copy_(centralized_momentum)
-                    p.copy_(p_fp32)
+                        state["denom"].copy_(denom, non_blocking=True)
+                    state["value_momentum"].copy_(value_momentum, non_blocking=True)
+                    state["centralized_momentum"].copy_(centralized_momentum, non_blocking=True)
+
+                # ========= Check if we need to synchronize =========
+                # We synchronize after processing a chunk of parameters.
+                # The (i + 1) ensures we sync after the 1st, 2nd, ... chunk.
+                if (i + 1) % self.chunk_size == 0:
+                    torch.cuda.synchronize()
+
+            # Final synchronization to handle the last partial chunk
+            # This ensures all operations for the group are complete before exiting.
+            torch.cuda.synchronize()
+            
         return loss

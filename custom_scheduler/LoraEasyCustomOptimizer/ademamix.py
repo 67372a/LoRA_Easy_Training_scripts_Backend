@@ -676,6 +676,9 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             'amsgrad_max_decay_rate': amsgrad_max_decay_rate,
             'amsgrad_min_decay_rate': amsgrad_min_decay_rate,
             'use_newton_schulz':use_newton_schulz,
+            'chunk_size': chunk_size,
+            'dtype': dtype,
+            'storage_device':storage_device,
         }
 
         super().__init__(params, defaults)
