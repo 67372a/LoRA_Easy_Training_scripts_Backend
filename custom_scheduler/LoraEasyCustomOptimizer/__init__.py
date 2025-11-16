@@ -52,6 +52,7 @@ from LoraEasyCustomOptimizer.singstate import SingState
 from LoraEasyCustomOptimizer.snoo_asgd import SNOO_ASGD
 from adv_optm.optim import AdamW_adv, Adopt_adv, Simplified_AdEMAMix as Simplified_AdEMAMix_adv, Lion_adv
 from LoraEasyCustomOptimizer.abmog import ABMOG
+from LoraEasyCustomOptimizer.bcos import BCOS
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
@@ -72,6 +73,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdamWfp8AO,
     Adopt_adv,
     Alice,
+    BCOS,
     CAME,
     Compass,
     CompassAO,
