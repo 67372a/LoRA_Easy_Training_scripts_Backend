@@ -11,21 +11,16 @@ from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from .utils import UPDATE_STRATEGY, NORM_TYPE, agc, _paper_orthograd, adaptive_eps, _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl
 
-def copy_stochastic_(target: torch.Tensor, source: torch.Tensor, seed=0):
+def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     # thanks to Nerogar for fast stochastic pytorch implementation
     # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
     with torch.no_grad():
-        generator = torch.Generator(device=source.device)
-        generator.manual_seed(seed)
-
         # create a random 16 bit integer using torch.randint with explicit shape
-        result = torch.randint(
+        result = torch.randint_like(
+            source,
+            dtype=torch.int32,
             low=0,
             high=(1 << 16),
-            size=source.shape,
-            dtype=torch.int32,
-            device=source.device,
-            generator=generator,
         )
 
         # add the random number to the lower 16 bit of the mantissa
@@ -903,20 +898,18 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                 # only use stochastic rounding if using bf16
                 if device.type == "cpu":
                     if p.dtype == torch.bfloat16:
-                        copy_stochastic_(p.data, p_fp32, group['step'] + 42)
+                        copy_stochastic_(p.data, p_fp32)
                     else:
                         p.data.copy_(p_fp32)
                 else:
                     # Original GPU path
                     if p.dtype == torch.bfloat16:
-                        copy_stochastic_(p, p_fp32, group['step'] + 42)
+                        copy_stochastic_(p, p_fp32)
                     else:
                         p.data.copy_(p_fp32, non_blocking=True)
                 if self.optim_state_dtype == torch.bfloat16:
-                    copy_stochastic_(state["exp_avg"], exp_avg, group['step'] + 69)
-                    copy_stochastic_(
-                        state["exp_avg_sq"], exp_avg_sq, group['step'] + 420
-                    )
+                    copy_stochastic_(state["exp_avg"], exp_avg)
+                    copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
                 else:
                     state["exp_avg"].copy_(exp_avg, non_blocking=True)
                     state["exp_avg_sq"].copy_(exp_avg_sq, non_blocking=True)

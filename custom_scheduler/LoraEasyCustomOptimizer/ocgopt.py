@@ -6,21 +6,16 @@ from math import sqrt
 from typing import Callable, Tuple
 import math
 
-def copy_stochastic_(target: torch.Tensor, source: torch.Tensor, seed=0):
+def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     # thanks to Nerogar for fast stochastic pytorch implementation
     # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
     with torch.no_grad():
-        generator = torch.Generator(device=source.device)
-        generator.manual_seed(seed)
-
         # create a random 16 bit integer using torch.randint with explicit shape
-        result = torch.randint(
+        result = torch.randint_like(
+            source,
+            dtype=torch.int32,
             low=0,
             high=(1 << 16),
-            size=source.shape,
-            dtype=torch.int32,
-            device=source.device,
-            generator=generator,
         )
 
         # add the random number to the lower 16 bit of the mantissa
@@ -516,22 +511,21 @@ class OCGOpt(Optimizer):
                 # only use stochastic rounding if using bf16
                 if device.type == "cpu":
                     if p.dtype == torch.bfloat16:
-                        copy_stochastic_(p.data, p_fp32, group['step'] + 42)
+                        copy_stochastic_(p.data, p_fp32)
                     else:
                         p.data.copy_(p_fp32)
                 else:
                     # Original GPU path
                     if p.dtype == torch.bfloat16:
-                        copy_stochastic_(p, p_fp32, group['step'] + 42)
+                        copy_stochastic_(p, p_fp32)
                     else:
                         p.data.copy_(p_fp32, non_blocking=True)
                 if self.optim_state_dtype == torch.bfloat16:
                     if dimcount < 1:
-                        copy_stochastic_(state["denom"], denom, group['step'] + 67)
-                    copy_stochastic_(state["value_momentum"], value_momentum, group['step'] + 69)
+                        copy_stochastic_(state["denom"], denom)
+                    copy_stochastic_(state["value_momentum"], value_momentum)
                     copy_stochastic_(
-                        state["centralized_momentum"], centralized_momentum, group['step'] + 420
-                    )
+                        state["centralized_momentum"], centralized_momentum)
                 else:
                     if dimcount < 1:
                         state["denom"].copy_(denom, non_blocking=True)
