@@ -62,13 +62,13 @@ class BCOS(Optimizer):
                 mode='c', 
                 decouple_wd=True, 
                 simple_cond=False,
-                chunk_size: int = 128,
-                dtype: str|torch.dtype = torch.bfloat16,
-                storage_device: str = "cpu",
+                sync_chunk_size: int = 128,
+                state_storage_dtype: str|torch.dtype = torch.bfloat16,
+                state_storage_device: str|torch.device = "cpu",
                 **kwargs): 
         
-        if isinstance(dtype, str):
-            normalized_str_dtype = dtype.strip().lower()
+        if isinstance(state_storage_dtype, str):
+            normalized_str_dtype = state_storage_dtype.strip().lower()
             if normalized_str_dtype == "float32":
                 final_dtype = torch.float32
             elif normalized_str_dtype == "float16":
@@ -78,13 +78,13 @@ class BCOS(Optimizer):
             else:
                 final_dtype = torch.bfloat16
         else:
-            final_dtype = dtype
+            final_dtype = state_storage_dtype
 
-        self.chunk_size = chunk_size
+        self.chunk_size = sync_chunk_size
         self.optim_state_dtype = final_dtype
-        self.optim_state_device = storage_device
+        self.optim_state_device = state_storage_device
 
-        defaults = dict(lr=lr, beta=beta, beta2=beta2, eps=eps, wd=weight_decay, chunk_size=chunk_size, dtype=dtype, storage_device=storage_device) 
+        defaults = dict(lr=lr, beta=beta, beta2=beta2, eps=eps, wd=weight_decay, chunk_size=sync_chunk_size, dtype=final_dtype, storage_device=state_storage_device) 
         super().__init__(params, defaults)
 
         if mode not in ['g', 'm', 'c']:

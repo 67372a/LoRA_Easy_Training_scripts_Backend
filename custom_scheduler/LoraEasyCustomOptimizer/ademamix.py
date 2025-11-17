@@ -611,9 +611,9 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         amsgrad_min_decay_rate: float = 0.98,
         amsgrad_max_decay_rate: float = 0.98,
         torch_compile: bool = True,
-        chunk_size: int = 128,
-        dtype: str|torch.dtype = torch.bfloat16,
-        storage_device: str = "cpu",
+        sync_chunk_size: int = 128,
+        state_storage_dtype: str|torch.dtype = torch.bfloat16,
+        state_storage_device: str|torch.device = "cpu",
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -623,8 +623,8 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
 
-        if isinstance(dtype, str):
-            normalized_str_dtype = dtype.strip().lower()
+        if isinstance(state_storage_dtype, str):
+            normalized_str_dtype = state_storage_dtype.strip().lower()
             if normalized_str_dtype == "float32":
                 final_dtype = torch.float32
             elif normalized_str_dtype == "float16":
@@ -634,11 +634,11 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             else:
                 final_dtype = torch.bfloat16
         else:
-            final_dtype = dtype
+            final_dtype = state_storage_dtype
 
-        self.chunk_size = chunk_size
+        self.chunk_size = sync_chunk_size
         self.optim_state_dtype = final_dtype
-        self.optim_state_device = storage_device
+        self.optim_state_device = state_storage_device
 
         if not (0.0 <= update_strategy_scale <= 1.0):
             raise ValueError(f"update_strategy_scale ({update_strategy_scale}) must lie in [0.0, 1.0].")
@@ -671,9 +671,9 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             'amsgrad_max_decay_rate': amsgrad_max_decay_rate,
             'amsgrad_min_decay_rate': amsgrad_min_decay_rate,
             'use_newton_schulz':use_newton_schulz,
-            'chunk_size': chunk_size,
-            'dtype': dtype,
-            'storage_device':storage_device,
+            'chunk_size': sync_chunk_size,
+            'dtype': final_dtype,
+            'storage_device':state_storage_device,
         }
 
         super().__init__(params, defaults)
