@@ -525,18 +525,18 @@ class ABMOG(Optimizer):
                     else:
                         p.data.copy_(p_fp32, non_blocking=True)
                 if self.state_storage_dtype == torch.bfloat16:
-                    if dimcount < 1:
+                    if not group["bcos"]:
                         copy_stochastic_(state["denom"], denom)
                     copy_stochastic_(state["value_momentum"], value_momentum)
                 else:
-                    if dimcount < 1:
+                    if not group["bcos"]:
                         state["denom"].copy_(denom, non_blocking=True)
                     state["value_momentum"].copy_(value_momentum, non_blocking=True)
 
                 # ========= Check if we need to synchronize =========
                 # We synchronize after processing a chunk of parameters.
                 # The (i + 1) ensures we sync after the 1st, 2nd, ... chunk.
-                if (i + 1) % self.chunk_size == 0:
+                if (i + 1) % self.sync_chunk_size == 0:
                     torch.cuda.synchronize()
 
             # Final synchronization to handle the last partial chunk
