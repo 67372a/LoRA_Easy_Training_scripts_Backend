@@ -26,7 +26,7 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
         result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
 
         # copy the higher 16 bit into the target tensor
-        target.copy_(result.view(dtype=torch.float32), non_blocking=True))
+        target.copy_(result.view(dtype=torch.float32), non_blocking=True)
 
 # Original Spectral Clipping code by leloykun (https://leloykun.github.io/ponder/spectral-clipping/ https://github.com/leloykun/spectral_clip)
 
