@@ -26,7 +26,7 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
         result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
 
         # copy the higher 16 bit into the target tensor
-        target.copy_(result.view(dtype=torch.float32))
+        target.copy_(result.view(dtype=torch.float32), non_blocking=True))
 
 # Original Spectral Clipping code by leloykun (https://leloykun.github.io/ponder/spectral-clipping/ https://github.com/leloykun/spectral_clip)
 
@@ -144,7 +144,7 @@ class ABMOG(Optimizer):
     ABMOG: Adams-Bashforth-Moulton Orthogonal Gradient
 
     A Muon-styled optimizer which incorporates an Adams-Bashforth predictor and Adams-Moulton corrector
-    step to refine the gradient based on its history, accelerating convergence.
+    step to refine the gradient based on its history, accelerating convergence. Now includes bonus goodies (bcos, cautious, dual-norm gradient)
 
     Arguments:
         params (iterable):
@@ -174,8 +174,8 @@ class ABMOG(Optimizer):
             Normalizes with RMS on the input feature dimensions instead of utilizing gradient-wise RMS normalization (default: True).
         lowpass_grad (float):
             Pre-conditions the gradient via a low-pass filter that maintains the direction of the gradient. Higher = stronger filtering, 0 = disabled (default: 0.0).
-        sim_match (bool):
-            Filters the frequencies of the running average with the gradient of the current step's frequencies (default: False).
+        bcos (bool):
+            Uses a conditional estimator from facebookresearch's bcos as the denominator - https://github.com/facebookresearch/bcos (default: True).
         cautious_min (float):
             A value other than 1.0 will utilize cautious-stepping. At 0.0, this zeros out parts of the momentum which don't correlate with the current gradient's direction. 0.5 will halve it instead (default: 0.0).
         sgd_nesterov (bool):
@@ -194,7 +194,7 @@ class ABMOG(Optimizer):
         self,
         params,
         lr: float = 1e-4,
-        betas: float = (0.95, 0.99, 0.999),
+        betas: float = (0.95, 0.99),
         weight_decay: float = 0.0,
         weight_decay_rate: float = 0.995,
         spectral_adaptive: bool = True,
@@ -205,14 +205,34 @@ class ABMOG(Optimizer):
         adaptive_max: float = 1.,
         input_norm: bool = True,
         lowpass_grad: float = 0.0,
-        sim_match: bool = False,
+        bcos: bool = True,
         cautious_min: float = 0.0,
         sgd_nesterov: bool = True,
         abm_order: int = 4,
         abm_k: int = 5,
         abm_cpu_storage: bool = True,
         stochastic_fp: bool = True,
+        sync_chunk_size: int = 128,
+        state_storage_dtype: str|torch.dtype = torch.bfloat16,
+        state_storage_device: str|torch.device = "cpu",
     ):
+
+        if isinstance(state_storage_dtype, str):
+            normalized_str_dtype = state_storage_dtype.strip().lower()
+            if normalized_str_dtype == "float32":
+                final_dtype = torch.float32
+            elif normalized_str_dtype == "float16":
+                final_dtype = torch.float16
+            elif normalized_str_dtype == "bfloat16":
+                final_dtype = torch.bfloat16
+            else:
+                final_dtype = torch.bfloat16
+        else:
+            final_dtype = state_storage_dtype
+
+        self.sync_chunk_size = sync_chunk_size
+        self.state_storage_dtype = final_dtype
+        self.state_storage_device = state_storage_device
 
         self._init_lr = lr
 
@@ -268,13 +288,16 @@ class ABMOG(Optimizer):
             adaptive_max = adaptive_max,
             input_norm = input_norm,
             lowpass_grad = lowpass_grad,
-            sim_match = sim_match,
+            bcos = bcos,
             cautious_min = cautious_min,
             sgd_nesterov = sgd_nesterov,
             stochastic_fp = stochastic_fp,
             abm_order = abm_order,
             abm_k = abm_k,
             abm_cpu_storage = abm_cpu_storage,
+            sync_chunk_size = sync_chunk_size,
+            state_storage_dtype = final_dtype,
+            state_storage_device = state_storage_device,
         )
 
         super(ABMOG, self).__init__(params, defaults)
@@ -297,7 +320,7 @@ class ABMOG(Optimizer):
                 group['step'] = 1
 
             lr = group["lr"]
-            beta, beta2, beta3 = group["betas"][0], group["betas"][1], group["betas"][2]
+            beta, beta2 = group["betas"][0], group["betas"][1]
             weight_decay = group["weight_decay"]
             weight_decay_rate = group["weight_decay_rate"]
             abm_order, abm_k = group["abm_order"], group["abm_k"]
@@ -305,45 +328,81 @@ class ABMOG(Optimizer):
 
             step = group['step']
 
-            for p in group["params"]:
+            for i, p in enumerate(group["params"]):
                 if p.grad is None:
                     continue
                 state = self.state[p]
+                device = p.device
 
                 grad = p.grad.data
                 
                 # State initialization
                 if len(state) == 0:
-                    state["denom"] = torch.tensor(1.0, dtype=p.dtype, device=p.device)
-                    state["ratio"] = torch.tensor(1.0, dtype=p.dtype, device=p.device)
-                    state["value_momentum"] = torch.zeros_like(grad)
+                    if self.optim_state_device == "cpu":
+                        if not group["bcos"]:
+                            state["denom"] = torch.tensor(1.0, 
+                                                          dtype=self.state_storage_dtype, 
+                                                          device=self.state_storage_device).pin_memory()
+
+                        state["value_momentum"] = torch.zeros_like(
+                            p.data, 
+                            dtype=self.state_storage_dtype, 
+                            device=self.state_storage_device
+                        ).pin_memory()
+                    else:
+                        if not group["bcos"]:
+                            state["denom"] = torch.tensor(1.0, 
+                                                          dtype=self.state_storage_dtype, 
+                                                          device=self.state_storage_device)
+
+                        state["value_momentum"] = torch.zeros_like(
+                            p.data, 
+                            dtype=self.state_storage_dtype, 
+                            device=self.state_storage_device
+                        )
                     if abm_order > 1:
                         # Use a deque to efficiently manage fixed-size history
                         state["p_history"] = collections.deque(maxlen=abm_order)
 
+                # ========= Asynchronously queue all operations for this parameter =========
+                # Determine target GPU device for computation
+                if device.type == "cpu":
+                    # If param is on CPU, use default GPU for computation
+                    compute_device = torch.cuda.current_device()
+                else:
+                    # If param is on GPU, use its device
+                    compute_device = device
+
                 dimcount = grad.ndim
 
-                # Detach
-                p_fp32 = p.detach().clone()
-                denom = state["denom"].detach().clone()
-                ratio = state["ratio"].detach().clone()
-                value_momentum = state["value_momentum"].detach().clone()
+                # 1. Queue Host-to-Device copy
+                if not group["bcos"]:
+                    denom = state["denom"].to(
+                        compute_device, 
+                        non_blocking=True, 
+                        dtype=torch.float32
+                    )
+                value_momentum = state["value_momentum"].to(
+                    compute_device, 
+                    non_blocking=True, 
+                    dtype=torch.float32
+                )
+                grad = grad.to(torch.float32).to(compute_device, non_blocking=True)
+                p_fp32 = (
+                    p.to(compute_device, dtype=torch.float32, non_blocking=True)
+                )
 
-                if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
-                    grad = grad.to(torch.float32)
-                    denom = state['denom'].detach().clone().to(torch.float32)
-                    ratio = state['ratio'].detach().clone().to(torch.float32)
-                    value_momentum = state['value_momentum'].detach().clone().to(torch.float32)
-                    p_fp32 = p.detach().clone().to(torch.float32)
-
+                # Fast-to-slow beta (0 @ step 1, 0.5 @ step 2, 0.6667... @ step 3, repeating to a max of beta2)
                 slow_beta2 = ((beta2**(step) - beta2) / (beta2**(step) - 1.0))
-                slow_beta3 = ((beta3**(step) - beta3) / (beta3**(step) - 1.0))
 
+                # ADOPT-style clamp to prevent overshooting at the beginning
                 grad = grad.clamp(-step, step)
 
+                # Optional low-passing of gradient
                 if dimcount > 0 and group["lowpass_grad"] != 0:
                     grad = filter_grad(grad, fft_alpha=group["lowpass_grad"]).abs().mul_(grad.sign())
 
+                # Normalize the gradient per-channel (input_norm=True + dim > 0) or per-tensor
                 if dimcount >= 1 and group["input_norm"]:
                     grad_2d = reshape_to_2d(grad)
                     rms = grad_2d.pow(2).mean(dim=1, keepdim=True).sqrt_().clamp_min_(1e-16)
@@ -352,8 +411,7 @@ class ABMOG(Optimizer):
                     rms = grad.pow(2).mean().sqrt_().clamp_min_(1e-16)
                     grad = grad.div(rms)
 
-                current_denom = denom.sqrt()
-
+                # SGD-Like Nesterov or Adam-like Nesterov
                 if group["sgd_nesterov"]:
                     value_momentum = value_momentum.mul(beta).add_(grad)
                     exp_avg = value_momentum.mul(beta).add_(grad).mul(1. - beta)
@@ -361,39 +419,43 @@ class ABMOG(Optimizer):
                     value_momentum = value_momentum.lerp(grad, weight=1. - beta)
                     exp_avg = grad.lerp(value_momentum, weight=beta)
 
-                if dimcount > 0 and group["sim_match"]:
-                    noise = grad.sub(exp_avg)
+                # Get denom if not using bcos
+                if not group["bcos"]:
+                    current_denom = denom.sqrt()
 
+                # Muon-styled spectral norming, with scalar denominator
                 if dimcount >= 1:
                     exp_avg_2d = reshape_to_2d(exp_avg)
-
-                    if group["sim_match"]:
-                        noise_2d = reshape_to_2d(noise)
 
                     flip = exp_avg_2d.shape[0] < exp_avg_2d.shape[1]
                     if flip:
                         exp_avg_2d = exp_avg_2d.T
-                        if group["sim_match"]:
-                            noise_2d = noise_2d.T
 
                     exp_avg_2d = self.clip_func(exp_avg_2d, sigma_min=0., sigma_max=0., adaptive=group["spectral_adaptive"], ortho_dtype=group["spectral_clip_dtype"])
-                    if group["sim_match"]:
-                        exp_avg_2d = (exp_avg_2d + self.clip_func(noise_2d, sigma_min=0., sigma_max=0., adaptive=group["spectral_adaptive"], ortho_dtype=group["spectral_clip_dtype"])) / math.sqrt(2)
 
                     if flip:
                         exp_avg_2d = exp_avg_2d.T
                     full_step = exp_avg_2d.view_as(exp_avg)
-                    denom = denom.lerp(full_step.pow(2).mean(), weight=1. - slow_beta2)
-                    full_step = full_step.div(current_denom.clamp_min(1.0))
+                    if not group["bcos"]:
+                        denom = denom.lerp(full_step.pow(2).mean(), weight=1. - slow_beta2)
+                    else:
+                        current_denom = ((3 * beta**2 - 2 * beta**3) * full_step.square() + (1 - beta)**2 * grad.detach().square() + 2 * beta * (1-beta)**2 * full_step * grad.detach()).mean().sqrt()
+
+                    full_step = full_step.div(current_denom.clamp_min(1.0 / p.numel()**0.5))
                 else:
-                    denom = denom.lerp(exp_avg.pow(2), weight=1. - slow_beta2)
+                    if not group["bcos"]:
+                        denom = denom.lerp(exp_avg.pow(2), weight=1. - slow_beta2)
+                    else:
+                        current_denom = ((3 * beta**2 - 2 * beta**3) * exp_avg.square() + (1 - beta)**2 * grad.detach().square() + 2 * beta * (1-beta)**2 * exp_avg * grad.detach()).mean().sqrt()
                     full_step = exp_avg.atan2(current_denom).mul_(1.27323954474)
 
                 scale_factor_mask = torch.where(grad * full_step > 0, torch.ones_like(full_step), torch.ones_like(full_step) * group["cautious_min"]).to(full_step.dtype)
                 scale_factor_mask = scale_factor_mask.div(scale_factor_mask.mean().clamp_min_(1e-3))
 
+                # Cautious masking
                 full_step = full_step.mul(scale_factor_mask)
 
+                # Dual-norm gradient
                 if group["adaptive"]:
                     if dimcount >= 1 and group["input_norm"]:
                         if dimcount > 2:
@@ -411,57 +473,74 @@ class ABMOG(Optimizer):
                         scale_factor = (exp_avg * full_step).sum().clamp(group["adaptive_min"], group["adaptive_max"])
                         full_step = scale_factor * full_step
 
-                grad_norm = full_step.norm().clamp_min_(1e-16).div(p.numel())
-                step_size = lr * (grad_norm.atan2(ratio.sqrt()).mul_(1.27323954474))
-                ratio = ratio.lerp(grad_norm.pow(2), weight=1. - slow_beta3)
-
                 if weight_decay != 0:
-                    p_fp32.data = p_fp32.mul(1 - step_size * weight_decay*weight_decay_rate**group["step"])
+                    p_fp32.data = p_fp32.mul(1 - lr * weight_decay*weight_decay_rate**group["step"])
 
-                p_fp32.data.add_(full_step, alpha=-step_size)
+                # Add step
+                p_fp32.data.add_(full_step, alpha=-lr)
 
-                # -- Adams-Bashforth-Moulton Predictor-Corrector --
                 if abm_order > 1 and step % abm_k == 0:
-                    # Store history on CPU if requested
+                    # Store history on CPU
                     storage_device = 'cpu' if abm_cpu_storage else p_fp32.data.device
-                    
+
                     # Add current grad to history (left side is newest)
                     state["p_history"].appendleft(p_fp32.data.detach().to(storage_device))
-                    
+
                     history = list(state["p_history"])
                     current_k = len(history)
-                    
-                    # Wait for history buffer to fill before applying full method
+
+                    # Wait for history buffer to fill at least once
                     if current_k > 1:
                         # Bring history to calculation device
-                        history_gpu = [g for g in history] # .to(p_fp32.data.device, non_blocking=True)
-                        
+                        history_gpu = [g for g in history]
+
                         # Predictor (Adams-Bashforth)
                         ab_c = self.ab_coeffs[current_k]
                         p_pred = torch.zeros_like(state["p_history"][0])
                         for i in range(current_k):
                             p_pred.add_(history_gpu[i], alpha=ab_c[i])
-                        
+
                         # Corrector (Adams-Moulton)
                         am_c = self.am_coeffs[current_k]
                         # Use predicted grad as proxy for g_{n+1}
                         corrector_hist = [p_pred] + history_gpu[:-1]
-                        
+
                         p_corrected = torch.zeros_like(state["p_history"][0])
                         for i in range(current_k):
                             p_corrected.add_(corrector_hist[i], alpha=am_c[i])
-                        
-                        # The corrected gradient is now used for the rest of the step
+
                         p_fp32.data.copy_(p_corrected)
 
-                if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
-                    copy_stochastic_(state["denom"], denom)
-                    copy_stochastic_(state["ratio"], ratio)
-                    copy_stochastic_(state["value_momentum"], value_momentum)
-                    copy_stochastic_(p, p_fp32)
+                # 3. Queue Device-to-Host copy
+                # only use stochastic rounding if using bf16
+                if device.type == "cpu":
+                    if p.dtype == torch.bfloat16:
+                        copy_stochastic_(p.data, p_fp32)
+                    else:
+                        p.data.copy_(p_fp32)
                 else:
-                    state["denom"].copy_(denom)
-                    state["ratio"].copy_(ratio)
-                    state["value_momentum"].copy_(value_momentum)
-                    p.copy_(p_fp32)
+                    # Original GPU path
+                    if p.dtype == torch.bfloat16:
+                        copy_stochastic_(p, p_fp32)
+                    else:
+                        p.data.copy_(p_fp32, non_blocking=True)
+                if self.state_storage_dtype == torch.bfloat16:
+                    if dimcount < 1:
+                        copy_stochastic_(state["denom"], denom)
+                    copy_stochastic_(state["value_momentum"], value_momentum)
+                else:
+                    if dimcount < 1:
+                        state["denom"].copy_(denom, non_blocking=True)
+                    state["value_momentum"].copy_(value_momentum, non_blocking=True)
+
+                # ========= Check if we need to synchronize =========
+                # We synchronize after processing a chunk of parameters.
+                # The (i + 1) ensures we sync after the 1st, 2nd, ... chunk.
+                if (i + 1) % self.chunk_size == 0:
+                    torch.cuda.synchronize()
+
+            # Final synchronization to handle the last partial chunk
+            # This ensures all operations for the group are complete before exiting.
+            torch.cuda.synchronize()
+
         return loss
