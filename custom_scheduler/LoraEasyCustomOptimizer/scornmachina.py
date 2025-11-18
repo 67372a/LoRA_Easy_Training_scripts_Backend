@@ -5,11 +5,32 @@ from torch.optim import Optimizer
 from math import sqrt
 from enum import IntEnum
 import math
-from .utils import (_stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl, copy_stochastic_, adagc_global_clipping_calc, 
+from .utils import (_stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl, adagc_global_clipping_calc, 
                     _apply_adagc_clipping_and_update_gamma, _paper_orthograd, adaptive_eps)
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from typing import Optional
 import logging
+
+def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
+    # thanks to Nerogar for fast stochastic pytorch implementation
+    # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
+    with torch.no_grad():
+        # create a random 16 bit integer using torch.randint with explicit shape
+        result = torch.randint_like(
+            source,
+            dtype=torch.int32,
+            low=0,
+            high=(1 << 16),
+        )
+
+        # add the random number to the lower 16 bit of the mantissa
+        result.add_(source.view(dtype=torch.int32))
+
+        # mask off the lower 16 bit of the mantissa
+        result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
+
+        # copy the higher 16 bit into the target tensor
+        target.copy_(result.view(dtype=torch.float32), non_blocking=True)
 
 # https://github.com/kozistr/pytorch_optimizer/blob/6397d56279ad80b26c4bba7fb4b04852b517fdeb/pytorch_optimizer/optimizer/shampoo_utils.py#L533
 def zero_power_via_newton_schulz_6(
@@ -403,6 +424,9 @@ class SCORNMachina(Optimizer):
         amsgrad: bool = False,
         amsgrad_decay_rate: Optional[float] = None,
         torch_compile: bool = False,
+        sync_chunk_size: int = 128,
+        state_storage_dtype: str|torch.dtype = torch.bfloat16,
+        state_storage_device: str|torch.device = "cpu",
         **kwargs,
     ):
         
@@ -411,6 +435,23 @@ class SCORNMachina(Optimizer):
             logging.warning(
                 f"Optimizer argument '{key}' passed into SCORNMachina. It will be ignored."
             )
+
+        if isinstance(state_storage_dtype, str):
+            normalized_str_dtype = state_storage_dtype.strip().lower()
+            if normalized_str_dtype == "float32":
+                final_dtype = torch.float32
+            elif normalized_str_dtype == "float16":
+                final_dtype = torch.float16
+            elif normalized_str_dtype == "bfloat16":
+                final_dtype = torch.bfloat16
+            else:
+                final_dtype = torch.bfloat16
+        else:
+            final_dtype = state_storage_dtype
+
+        self.sync_chunk_size = sync_chunk_size
+        self.state_storage_dtype = final_dtype
+        self.state_storage_device = state_storage_device
 
         self._init_lr = lr
         self.use_adagc = use_adagc
@@ -446,6 +487,9 @@ class SCORNMachina(Optimizer):
             amsgrad = amsgrad,
             amsgrad_decay_rate = amsgrad_decay_rate,
             torch_compile = torch_compile,
+            sync_chunk_size = sync_chunk_size,
+            state_storage_dtype = final_dtype,
+            state_storage_device = state_storage_device,
         )
 
         super(SCORNMachina, self).__init__(params, defaults)
@@ -467,16 +511,32 @@ class SCORNMachina(Optimizer):
                 state = self.state[p]
                 norm.init(p)
 
-                # Exponential moving average of gradient values
-                state["ema"] = torch.zeros_like(p)
-                # Exponential moving average of squared gradient values
-                state["ema_squared"] = torch.zeros_like(p)
-                # Optional resets
                 if group["reset_interval"] > 0:
                     state["times_zero"] = 0
-                    state["steps_since_reset"] = 0
+                    state["steps_since_reset"] = 1
+
+                # Exponential moving average of gradient values
+                state["ema"] = torch.zeros_like(p, 
+                                                dtype=self.state_storage_dtype, 
+                                                device=self.state_storage_device)
+                # Exponential moving average of squared gradient values
+                state["ema_squared"] = torch.zeros_like(p, 
+                                                        dtype=self.state_storage_dtype, 
+                                                        device=self.state_storage_device)
+
                 if group["focus_ratio"] > 0.0:
-                    state["pbar"] = torch.zeros_like(p)
+                    state["pbar"] = torch.zeros_like(p, 
+                                                        dtype=self.state_storage_dtype, 
+                                                        device=self.state_storage_device)
+
+                if self.state_storage_device == "cpu":
+                    # Exponential moving average of gradient values
+                    state["ema"] = state["ema"].pin_memory()
+                    # Exponential moving average of squared gradient values
+                    state["ema_squared"] = state["ema_squared"].pin_memory()
+
+                    if group["focus_ratio"] > 0.0:
+                        state["pbar"] = state["pbar"].pin_memory()
 
 
     @torch.no_grad()
@@ -524,7 +584,7 @@ class SCORNMachina(Optimizer):
             if spectral_update_scale > 0.:
                 norm = build_lmo_norm(LMONorm.AUTO)
 
-            for p in group["params"]:
+            for i, p in enumerate(group["params"]):
                 if p.grad is None:
                     continue
 
@@ -532,38 +592,71 @@ class SCORNMachina(Optimizer):
                     raise NoSparseGradientError(str(self))
 
                 state = self.state[p]
+                device = p.device
+
+                grad = p.grad.data
 
                 # State initialization
                 if len(state) == 0:
                     norm.init(p)
 
-                    # Exponential moving average of gradient values
-                    state["ema"] = torch.zeros_like(p)
-                    # Exponential moving average of squared gradient values
-                    state["ema_squared"] = torch.zeros_like(p)
-                    # Optional resets
                     if group["reset_interval"] > 0:
                         state["times_zero"] = 0
                         state["steps_since_reset"] = 1
+
+                    # Exponential moving average of gradient values
+                    state["ema"] = torch.zeros_like(p, 
+                                                    dtype=self.state_storage_dtype, 
+                                                    device=self.state_storage_device)
+                    # Exponential moving average of squared gradient values
+                    state["ema_squared"] = torch.zeros_like(p, 
+                                                            dtype=self.state_storage_dtype, 
+                                                            device=self.state_storage_device)
+
                     if group["focus_ratio"] > 0.0:
-                        state["pbar"] = torch.zeros_like(p)
+                        state["pbar"] = torch.zeros_like(p, 
+                                                         dtype=self.state_storage_dtype, 
+                                                         device=self.state_storage_device)
 
-                grad = p.grad                        
+                    if self.state_storage_device == "cpu":
+                        # Exponential moving average of gradient values
+                        state["ema"] = state["ema"].pin_memory()
+                        # Exponential moving average of squared gradient values
+                        state["ema_squared"] = state["ema_squared"].pin_memory()
 
+                        if group["focus_ratio"] > 0.0:
+                            state["pbar"] = state["pbar"].pin_memory()                     
+
+                # ========= Asynchronously queue all operations for this parameter =========
+                # Determine target GPU device for computation
+                if device.type == "cpu":
+                    # If param is on CPU, use default GPU for computation
+                    compute_device = torch.cuda.current_device()
+                else:
+                    # If param is on GPU, use its device
+                    compute_device = device
+
+                # 1. Queue Host-to-Device copy
                 if focus_ratio > 0.0:
-                    pbar = state["pbar"]
-                ema = state["ema"]
-                ema_squared = state["ema_squared"]
-
-                p_fp32 = p
-                # Unpack
-                if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
-                    grad = grad.to(torch.float32)
-                    if focus_ratio > 0.0:
-                        pbar = pbar.to(torch.float32)
-                    ema = ema.to(torch.float32)
-                    ema_squared = ema_squared.to(torch.float32)
-                    p_fp32 = p.to(torch.float32)
+                    pbar = state["pbar"].to(
+                        compute_device, 
+                        non_blocking=True, 
+                        dtype=torch.float32
+                    )
+                ema = state["ema"].to(
+                    compute_device, 
+                    non_blocking=True, 
+                    dtype=torch.float32
+                )
+                ema_squared = state["ema_squared"].to(
+                    compute_device, 
+                    non_blocking=True, 
+                    dtype=torch.float32
+                )
+                grad = grad.to(torch.float32).to(compute_device, non_blocking=True)
+                p_fp32 = (
+                    p.to(compute_device, dtype=torch.float32, non_blocking=True)
+                )
 
                 if apply_ortho_to_group and use_orthograd:
                     _paper_orthograd(param=p_fp32, grad=grad, alpha=orthograd_alpha)
@@ -663,12 +756,41 @@ class SCORNMachina(Optimizer):
 
                     p_fp32.add_(full_step.clamp_(-adopt_clip, adopt_clip), alpha=-step_size)
                     
-                if p.dtype in {torch.float16, torch.bfloat16} and group["stochastic_fp"]:
-                    copy_stochastic_(state["ema"], ema)
-                    copy_stochastic_(state["ema_squared"], ema_squared)
+                # 3. Queue Device-to-Host copy
+                # only use stochastic rounding if using bf16
+                if device.type == "cpu":
+                    if p.dtype == torch.bfloat16:
+                        copy_stochastic_(p.data, p_fp32)
+                    else:
+                        p.data.copy_(p_fp32)
+                else:
+                    # Original GPU path
+                    if p.dtype == torch.bfloat16:
+                        copy_stochastic_(p, p_fp32)
+                    else:
+                        p.data.copy_(p_fp32, non_blocking=True)
+                if self.state_storage_dtype == torch.bfloat16:
                     if focus_ratio > 0.0:
                         copy_stochastic_(state["pbar"], pbar)
-                    copy_stochastic_(p, p_fp32)
+                    copy_stochastic_(state["ema"], ema)
+                    copy_stochastic_(state["ema_squared"], ema_squared)
+                else:
+                    if focus_ratio > 0.0:
+                        state["pbar"].copy_(pbar, non_blocking=True)
+                    state["ema"].copy_(ema, non_blocking=True)
+                    state["ema_squared"].copy_(ema_squared, non_blocking=True)
+
                 if group["reset_interval"] > 0:
                     state["steps_since_reset"] += 1
+
+                # ========= Check if we need to synchronize =========
+                # We synchronize after processing a chunk of parameters.
+                # The (i + 1) ensures we sync after the 1st, 2nd, ... chunk.
+                if (i + 1) % self.sync_chunk_size == 0:
+                    torch.cuda.synchronize()
+
+            # Final synchronization to handle the last partial chunk
+            # This ensures all operations for the group are complete before exiting.
+            torch.cuda.synchronize()
+
         return loss
