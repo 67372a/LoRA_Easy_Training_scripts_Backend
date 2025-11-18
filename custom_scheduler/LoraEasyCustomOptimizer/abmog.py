@@ -338,7 +338,7 @@ class ABMOG(Optimizer):
                 
                 # State initialization
                 if len(state) == 0:
-                    if self.optim_state_device == "cpu":
+                    if self.state_storage_device == "cpu":
                         if not group["bcos"]:
                             state["denom"] = torch.tensor(1.0, 
                                                           dtype=self.state_storage_dtype, 
