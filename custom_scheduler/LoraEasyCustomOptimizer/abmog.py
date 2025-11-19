@@ -441,7 +441,7 @@ class ABMOG(Optimizer):
                     else:
                         current_denom = ((3 * beta**2 - 2 * beta**3) * full_step.square() + (1 - beta)**2 * grad.detach().square() + 2 * beta * (1-beta)**2 * full_step * grad.detach()).mean().sqrt()
 
-                    full_step = full_step.div(current_denom.clamp_min(1.0 / p.numel()**0.5))
+                    full_step = full_step.div(current_denom.clamp_min(1.0))
                 else:
                     if not group["bcos"]:
                         denom = denom.lerp(exp_avg.pow(2), weight=1. - slow_beta2)
