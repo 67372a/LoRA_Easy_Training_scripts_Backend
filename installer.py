@@ -102,12 +102,12 @@ def setup_venv(venv_pip):
     )
 
     subprocess.check_call(
-        f"{venv_pip} install -U --force-reinstall --no-deps git+https://github.com/67372a/RamTorch",
+        f"{venv_pip} install -U --force-reinstall --no-deps https://github.com/67372a/RamTorch",
         shell=PLATFORM == "linux",
     )
 
     subprocess.check_call(
-        f"{venv_pip} install -U --force-reinstall --no-deps git+https://github.com/67372a/customized-optimizers",
+        f"{venv_pip} install -U --force-reinstall --no-deps https://github.com/67372a/customized-optimizers",
         shell=PLATFORM == "linux",
     )
         
