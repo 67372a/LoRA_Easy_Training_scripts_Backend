@@ -7,11 +7,17 @@ import shutil
 
 PLATFORM = "windows" if sys.platform == "win32" else "linux" if sys.platform == "linux" else ""
 
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 def check_version_and_platform() -> bool:
     version = sys.version_info
-    return False if version.major != 3 and version.minor < 10 else PLATFORM != ""
-
+    if not (False if version.major != 3 and version.minor < 11 else sys.platform in ["win32", "linux"]):
+        logger.error("ERROR: you have too old of a python version, please use python 3.11")
+        return False
+    return True
 
 def check_git_install() -> bool:
     try:
@@ -22,7 +28,7 @@ def check_git_install() -> bool:
             shell=PLATFORM == "linux",
         )
     except FileNotFoundError:
-        print("ERROR: git is not installed, please install git")
+        logger.error("ERROR: git is not installed, please install git")
         return False
     return True
 
@@ -35,7 +41,7 @@ def set_execution_policy() -> bool:
         try:
             subprocess.check_call(str(Path("installables/change_execution_policy_backup.bat")))
         except subprocess.SubprocessError as e:
-            print(f"Failed to change the execution policy with error:\n {e}")
+            logger.error(f"Failed to change the execution policy with error:\n {e}")
             return False
     return True
 
@@ -47,7 +53,7 @@ def setup_accelerate(platform: str) -> None:
         path = Path.home()
     path = path.joinpath(".cache/huggingface/accelerate/default_config.yaml")
     if path.exists():
-        print("Default accelerate config already exists, skipping.")
+        logger.info("Default accelerate config already exists, skipping.")
         return
     if not path.parent.exists():
         path.parent.mkdir(parents=True)
@@ -79,6 +85,12 @@ def setup_accelerate(platform: str) -> None:
 
 
 def setup_venv(venv_pip):
+    if PLATFORM == "windows":
+        python = Path("venv/Scripts/python.exe")
+    else:
+        python = Path("venv/bin/python")
+
+    subprocess.check_call(f"{python} -m pip install --upgrade pip", shell=PLATFORM == "linux")
     subprocess.check_call(
         f"{venv_pip} install -U typing-extensions==4.15.0",
         shell=PLATFORM == "linux",
@@ -165,7 +177,7 @@ def main():
     subprocess.check_call("git submodule update --init --recursive", shell=PLATFORM == "linux")
 
     if PLATFORM == "windows":
-        print("setting execution policy to unrestricted")
+        logger.info("setting execution policy to unrestricted")
         if not set_execution_policy():
             quit()
 
@@ -177,21 +189,23 @@ def main():
     os.chdir("sd_scripts")
     if PLATFORM == "windows":
         pip = Path("venv/Scripts/pip.exe")
+        python = Path("venv/Scripts/python.exe")
     else:
         pip = Path("venv/bin/pip")
+        python = Path("venv/bin/python")
 
-    print("creating venv and installing requirements")
+    logger.info("creating venv and installing requirements")
     subprocess.check_call(f"{sys.executable} -m venv venv", shell=PLATFORM == "linux")
 
     if len(sys.argv) > 1 and sys.argv[1] == "colab":
         setup_colab(pip)
-        print("completed installing")
+        logger.info("completed installing")
         quit()
 
     setup_venv(pip)
     setup_accelerate(PLATFORM)
 
-    print("Completed installing, you can run the server via the run.bat or run.sh files")
+    logger.info("Completed installing, you can run the server via the run.bat or run.sh files")
 
 
 if __name__ == "__main__":
