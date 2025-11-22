@@ -5,6 +5,9 @@ from torch.optim import Optimizer
 from math import sqrt
 from typing import Callable, Tuple
 import math
+import logging
+
+logger = logging.getLogger(__name__)
 
 def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     # thanks to Nerogar for fast stochastic pytorch implementation
@@ -239,6 +242,12 @@ class OCGOpt(Optimizer):
         state_storage_device: str|torch.device = "cpu",
         **kwargs,
     ):
+        
+        # Loop over the keys in the kwargs dictionary
+        for key in kwargs:
+            logging.warning(
+                f"Unrecognized optimizer argument '{key}'. It will be ignored."
+            )
 
         if isinstance(state_storage_dtype, str):
             normalized_str_dtype = state_storage_dtype.strip().lower()
