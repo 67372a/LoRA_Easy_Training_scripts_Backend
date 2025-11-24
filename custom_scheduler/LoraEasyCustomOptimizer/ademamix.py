@@ -536,7 +536,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                         device=self.state_storage_device
                     )
 
-                    if self.optim_state_device == "cpu":
+                    if self.state_storage_device == "cpu":
                         state["exp_avg"] = state["exp_avg"].pin_memory()
                         state["exp_avg_sq"] = state["exp_avg_sq"].pin_memory()
 
@@ -725,9 +725,9 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         else:
             final_dtype = state_storage_dtype
 
-        self.chunk_size = sync_chunk_size
-        self.optim_state_dtype = final_dtype
-        self.optim_state_device = state_storage_device
+        self.sync_chunk_size = sync_chunk_size
+        self.state_storage_dtype = final_dtype
+        self.state_storage_device = state_storage_device
 
         if not (0.0 <= update_strategy_scale <= 1.0):
             raise ValueError(f"update_strategy_scale ({update_strategy_scale}) must lie in [0.0, 1.0].")
@@ -760,9 +760,9 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
             'amsgrad_max_decay_rate': amsgrad_max_decay_rate,
             'amsgrad_min_decay_rate': amsgrad_min_decay_rate,
             'use_newton_schulz':use_newton_schulz,
-            'chunk_size': sync_chunk_size,
-            'dtype': final_dtype,
-            'storage_device':state_storage_device,
+            'sync_chunk_size': sync_chunk_size,
+            'state_storage_dtype': final_dtype,
+            'state_storage_device':state_storage_device,
         }
 
         super().__init__(params, defaults)
@@ -849,19 +849,19 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                 state = self.state[p]
 
                 if len(state) == 0:
-                    if self.optim_state_device == "cpu":
+                    if self.state_storage_device == "cpu":
                         state["exp_avg"] = torch.zeros_like(
-                            p.data, dtype=self.optim_state_dtype, device=self.optim_state_device
+                            p.data, dtype=self.state_storage_dtype, device=self.state_storage_device
                         ).pin_memory()
                         state["exp_avg_sq"] = torch.zeros_like(
-                            p.data, dtype=self.optim_state_dtype, device=self.optim_state_device
+                            p.data, dtype=self.state_storage_dtype, device=self.state_storage_device
                         ).pin_memory()
                     else:
                         state["exp_avg"] = torch.zeros_like(
-                            p.data, dtype=self.optim_state_dtype, device=self.optim_state_device
+                            p.data, dtype=self.state_storage_dtype, device=self.state_storage_device
                         )
                         state["exp_avg_sq"] = torch.zeros_like(
-                            p.data, dtype=self.optim_state_dtype, device=self.optim_state_device
+                            p.data, dtype=self.state_storage_dtype, device=self.state_storage_device
                         )
 
                 # ========= Asynchronously queue all operations for this parameter =========
@@ -996,7 +996,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                         copy_stochastic_(p, p_fp32)
                     else:
                         p.data.copy_(p_fp32, non_blocking=True)
-                if self.optim_state_dtype == torch.bfloat16:
+                if self.state_storage_dtype == torch.bfloat16:
                     copy_stochastic_(state["exp_avg"], exp_avg)
                     copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
                 else:
@@ -1006,7 +1006,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
                 # ========= Check if we need to synchronize =========
                 # We synchronize after processing a chunk of parameters.
                 # The (i + 1) ensures we sync after the 1st, 2nd, ... chunk.
-                if (i + 1) % self.chunk_size == 0:
+                if (i + 1) % self.sync_chunk_size == 0:
                     torch.cuda.synchronize()
 
             # Final synchronization to handle the last partial chunk

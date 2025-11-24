@@ -80,11 +80,11 @@ class BCOS(Optimizer):
         else:
             final_dtype = state_storage_dtype
 
-        self.chunk_size = sync_chunk_size
-        self.optim_state_dtype = final_dtype
-        self.optim_state_device = state_storage_device
+        self.sync_chunk_size = sync_chunk_size
+        self.state_storage_dtype = final_dtype
+        self.state_storage_device = state_storage_device
 
-        defaults = dict(lr=lr, beta=beta, beta2=beta2, eps=eps, wd=weight_decay, chunk_size=sync_chunk_size, dtype=final_dtype, storage_device=state_storage_device) 
+        defaults = dict(lr=lr, beta=beta, beta2=beta2, eps=eps, wd=weight_decay, sync_chunk_size=sync_chunk_size, state_storage_dtype=final_dtype, state_storage_device=state_storage_device) 
         super().__init__(params, defaults)
 
         if mode not in ['g', 'm', 'c']:
@@ -121,20 +121,20 @@ class BCOS(Optimizer):
                 state = self.state[p]
 
                 # initialize optimizer states for specific modes
-                if self.optim_state_device == "cpu":
+                if self.state_storage_device == "cpu":
                     if self.mode in ['m', 'c'] and 'm' not in state:
-                        state["m"] = grad.detach().to(dtype=self.optim_state_dtype, 
-                                                    device=self.optim_state_device).pin_memory()
+                        state["m"] = grad.detach().to(dtype=self.state_storage_dtype, 
+                                                    device=self.state_storage_device).pin_memory()
                     if self.mode in ['g', 'm'] and 'v' not in state:
-                        state["v"] = grad.detach().to(dtype=self.optim_state_dtype, 
-                                                    device=self.optim_state_device).pin_memory()
+                        state["v"] = grad.detach().to(dtype=self.state_storage_dtype, 
+                                                    device=self.state_storage_device).pin_memory()
                 else:
                     if self.mode in ['m', 'c'] and 'm' not in state:
-                        state["m"] = grad.detach().to(dtype=self.optim_state_dtype, 
-                                                    device=self.optim_state_device)
+                        state["m"] = grad.detach().to(dtype=self.state_storage_dtype, 
+                                                    device=self.state_storage_device)
                     if self.mode in ['g', 'm'] and 'v' not in state:
-                        state["v"] = grad.detach().to(dtype=self.optim_state_dtype, 
-                                                    device=self.optim_state_device)
+                        state["v"] = grad.detach().to(dtype=self.state_storage_dtype, 
+                                                    device=self.state_storage_device)
                     
                 # ========= Asynchronously queue all operations for this parameter =========
                 # Determine target GPU device for computation
@@ -207,7 +207,7 @@ class BCOS(Optimizer):
                         copy_stochastic_(p, p_fp32)
                     else:
                         p.data.copy_(p_fp32, non_blocking=True)
-                if self.optim_state_dtype == torch.bfloat16:
+                if self.state_storage_dtype == torch.bfloat16:
                     if self.mode in ['m', 'c']:
                         copy_stochastic_(state["m"], m)
                     if self.mode in ['g', 'm']:
@@ -221,7 +221,7 @@ class BCOS(Optimizer):
                 # ========= Check if we need to synchronize =========
                 # We synchronize after processing a chunk of parameters.
                 # The (i + 1) ensures we sync after the 1st, 2nd, ... chunk.
-                if (i + 1) % self.chunk_size == 0:
+                if (i + 1) % self.sync_chunk_size == 0:
                     torch.cuda.synchronize()
 
             # Final synchronization to handle the last partial chunk
