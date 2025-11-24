@@ -10,6 +10,10 @@ from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from .utils import UPDATE_STRATEGY, NORM_TYPE, agc, _paper_orthograd, adaptive_eps, _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     # thanks to Nerogar for fast stochastic pytorch implementation
@@ -380,6 +384,9 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         use_stable_spam_clipping:bool = False,
         use_adopt: bool = False,
         torch_compile: bool = False,
+        sync_chunk_size: int = 128,
+        state_storage_dtype: str|torch.dtype = torch.bfloat16,
+        state_storage_device: str|torch.device = "cpu",
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -388,6 +395,29 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         self.validate_non_negative(min_beta1, 'min_beta1')
         self.validate_non_negative(weight_decay, 'weight_decay')
         self.validate_non_negative(eps, 'eps')
+
+        # Loop over the keys in the kwargs dictionary
+        for key in kwargs:
+            logging.warning(
+                f"Unrecognized optimizer argument '{key}'. It will be ignored."
+            )
+        
+        if isinstance(state_storage_dtype, str):
+            normalized_str_dtype = state_storage_dtype.strip().lower()
+            if normalized_str_dtype == "float32":
+                final_dtype = torch.float32
+            elif normalized_str_dtype == "float16":
+                final_dtype = torch.float16
+            elif normalized_str_dtype == "bfloat16":
+                final_dtype = torch.bfloat16
+            else:
+                final_dtype = torch.bfloat16
+        else:
+            final_dtype = state_storage_dtype
+
+        self.sync_chunk_size = sync_chunk_size
+        self.state_storage_dtype = final_dtype
+        self.state_storage_device = state_storage_device
 
         # Override zero to tiny
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
@@ -418,6 +448,9 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             'use_stable_spam_clipping':use_stable_spam_clipping,
             'use_adopt':use_adopt,
             'torch_compile': torch_compile,
+            'sync_chunk_size': sync_chunk_size,
+            'state_storage_dtype': final_dtype,
+            'state_storage_device': state_storage_device,
         }
 
         super().__init__(params, defaults)
@@ -479,7 +512,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                     group['step'], beta_end=beta1, beta_start=group['min_beta1'], warmup=group['beta1_warmup']
                 )
 
-            for p in group['params']:
+            for i, p in enumerate(group["params"]):
                 if p.grad is None:
                     continue
 
@@ -489,19 +522,50 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                     raise NoSparseGradientError(str(self))
 
                 state = self.state[p]
+                device = p.device
 
                 if len(state) == 0:
-                    state['exp_avg'] = torch.zeros_like(p)
-                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    state["exp_avg"] = torch.zeros_like(
+                        p.data, 
+                        dtype=self.state_storage_dtype, 
+                        device=self.state_storage_device
+                    )
+                    state["exp_avg_sq"] = torch.zeros_like(
+                        p.data, 
+                        dtype=self.state_storage_dtype, 
+                        device=self.state_storage_device
+                    )
+
+                    if self.optim_state_device == "cpu":
+                        state["exp_avg"] = state["exp_avg"].pin_memory()
+                        state["exp_avg_sq"] = state["exp_avg_sq"].pin_memory()
+
                     state['num_sum'] = 0.0
                     state['den_sum'] = 0.0
 
-                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                # ========= Asynchronously queue all operations for this parameter =========
+                # Determine target GPU device for computation
+                if device.type == "cpu":
+                    # If param is on CPU, use default GPU for computation
+                    compute_device = torch.cuda.current_device()
+                else:
+                    # If param is on GPU, use its device
+                    compute_device = device
 
-                if p.dtype == torch.bfloat16:
-                    grad = grad.to(torch.float32)
-                    p_fp32 = p.to(torch.float32)
-                    exp_avg, exp_avg_sq = exp_avg.to(torch.float32), exp_avg_sq.to(torch.float32)
+                exp_avg = state["exp_avg"].to(
+                    compute_device, 
+                    non_blocking=True, 
+                    dtype=torch.float32
+                )
+                exp_avg_sq = state["exp_avg_sq"].to(
+                    compute_device, 
+                    non_blocking=True, 
+                    dtype=torch.float32
+                )
+                grad = grad.to(torch.float32).to(compute_device, non_blocking=True)
+                p_fp32 = (
+                    p.to(compute_device, dtype=torch.float32, non_blocking=True)
+                )
 
                 if apply_ortho_to_group and use_orthograd:
                     _paper_orthograd(param=p_fp32, grad=grad)
@@ -568,10 +632,35 @@ class SimplifiedAdEMAMix(BaseOptimizer):
 
                     p_fp32.add_(update, alpha=-group['lr'])
 
-                    if p.dtype == torch.bfloat16:
+                    # 3. Queue Device-to-Host copy
+                    # only use stochastic rounding if using bf16
+                    if device.type == "cpu":
+                        if p.dtype == torch.bfloat16:
+                            copy_stochastic_(p.data, p_fp32)
+                        else:
+                            p.data.copy_(p_fp32)
+                    else:
+                        # Original GPU path
+                        if p.dtype == torch.bfloat16:
+                            copy_stochastic_(p, p_fp32)
+                        else:
+                            p.data.copy_(p_fp32, non_blocking=True)
+                    if self.state_storage_dtype == torch.bfloat16:
                         copy_stochastic_(state["exp_avg"], exp_avg)
                         copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
-                        copy_stochastic_(p, p_fp32)
+                    else:
+                        state["exp_avg"].copy_(exp_avg, non_blocking=True)
+                        state["exp_avg_sq"].copy_(exp_avg_sq, non_blocking=True)
+
+                # ========= Check if we need to synchronize =========
+                # We synchronize after processing a chunk of parameters.
+                # The (i + 1) ensures we sync after the 1st, 2nd, ... chunk.
+                if (i + 1) % self.sync_chunk_size == 0:
+                    torch.cuda.synchronize()
+
+            # Final synchronization to handle the last partial chunk
+            # This ensures all operations for the group are complete before exiting.
+            torch.cuda.synchronize()
 
         return loss
     
