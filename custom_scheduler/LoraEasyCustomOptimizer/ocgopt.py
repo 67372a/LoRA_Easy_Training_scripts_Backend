@@ -13,7 +13,7 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     # thanks to Nerogar for fast stochastic pytorch implementation
     # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
     with torch.no_grad():
-        # create a random 16 bit integer using torch.randint with explicit shape
+        # create a random 16 bit integer
         result = torch.randint_like(
             source,
             dtype=torch.int32,
