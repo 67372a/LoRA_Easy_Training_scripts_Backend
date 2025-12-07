@@ -216,6 +216,9 @@ class OCGOpt(Optimizer):
             A value other than 1.0 will utilize cautious-stepping. At 0.0, this zeros out parts of the momentum which don't correlate with the current gradient's direction. 0.5 will halve it instead (default: 0.0).
         stochastic_fp (bool):
             Utilize stochastic rounding for bf16 and fp16 tensors. (default: True).
+        kahan_summation (bool):
+            Utilize Kahan Summation for the parameter update. This maintains a high-precision error buffer to effectively effectively double the precision of the accumulation step. 
+            Excellent for bfloat16 training, compatible with stochastic rounding. (default: False).
     """
 
     def __init__(
@@ -237,6 +240,7 @@ class OCGOpt(Optimizer):
         sim_match: bool = False,
         cautious_min: float = 0.0,
         stochastic_fp: bool = True,
+        kahan_summation: bool = False,
         sync_chunk_size: int = 128,
         state_storage_dtype: str|torch.dtype = torch.bfloat16,
         state_storage_device: str|torch.device = "cpu",
@@ -295,6 +299,7 @@ class OCGOpt(Optimizer):
             sim_match = sim_match,
             cautious_min = cautious_min,
             stochastic_fp = stochastic_fp,
+            kahan_summation = kahan_summation,
             sync_chunk_size = sync_chunk_size,
             state_storage_dtype = final_dtype,
             state_storage_device = state_storage_device,
@@ -324,6 +329,8 @@ class OCGOpt(Optimizer):
             weight_decay = group["weight_decay"]
             weight_decay_rate = group["weight_decay_rate"]
             centralization = group["centralization"]
+            stochastic_fp = group["stochastic_fp"]
+            kahan_sum = group["kahan_summation"]
 
             step = group['step']
 
@@ -336,6 +343,8 @@ class OCGOpt(Optimizer):
                 grad = p.grad.data
 
                 dimcount = grad.ndim
+
+                use_kahan = kahan_sum and (p.dtype == torch.bfloat16 or p.dtype == torch.float16)
 
                 if len(state) == 0:
                     if self.state_storage_device == "cpu":
@@ -356,6 +365,12 @@ class OCGOpt(Optimizer):
                             dtype=self.state_storage_dtype, 
                             device=self.state_storage_device
                         ).pin_memory()
+                        if use_kahan:
+                            state["kahan_comp"] = torch.zeros_like(
+                                p.data,
+                                dtype=torch.float32,
+                                device=self.state_storage_device
+                            ).pin_memory()
                     else:
                         if dimcount < 1:
                             state["denom"] = torch.ones_like(
@@ -374,6 +389,22 @@ class OCGOpt(Optimizer):
                             dtype=self.state_storage_dtype, 
                             device=self.state_storage_device
                         )
+                        if use_kahan:
+                            state["kahan_comp"] = torch.zeros_like(
+                                p.data,
+                                dtype=self.state_storage_dtype,
+                                device=self.state_storage_device
+                            )
+                
+                # Check for late activation of Kahan Summation
+                if use_kahan and "kahan_comp" not in state:
+                     state["kahan_comp"] = torch.zeros_like(
+                        p.data,
+                        dtype=torch.float32,
+                        device=self.state_storage_device
+                    )
+                     if self.state_storage_device == "cpu":
+                         state["kahan_comp"] = state["kahan_comp"].pin_memory()
 
                 # ========= Asynchronously queue all operations for this parameter =========
                 # Determine target GPU device for computation
@@ -514,21 +545,99 @@ class OCGOpt(Optimizer):
 
                     full_step = full_step.add(grad_weights, alpha=weight_decay * weight_decay_rate**group["step"])
 
-                p_fp32.data.add_(full_step, alpha=-lr)
-  
-                # 3. Queue Device-to-Host copy
-                # only use stochastic rounding if using bf16
-                if device.type == "cpu":
-                    if p.dtype == torch.bfloat16:
-                        copy_stochastic_(p.data, p_fp32)
+                # Apply Update (with optional Kahan Summation)
+                update_step = full_step.mul(-lr)
+
+                if use_kahan:
+                    # Kahan Summation Logic
+                    # Kahan effectively works by subtracting the error ("compensation") from the *input* of the summation.
+                    # This compensation accumulates the bits that were too small to be added to the weight in previous steps.
+                    
+                    kahan_comp = state["kahan_comp"].to(compute_device, non_blocking=True, dtype=torch.float32)
+                    
+                    # 1. Adjust the update by the compensation
+                    # y = update - comp
+                    update_step = update_step.sub(kahan_comp)
+                    
+                    # 2. Add adjusted update to the high-precision weight
+                    # t = sum + y (stored in p_fp32 temporarily)
+                    # Note: p_fp32 currently holds the *old* exact weight
+                    p_fp32.add_(update_step) 
+
+                    # 3. Simulate the lossy update to calculate new compensation
+                    # We need to calculate what the value *will* be when stored in low precision.
+                    # Comp_new = (P_new_low_prec - P_old_exact) - y  <-- Standard Kahan, but here we have the updated exact sum.
+                    # Simpler derivation: Comp_new = P_new_low_prec_as_float - P_new_exact
+                    # This captures exactly what is lost during the cast/rounding.
+                    
+                    if stochastic_fp and p.dtype == torch.bfloat16:
+                        # Simulate Stochastic Rounding to Float32
+                        # We do this to calculate the exact error term relative to the stochastic choice.
+                        p_simulated = p_fp32.clone()
+                        
+                        # Generate noise (same logic as copy_stochastic_)
+                        noise = torch.randint_like(
+                            p_simulated,
+                            dtype=torch.int32,
+                            low=0,
+                            high=(1 << 16),
+                        )
+                        # Add noise to mantissa
+                        p_simulated_int = p_simulated.view(dtype=torch.int32)
+                        p_simulated_int.add_(noise)
+                        # Truncate
+                        p_simulated_int.bitwise_and_(-65536)
+                        
+                        # Calculate the new compensation (Quantized - Exact)
+                        # If we rounded down, this is negative. If up, positive.
+                        # Next step: Update - Comp => Update - (Neg) => Update + Small_Bit. Correct.
+                        new_comp = p_simulated.sub(p_fp32)
+                        
+                        # Apply to actual parameter (Simulated value is safe to copy as it is already truncated)
+                        if device.type == "cpu":
+                            p.data.copy_(p_simulated)
+                        else:
+                            p.data.copy_(p_simulated, non_blocking=True)
+                            
                     else:
-                        p.data.copy_(p_fp32)
+                        # Deterministic Rounding (Round to Nearest) simulation
+                        # Cast down then back up to find what we lost
+                        p_rounded = p_fp32.to(p.dtype)
+                        p_rounded_f32 = p_rounded.to(torch.float32)
+                        
+                        new_comp = p_rounded_f32.sub(p_fp32)
+                        
+                        # Apply to actual parameter
+                        if device.type == "cpu":
+                            p.data.copy_(p_rounded)
+                        else:
+                            p.data.copy_(p_rounded, non_blocking=True)
+
+                    # Store the new compensation
+                    if self.state_storage_dtype == torch.bfloat16:
+                        copy_stochastic_(state["kahan_comp"], new_comp)
+                    else:
+                        state["kahan_comp"].copy_(new_comp, non_blocking=True)
+
                 else:
-                    # Original GPU path
-                    if p.dtype == torch.bfloat16:
-                        copy_stochastic_(p, p_fp32)
+                    # Standard Update Path
+                    p_fp32.data.add_(update_step)
+    
+                    # 3. Queue Device-to-Host copy
+                    # only use stochastic rounding if using bf16
+                    if device.type == "cpu":
+                        if p.dtype == torch.bfloat16 and stochastic_fp:
+                            copy_stochastic_(p.data, p_fp32)
+                        else:
+                            p.data.copy_(p_fp32)
                     else:
-                        p.data.copy_(p_fp32, non_blocking=True)
+                        # Original GPU path
+                        if p.dtype == torch.bfloat16 and stochastic_fp:
+                            copy_stochastic_(p, p_fp32)
+                        else:
+                            p.data.copy_(p_fp32, non_blocking=True)
+
+                # Store State
                 if self.state_storage_dtype == torch.bfloat16:
                     if dimcount < 1:
                         copy_stochastic_(state["denom"], denom)
