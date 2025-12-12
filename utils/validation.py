@@ -140,8 +140,8 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
 
     file_inputs = [
         {"name": "pretrained_model_name_or_path", "required": True},
-        {"name": "output_dir", "required": True},
         {"name": "sample_prompts", "required": False},
+        {"name": "output_dir", "required": True},
         {"name": "logging_dir", "required": False},
     ]
 
@@ -150,12 +150,38 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
             passed_validation = False
             errors.append(f"{file['name']} is not found")
             continue
-        if file["name"] in output_args and not Path(output_args[file["name"]]).exists():
-            passed_validation = False
-            errors.append(f"{file['name']} input '{output_args[file['name']]}' does not exist")
-            continue
-        elif file["name"] in output_args:
-            output_args[file["name"]] = Path(output_args[file["name"]]).as_posix()
+        
+        # Check if argument is present
+        if file["name"] in output_args:
+            path_obj = Path(output_args[file["name"]])
+            
+            # Special handling for creating directories
+            if file["name"] in ["output_dir", "logging_dir"]:
+                # If it doesn't exist, check if the parent/root is valid before creating
+                if not path_obj.exists():
+                    # Check if the parent path exists (or the path is relative and valid)
+                    # We usually check the parent of the target directory to ensure we aren't creating 
+                    # folders in completely non-existent root paths (like Z:\ on Windows or /mnt/fake on Linux)
+                    if not path_obj.parent.exists():
+                        passed_validation = False
+                        errors.append(f"Parent path for {file['name']} '{path_obj.parent}' does not exist")
+                        continue
+                    
+                    try:
+                        path_obj.mkdir(parents=True, exist_ok=True)
+                    except OSError as e:
+                        passed_validation = False
+                        errors.append(f"Could not create directory for {file['name']}: {e}")
+                        continue
+
+            # Standard validation for other files/paths (must already exist)
+            elif not path_obj.exists():
+                passed_validation = False
+                errors.append(f"{file['name']} input '{output_args[file['name']]}' does not exist")
+                continue
+            
+            # If we reached here, path exists or was created successfully
+            output_args[file["name"]] = path_obj.as_posix()
     if "network_module" not in output_args:
         if "guidance_scale" in output_args:
             output_args["network_module"] = "networks.lora_flux"
