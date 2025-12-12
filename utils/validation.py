@@ -160,8 +160,6 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
                 # If it doesn't exist, check if the parent/root is valid before creating
                 if not path_obj.exists():
                     # Check if the parent path exists (or the path is relative and valid)
-                    # We usually check the parent of the target directory to ensure we aren't creating 
-                    # folders in completely non-existent root paths (like Z:\ on Windows or /mnt/fake on Linux)
                     if not path_obj.parent.exists():
                         passed_validation = False
                         errors.append(f"Parent path for {file['name']} '{path_obj.parent}' does not exist")
@@ -180,7 +178,6 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
                 errors.append(f"{file['name']} input '{output_args[file['name']]}' does not exist")
                 continue
             
-            # If we reached here, path exists or was created successfully
             output_args[file["name"]] = path_obj.as_posix()
     if "network_module" not in output_args:
         if "guidance_scale" in output_args:
