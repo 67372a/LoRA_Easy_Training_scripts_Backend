@@ -125,9 +125,9 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
                 passed_validation = False
                 errors.append("Keep Tokens Separator is an empty string")
                 continue
-            if (value is None or 
-                (isinstance(value, str) and value.strip() == '') or 
-                (isinstance(value, bool) and value == False)):
+            if (val is None or 
+                (isinstance(val, str) and val.strip() == '') or 
+                (isinstance(val, bool) and val == False)):
                 continue
             if isinstance(val, str):
                 if val.strip().lower() == "true":
@@ -139,10 +139,15 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
             del value["fa"]
 
     file_inputs = [
-        {"name": "pretrained_model_name_or_path", "required": True},
+        {"name": "pretrained_model_name_or_path", "required": "dit_path" not in output_args},
+        {"name": "dit_path", "required": "dit_path" in output_args},
+        {"name": "qwen3_path", "required": "dit_path" in output_args},
+        {"name": "vae_path", "required": "dit_path" in output_args},
         {"name": "sample_prompts", "required": False},
         {"name": "output_dir", "required": True},
         {"name": "logging_dir", "required": False},
+        {"name": "llm_adapter_path", "required": False},
+        {"name": "t5_tokenizer_path", "required": False},
     ]
 
     for file in file_inputs:
