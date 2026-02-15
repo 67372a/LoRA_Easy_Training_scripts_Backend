@@ -138,15 +138,17 @@ def validate_args(args: dict) -> tuple[bool, list[str], dict]:
         if "fa" in value:
             del value["fa"]
 
+    # Anima mode is detected by the presence of the 'qwen3' key (Anima-only arg).
+    # In Anima mode, pretrained_model_name_or_path holds the DiT model path,
+    # and 'qwen3' / 'vae' hold the text encoder and VAE paths respectively.
+    is_anima = "qwen3" in output_args
     file_inputs = [
-        {"name": "pretrained_model_name_or_path", "required": "dit_path" not in output_args},
-        {"name": "dit_path", "required": "dit_path" in output_args},
-        {"name": "qwen3_path", "required": "dit_path" in output_args},
-        {"name": "vae_path", "required": "dit_path" in output_args},
+        {"name": "pretrained_model_name_or_path", "required": True},
+        {"name": "qwen3", "required": is_anima},
+        {"name": "vae", "required": is_anima},
         {"name": "sample_prompts", "required": False},
         {"name": "output_dir", "required": True},
         {"name": "logging_dir", "required": False},
-        {"name": "llm_adapter_path", "required": False},
         {"name": "t5_tokenizer_path", "required": False},
     ]
 
