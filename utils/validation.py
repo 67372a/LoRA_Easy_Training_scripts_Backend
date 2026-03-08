@@ -370,11 +370,12 @@ def calculate_steps(
             general_args["min_bucket_reso"],
             general_args["max_bucket_reso"],
             general_args["bucket_reso_steps"],
+            general_args.get("multires_training", False),
         )
         if not general_args.get("bucket_no_upscale", False):
             bucketManager.make_buckets()
     else:
-        bucketManager = BucketManager(False, resolution, None, None, None)
+        bucketManager = BucketManager(False, resolution, None, None, None, False)
         bucketManager.set_predefined_resos([resolution])
     for subset in subsets:
         if 'is_val' in subset and subset['is_val']:
