@@ -54,6 +54,8 @@ from adv_optm.optim import AdamW_adv, Adopt_adv, Simplified_AdEMAMix as Simplifi
 from LoraEasyCustomOptimizer.abmog import ABMOG
 from LoraEasyCustomOptimizer.bcos import BCOS
 from LoraEasyCustomOptimizer.projective_adam import ProjectiveAdam
+from LoraEasyCustomOptimizer.wiwiopt import WiwiOpt
+WiwiOpt
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
@@ -135,6 +137,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     StableSPAM,
     TALON,
     VSGD,
+    WiwiOpt,
 ]
 
 OPTIMIZERS: Dict[str, OPTIMIZER] = {str(f"{optimizer.__name__}".lower()): optimizer for optimizer in OPTIMIZER_LIST}
