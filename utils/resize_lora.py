@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 
 MIN_SV = 1e-6
 
+LORA_DOWN_UP_FORMATS = [
+    ("lora_down", "lora_up"),
+    ("lora_A", "lora_B"),
+    ("down", "up"),
+]
+
 
 # Model save and load functions
 def load_state_dict(file_name, dtype):
@@ -45,7 +51,11 @@ def load_state_dict(file_name, dtype):
 def save_to_file(file_name, state_dict, dtype, metadata):
     if dtype is not None:
         for key in list(state_dict.keys()):
-            if type(state_dict[key]) == torch.Tensor:
+            if (
+                type(state_dict[key]) == torch.Tensor
+                and state_dict[key].dtype.is_floating_point
+                and state_dict[key].dtype != dtype
+            ):
                 state_dict[key] = state_dict[key].to(dtype)
 
     if model_util.is_safetensors(file_name):
@@ -137,6 +147,28 @@ def merge_conv(lora_down, lora_up, device):
     return weight
 
 
+def merge_tucker_conv(lora_down, lora_up, lora_mid, device):
+    in_rank, in_size, _, _ = lora_down.shape
+    out_size, out_rank, _, _ = lora_up.shape
+    mid_rank_1, mid_rank_2, _, _ = lora_mid.shape
+    assert (
+        in_rank == out_rank == mid_rank_1 == mid_rank_2
+    ), f"rank {in_rank} {out_rank} {mid_rank_1} {mid_rank_2} mismatch"
+
+    lora_down = lora_down.to(device)
+    lora_up = lora_up.to(device)
+    lora_mid = lora_mid.to(device)
+
+    weight = torch.einsum(
+        "m n ..., i m, n j -> i j ...",
+        lora_mid,
+        lora_up.reshape(out_size, out_rank),
+        lora_down.reshape(in_rank, in_size),
+    )
+    del lora_up, lora_down, lora_mid
+    return weight
+
+
 def merge_linear(lora_down, lora_up, device):
     in_rank, in_size = lora_down.shape
     out_size, out_rank = lora_up.shape
@@ -148,6 +180,29 @@ def merge_linear(lora_down, lora_up, device):
     weight = lora_up @ lora_down
     del lora_up, lora_down
     return weight
+
+
+def get_lora_down_up_names(key):
+    key_parts = key.split(".")
+    for down_name, up_name in LORA_DOWN_UP_FORMATS:
+        if len(key_parts) >= 2 and down_name == key_parts[-2]:
+            return ".".join(key_parts[:-2]), f".{down_name}", f".{up_name}", f".{key_parts[-1]}"
+        if len(key_parts) >= 1 and down_name == key_parts[-1]:
+            return ".".join(key_parts[:-1]), f".{down_name}", f".{up_name}", ""
+    return None, None, None, None
+
+
+def delete_block_weights(state_dict, block_name, lora_down_name, lora_up_name, weight_name):
+    keys = [
+        block_name + lora_down_name + weight_name,
+        block_name + lora_up_name + weight_name,
+        block_name + ".alpha",
+        block_name + ".dora_scale",
+        block_name + ".lora_mid.weight",
+    ]
+    for key in keys:
+        if key in state_dict:
+            del state_dict[key]
 
 
 # Calculate new rank
@@ -202,23 +257,9 @@ def resize_lora_model(
     del_linear,
     del_conv,
 ):  # sourcery skip: use-fstring-for-concatenation
-    network_alpha = None
-    network_dim = None
+    max_old_rank = None
     verbose_str = "\n"
     fro_list = []
-
-    # Extract loaded lora dim and alpha
-    for key, value in lora_sd.items():
-        if network_alpha is None and "alpha" in key:
-            network_alpha = value
-        if network_dim is None and "lora_down" in key and len(value.size()) == 2:
-            network_dim = value.size()[0]
-        if network_alpha is not None and network_dim is not None:
-            break
-        if network_alpha is None:
-            network_alpha = network_dim
-
-    scale = network_alpha / network_dim
 
     if dynamic_method:
         logger.info(
@@ -236,40 +277,54 @@ def resize_lora_model(
 
     with torch.no_grad():
         for key, value in tqdm(lora_sd.items()):
-            weight_name = None
-            if "lora_down" not in key:
+            block_down_name, lora_down_name, lora_up_name, weight_name = get_lora_down_up_names(key)
+            if block_down_name is None:
                 continue
 
-            block_down_name = key.rsplit(".lora_down", 1)[0]
-            weight_name = key.rsplit(".", 1)[-1]
             lora_down_weight = value
-            # find corresponding lora_up and alpha
             block_up_name = block_down_name
-            lora_up_weight = lora_sd.get(f"{block_up_name}.lora_up.{weight_name}", None)
-            lora_alpha = lora_sd.get(f"{block_down_name}.alpha", None)
+            lora_up_weight = lora_sd.get(block_up_name + lora_up_name + weight_name, None)
+            lora_alpha = lora_sd.get(block_down_name + ".alpha", None)
+            lora_mid_weight = lora_sd.get(block_down_name + ".lora_mid.weight", None)
 
-            if lora_down_weight is not None and lora_up_weight is not None:
+            weights_loaded = lora_down_weight is not None and lora_up_weight is not None
+
+            if weights_loaded:
                 conv2d = len(lora_down_weight.size()) == 4
+                old_rank = lora_down_weight.size()[0]
+                max_old_rank = max(max_old_rank or 0, old_rank)
                 scale = (
                     1.0
                     if lora_alpha is None
-                    else lora_alpha / lora_down_weight.size()[0]
+                    else lora_alpha / old_rank
                 )
                 if conv2d:
                     if del_conv:
-                        del o_lora_sd[block_down_name + "." + "lora_down.weight"]
-                        del o_lora_sd[block_up_name + "." + "lora_up.weight"]
-                        del o_lora_sd[block_up_name + "." + "alpha"]
-                        if f"{block_up_name}.dora_scale" in o_lora_sd:
-                            del o_lora_sd[block_up_name + "." + "dora_scale"]
+                        delete_block_weights(
+                            o_lora_sd,
+                            block_down_name,
+                            lora_down_name,
+                            lora_up_name,
+                            weight_name,
+                        )
                         block_down_name = None
                         block_up_name = None
                         lora_down_weight = None
                         lora_up_weight = None
                         continue
-                    full_weight_matrix = merge_conv(
-                        lora_down_weight, lora_up_weight, device
-                    )
+                    if (
+                        lora_mid_weight is not None
+                        and lora_down_name == ".lora_down"
+                        and lora_up_name == ".lora_up"
+                        and weight_name == ".weight"
+                    ):
+                        full_weight_matrix = merge_tucker_conv(
+                            lora_down_weight, lora_up_weight, lora_mid_weight, device
+                        )
+                    else:
+                        full_weight_matrix = merge_conv(
+                            lora_down_weight, lora_up_weight, device
+                        )
                     param_dict = extract_conv(
                         full_weight_matrix,
                         new_conv_rank,
@@ -280,11 +335,13 @@ def resize_lora_model(
                     )
                 else:
                     if del_linear:
-                        del o_lora_sd[block_down_name + "." + "lora_down.weight"]
-                        del o_lora_sd[block_up_name + "." + "lora_up.weight"]
-                        del o_lora_sd[block_up_name + "." "alpha"]
-                        if f"{block_up_name}.dora_scale" in o_lora_sd:
-                            del o_lora_sd[block_up_name + "." + "dora_scale"]
+                        delete_block_weights(
+                            o_lora_sd,
+                            block_down_name,
+                            lora_down_name,
+                            lora_up_name,
+                            weight_name,
+                        )
                         block_down_name = None
                         block_up_name = None
                         lora_down_weight = None
@@ -318,15 +375,17 @@ def resize_lora_model(
                     verbose_str += "\n"
 
                 new_alpha = param_dict["new_alpha"]
-                o_lora_sd[f"{block_down_name}.lora_down.weight"] = (
+                o_lora_sd[block_down_name + lora_down_name + weight_name] = (
                     param_dict["lora_down"].to(save_dtype).contiguous()
                 )
-                o_lora_sd[f"{block_up_name}.lora_up.weight"] = (
+                o_lora_sd[block_up_name + lora_up_name + weight_name] = (
                     param_dict["lora_up"].to(save_dtype).contiguous()
                 )
-                o_lora_sd[f"{block_up_name}.alpha"] = torch.tensor(
+                o_lora_sd[block_down_name + ".alpha"] = torch.tensor(
                     param_dict["new_alpha"]
                 ).to(save_dtype)
+                if block_down_name + ".lora_mid.weight" in o_lora_sd:
+                    del o_lora_sd[block_down_name + ".lora_mid.weight"]
 
                 block_down_name = None
                 block_up_name = None
@@ -340,7 +399,7 @@ def resize_lora_model(
             f"Average Frobenius norm retention: {np.mean(fro_list):.2%} | std: {np.std(fro_list):0.3f}"
         )
     logger.info("resizing complete")
-    return o_lora_sd, network_dim, new_alpha
+    return o_lora_sd, max_old_rank, new_alpha
 
 
 def resize(args):
@@ -430,6 +489,15 @@ def resize(args):
         metadata["ss_training_comment"] = f"{linear_message}({conv_message}); {comment}"
         metadata["ss_network_dim"] = "Dynamic"
         metadata["ss_network_alpha"] = "Dynamic"
+
+    for key in list(state_dict.keys()):
+        value = state_dict[key]
+        if (
+            type(value) == torch.Tensor
+            and value.dtype.is_floating_point
+            and value.dtype != save_dtype
+        ):
+            state_dict[key] = value.to(save_dtype)
 
     model_hash, legacy_hash = train_util.precalculate_safetensors_hashes(
         state_dict, metadata
