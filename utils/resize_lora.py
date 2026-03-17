@@ -173,13 +173,13 @@ def merge_linear(lora_down, lora_up, device):
 def rank_resize(S, rank, dynamic_method, dynamic_param, scale=1):
     if dynamic_method == "sv_ratio":
         # Calculate new dim and alpha based off ratio
-        new_rank = index_sv_ratio(S, dynamic_param) + 1
+        new_rank = index_sv_ratio(S, dynamic_param)
     elif dynamic_method == "sv_cumulative":
         # Calculate new dim and alpha based off cumulative sum
-        new_rank = index_sv_cumulative(S, dynamic_param) + 1
+        new_rank = index_sv_cumulative(S, dynamic_param)
     elif dynamic_method == "sv_fro":
         # Calculate new dim and alpha based off sqrt sum of squares
-        new_rank = index_sv_fro(S, dynamic_param) + 1
+        new_rank = index_sv_fro(S, dynamic_param)
     else:
         new_rank = rank
     new_alpha = float(scale * new_rank)
