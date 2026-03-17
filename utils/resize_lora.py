@@ -24,6 +24,25 @@ logger = logging.getLogger(__name__)
 
 MIN_SV = 1e-6
 
+# Key pattern pairs: (down_suffix, up_suffix)
+DOWN_UP_PAIRS = [
+    ("lora_down", "lora_up"),
+    ("lora_A", "lora_B"),
+    ("down", "up")
+]
+
+
+def _parse_down_key(key):
+    """If key is a recognized 'down' weight key, return
+    (block_name, weight_suffix, down_part, up_part).  Otherwise return None."""
+    for down_part, up_part in DOWN_UP_PAIRS:
+        marker = f".{down_part}."
+        if marker in key:
+            block_name = key.rsplit(marker, 1)[0]
+            weight_suffix = key.rsplit(".", 1)[-1]
+            return block_name, weight_suffix, down_part, up_part
+    return None
+
 
 # Model save and load functions
 def load_state_dict(file_name, dtype):
@@ -36,7 +55,7 @@ def load_state_dict(file_name, dtype):
         metadata = None
 
     for key in list(sd.keys()):
-        if type(sd[key]) == torch.Tensor:
+        if type(sd[key]) == torch.Tensor and sd[key].is_floating_point():
             sd[key] = sd[key].to(dtype)
 
     return sd, metadata
@@ -45,7 +64,7 @@ def load_state_dict(file_name, dtype):
 def save_to_file(file_name, state_dict, dtype, metadata):
     if dtype is not None:
         for key in list(state_dict.keys()):
-            if type(state_dict[key]) == torch.Tensor:
+            if type(state_dict[key]) == torch.Tensor and state_dict[key].is_floating_point():
                 state_dict[key] = state_dict[key].to(dtype)
 
     if model_util.is_safetensors(file_name):
@@ -211,12 +230,23 @@ def resize_lora_model(
     for key, value in lora_sd.items():
         if network_alpha is None and "alpha" in key:
             network_alpha = value
-        if network_dim is None and "lora_down" in key and len(value.size()) == 2:
-            network_dim = value.size()[0]
+        if network_dim is None:
+            if _parse_down_key(key) is not None and len(value.size()) >= 2:
+                network_dim = value.size()[0]
         if network_alpha is not None and network_dim is not None:
             break
-        if network_alpha is None:
-            network_alpha = network_dim
+
+    if network_alpha is None:
+        network_alpha = network_dim
+
+    if isinstance(network_alpha, torch.Tensor):
+        network_alpha = float(network_alpha)
+
+    if network_dim is None:
+        raise ValueError(
+            "Could not determine network dim from the model. "
+            "No recognized down weight keys found (expected lora_down, lora_A, or down)."
+        )
 
     scale = network_alpha / network_dim
 
@@ -225,114 +255,124 @@ def resize_lora_model(
             f"Dynamically determining new alphas and dims based off {dynamic_method}: {dynamic_param}, max rank is {new_rank}"
         )
 
-    lora_down_weight = None
-    lora_up_weight = None
-
     o_lora_sd = lora_sd.copy()
-    block_down_name = None
-    block_up_name = None
-
     new_alpha = 0.0
 
     with torch.no_grad():
         for key, value in tqdm(lora_sd.items()):
-            weight_name = None
-            if "lora_down" not in key:
+            parsed = _parse_down_key(key)
+            if parsed is None:
                 continue
 
-            block_down_name = key.rsplit(".lora_down", 1)[0]
-            weight_name = key.rsplit(".", 1)[-1]
+            block_name, weight_suffix, down_part, up_part = parsed
             lora_down_weight = value
-            # find corresponding lora_up and alpha
-            block_up_name = block_down_name
-            lora_up_weight = lora_sd.get(f"{block_up_name}.lora_up.{weight_name}", None)
-            lora_alpha = lora_sd.get(f"{block_down_name}.alpha", None)
+            # find corresponding lora_up, optional lora_mid (Tucker), and alpha
+            lora_up_weight = lora_sd.get(
+                f"{block_name}.{up_part}.{weight_suffix}", None
+            )
+            lora_mid_weight = lora_sd.get(
+                f"{block_name}.lora_mid.{weight_suffix}", None
+            )
+            lora_alpha = lora_sd.get(f"{block_name}.alpha", None)
 
-            if lora_down_weight is not None and lora_up_weight is not None:
-                conv2d = len(lora_down_weight.size()) == 4
-                scale = (
-                    1.0
-                    if lora_alpha is None
-                    else lora_alpha / lora_down_weight.size()[0]
-                )
-                if conv2d:
-                    if del_conv:
-                        del o_lora_sd[block_down_name + "." + "lora_down.weight"]
-                        del o_lora_sd[block_up_name + "." + "lora_up.weight"]
-                        del o_lora_sd[block_up_name + "." + "alpha"]
-                        if f"{block_up_name}.dora_scale" in o_lora_sd:
-                            del o_lora_sd[block_up_name + "." + "dora_scale"]
-                        block_down_name = None
-                        block_up_name = None
-                        lora_down_weight = None
-                        lora_up_weight = None
-                        continue
+            if lora_up_weight is None:
+                continue
+
+            # Original key names for cleanup
+            orig_down_key = f"{block_name}.{down_part}.{weight_suffix}"
+            orig_up_key = f"{block_name}.{up_part}.{weight_suffix}"
+            orig_mid_key = f"{block_name}.lora_mid.{weight_suffix}"
+            alpha_key = f"{block_name}.alpha"
+            dora_key = f"{block_name}.dora_scale"
+
+            has_mid = lora_mid_weight is not None
+            conv2d = has_mid or len(lora_down_weight.size()) == 4
+            scale = (
+                1.0
+                if lora_alpha is None
+                else float(lora_alpha) / lora_down_weight.size()[0]
+            )
+
+            if conv2d:
+                if del_conv:
+                    for k in [orig_down_key, orig_up_key, alpha_key, dora_key]:
+                        o_lora_sd.pop(k, None)
+                    if has_mid:
+                        o_lora_sd.pop(orig_mid_key, None)
+                    continue
+
+                if has_mid:
+                    # Tucker decomposition: reconstruct full conv weight
+                    full_weight_matrix = torch.einsum(
+                        "or,rihw,ij->ojhw",
+                        lora_up_weight.flatten(start_dim=1).to(device),
+                        lora_mid_weight.to(device),
+                        lora_down_weight.flatten(start_dim=1).to(device),
+                    )
+                else:
                     full_weight_matrix = merge_conv(
                         lora_down_weight, lora_up_weight, device
                     )
-                    param_dict = extract_conv(
-                        full_weight_matrix,
-                        new_conv_rank,
-                        dynamic_method,
-                        dynamic_param,
-                        device,
-                        scale,
-                    )
-                else:
-                    if del_linear:
-                        del o_lora_sd[block_down_name + "." + "lora_down.weight"]
-                        del o_lora_sd[block_up_name + "." + "lora_up.weight"]
-                        del o_lora_sd[block_up_name + "." "alpha"]
-                        if f"{block_up_name}.dora_scale" in o_lora_sd:
-                            del o_lora_sd[block_up_name + "." + "dora_scale"]
-                        block_down_name = None
-                        block_up_name = None
-                        lora_down_weight = None
-                        lora_up_weight = None
-                        continue
-                    full_weight_matrix = merge_linear(
-                        lora_down_weight, lora_up_weight, device
-                    )
-                    param_dict = extract_linear(
-                        full_weight_matrix,
-                        new_rank,
-                        dynamic_method,
-                        dynamic_param,
-                        device,
-                        scale,
-                    )
-
-                if verbose:
-                    max_ratio = param_dict["max_ratio"]
-                    sum_retained = param_dict["sum_retained"]
-                    fro_retained = param_dict["fro_retained"]
-                    if not np.isnan(fro_retained):
-                        fro_list.append(float(fro_retained))
-
-                    verbose_str += f"{block_down_name:75} | "
-                    verbose_str += f"sum(S) retained: {sum_retained:.1%}, fro retained: {fro_retained:.1%}, max(S) ratio: {max_ratio:0.1f}"
-
-                if verbose and dynamic_method:
-                    verbose_str += f", dynamic | dim: {param_dict['new_rank']}, alpha: {param_dict['new_alpha']}\n"
-                else:
-                    verbose_str += "\n"
-
-                new_alpha = param_dict["new_alpha"]
-                o_lora_sd[f"{block_down_name}.lora_down.weight"] = (
-                    param_dict["lora_down"].to(save_dtype).contiguous()
+                param_dict = extract_conv(
+                    full_weight_matrix,
+                    new_conv_rank,
+                    dynamic_method,
+                    dynamic_param,
+                    device,
+                    scale,
                 )
-                o_lora_sd[f"{block_up_name}.lora_up.weight"] = (
-                    param_dict["lora_up"].to(save_dtype).contiguous()
-                )
-                o_lora_sd[f"{block_up_name}.alpha"] = torch.tensor(
-                    param_dict["new_alpha"]
-                ).to(save_dtype)
+            else:
+                if del_linear:
+                    for k in [orig_down_key, orig_up_key, alpha_key, dora_key]:
+                        o_lora_sd.pop(k, None)
+                    continue
 
-                block_down_name = None
-                block_up_name = None
-                lora_down_weight = None
-                lora_up_weight = None
-                del param_dict
+                full_weight_matrix = merge_linear(
+                    lora_down_weight, lora_up_weight, device
+                )
+                param_dict = extract_linear(
+                    full_weight_matrix,
+                    new_rank,
+                    dynamic_method,
+                    dynamic_param,
+                    device,
+                    scale,
+                )
+
+            if verbose:
+                max_ratio = param_dict["max_ratio"]
+                sum_retained = param_dict["sum_retained"]
+                fro_retained = param_dict["fro_retained"]
+                if not np.isnan(fro_retained):
+                    fro_list.append(float(fro_retained))
+
+                verbose_str += f"{block_name:75} | "
+                verbose_str += f"sum(S) retained: {sum_retained:.1%}, fro retained: {fro_retained:.1%}, max(S) ratio: {max_ratio:0.1f}"
+
+            if verbose and dynamic_method:
+                verbose_str += f", dynamic | dim: {param_dict['new_rank']}, alpha: {param_dict['new_alpha']}\n"
+            else:
+                verbose_str += "\n"
+
+            new_alpha = param_dict["new_alpha"]
+            # Remove original keys (handles renamed patterns and Tucker mid)
+            for k in [orig_down_key, orig_up_key, alpha_key]:
+                o_lora_sd.pop(k, None)
+            if has_mid:
+                o_lora_sd.pop(orig_mid_key, None)
+
+            # Write standardized lora_down/lora_up output keys
+            o_lora_sd[f"{block_name}.lora_down.weight"] = (
+                param_dict["lora_down"].to(save_dtype).contiguous()
+            )
+            o_lora_sd[f"{block_name}.lora_up.weight"] = (
+                param_dict["lora_up"].to(save_dtype).contiguous()
+            )
+            o_lora_sd[f"{block_name}.alpha"] = torch.tensor(
+                param_dict["new_alpha"]
+            ).to(save_dtype)
+
+            del param_dict
 
     if verbose:
         print(verbose_str)
@@ -359,11 +399,11 @@ def resize(args):
     )
 
     def str_to_dtype(p):
-        if p == "float":
+        if p in ["float", "fp32"]:
             return torch.float
-        if p == "fp16":
+        if p in ["fp16", "half"]:
             return torch.float16
-        return torch.bfloat16 if p == "bf16" else None
+        return torch.bfloat16 if p in ["bf16", "bfloat16"] else None
 
     if args.dynamic_method and not args.dynamic_param:
         raise Exception("If using dynamic_method, then dynamic_param is required")
