@@ -116,7 +116,7 @@ def setup_venv(venv_pip):
         shell=PLATFORM == "linux",
     )
     subprocess.check_call(
-        f"{venv_pip} install -U --no-deps torchao~=0.12.0 --extra-index-url https://download.pytorch.org/whl/cu128",
+        f"{venv_pip} install -U --no-deps torchao~=0.13.0 --extra-index-url https://download.pytorch.org/whl/cu128",
         shell=PLATFORM == "linux",
     )
     
@@ -126,7 +126,7 @@ def setup_venv(venv_pip):
     )
 
     subprocess.check_call(f"{venv_pip} install -U -r requirements.txt", shell=PLATFORM == "linux")
-    subprocess.check_call(f"{venv_pip} install -U ../custom_scheduler/.", shell=PLATFORM == "linux")
+    subprocess.check_call(f"{venv_pip} install -U -e ../custom_scheduler/.", shell=PLATFORM == "linux")
     subprocess.check_call(f"{venv_pip} install -U -r ../requirements.txt", shell=PLATFORM == "linux")
 
 

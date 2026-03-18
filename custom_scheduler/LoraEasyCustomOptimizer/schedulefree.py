@@ -9,12 +9,12 @@ import logging
 from collections import defaultdict
 
 from pytorch_optimizer.base.optimizer import BaseOptimizer
-from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup, OPTIMIZER
+from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from .utils import (copy_stochastic_, NORM_TYPE, agc, 
                     STATE_PRECISION, _paper_orthograd, _paper_orthograd_compile, schedule_beta_tc, 
                     spam_grad_clipping, CLIP_TYPE, clean_dict_params,
-                    CosineDecay, spam_grad_clipping_logging, stable_spam_clipping_tensors, SSCCosineDecay, adaptive_eps)
+                    CosineDecay, spam_grad_clipping_logging, stable_spam_clipping_tensors, SSCCosineDecay, adaptive_eps, OPTIMIZER)
 from .low_bit_optim.quant_utils import _fp32_to_bf16_sr
 from .low_bit_optim.subclass_8bit import OptimState8bit
 from .low_bit_optim.subclass_4bit import OptimState4bit
