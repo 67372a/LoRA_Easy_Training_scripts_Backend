@@ -55,10 +55,11 @@ from LoraEasyCustomOptimizer.abmog import ABMOG
 from LoraEasyCustomOptimizer.bcos import BCOS
 from LoraEasyCustomOptimizer.projective_adam import ProjectiveAdam
 from LoraEasyCustomOptimizer.wiwiopt import WiwiOpt
-WiwiOpt
+from LoraEasyCustomOptimizer.adam import AdamW8bitKahan
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
+    AdamW8bitKahan,
     ADOPT,
     ADOPTAOScheduleFree,
     ADOPTEMAMixScheduleFree,

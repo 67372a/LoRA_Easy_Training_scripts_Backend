@@ -168,6 +168,7 @@ class WiwiOpt(Optimizer):
         dynamic_lr_boost: bool = True,
         egd: bool = True, 
         egd_oja: bool = True,
+        **kwargs
     ):
         if len(betas) == 2:
             betas = (betas[0], betas[0], betas[1])
