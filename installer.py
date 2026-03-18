@@ -32,20 +32,6 @@ def check_git_install() -> bool:
         return False
     return True
 
-
-# windows only
-def set_execution_policy() -> bool:
-    try:
-        subprocess.check_call(str(Path("installables/change_execution_policy.bat")))
-    except subprocess.SubprocessError:
-        try:
-            subprocess.check_call(str(Path("installables/change_execution_policy_backup.bat")))
-        except subprocess.SubprocessError as e:
-            logger.error(f"Failed to change the execution policy with error:\n {e}")
-            return False
-    return True
-
-
 def setup_accelerate(platform: str) -> None:
     if platform == "windows":
         path = Path(f"{os.environ['USERPROFILE']}")
@@ -185,11 +171,6 @@ def main():
         quit()
 
     subprocess.check_call("git submodule update --init --recursive", shell=PLATFORM == "linux")
-
-    if PLATFORM == "windows":
-        logger.info("setting execution policy to unrestricted")
-        if not set_execution_policy():
-            quit()
 
     setup_config(
         len(sys.argv) > 1 and sys.argv[1] == "colab",
