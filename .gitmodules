@@ -1,4 +1,4 @@
 [submodule "sd_scripts"]
 	path = sd_scripts
 	url = https://github.com/67372a/sd-scripts
-	branch = sd3-upstream
+	branch = main
