@@ -66,7 +66,7 @@ class CAME(BaseOptimizer):
     def __init__(
         self,
         params: ParamGroup,
-        lr: float = 2e-4,
+        lr: float = 5e-5,
         betas: Betas = (0.9, 0.999, 0.9999),
         weight_decay: float = 0.0,
         weight_decouple: bool = True,
@@ -137,6 +137,7 @@ class CAME(BaseOptimizer):
             'sync_chunk_size': sync_chunk_size,
             'state_storage_dtype': final_dtype,
             'state_storage_device': state_storage_device,
+            'cautious_weight_decay': cautious_weight_decay,
         }
         super().__init__(params, defaults)
 
