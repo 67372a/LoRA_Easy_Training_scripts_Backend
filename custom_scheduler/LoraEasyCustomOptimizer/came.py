@@ -10,6 +10,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
+from .utils import apply_weight_decay
 import logging
 
 logger = logging.getLogger(__name__)
@@ -51,11 +52,15 @@ class CAME(BaseOptimizer):
     :param eps1: float. term added to the denominator to improve numerical stability.
     :param eps2: float. term added to the denominator to improve numerical stability.
     :param cautious: bool: Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085
-    cautious (bool) (deprecated, use update strategy)
+    :param cautious: bool: (deprecated, use update strategy) 
         Use cautious mask on parameter update - https://arxiv.org/abs/2411.16085 (default: False)
-    update_strategy (str) (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
+    :param update_strategy: str: (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
         Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085), 
         and 'grams' (https://arxiv.org/abs/2412.17107) (default: unmodified)
+    :param sync_chunk_size: int: Size of chunks to sync between devices (default: 128)
+    :param state_storage_dtype: str|torch.dtype: Data type for storing optimizer state (default: bfloat16)
+    :param state_storage_device: str|torch.device: Device for storing optimizer state (default: cpu)
+    :param cautious_weight_decay: bool: Applies weight decay only to parameter coordinates whose signs align with the optimizer update. (default: False)
     """
 
     def __init__(
@@ -75,6 +80,7 @@ class CAME(BaseOptimizer):
         sync_chunk_size: int = 128,
         state_storage_dtype: str|torch.dtype = torch.bfloat16,
         state_storage_device: str|torch.device = "cpu",
+        cautious_weight_decay: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -389,13 +395,14 @@ class CAME(BaseOptimizer):
                 else:
                     update = exp_avg
 
-                self.apply_weight_decay(
+                apply_weight_decay(
                     p=p_fp32,
                     grad=grad,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
                     weight_decouple=group['weight_decouple'],
                     fixed_decay=group['fixed_decay'],
+                    cautious_weight_decay=group['cautious_weight_decay'],
                 )
 
                 update.mul_(group['lr'])

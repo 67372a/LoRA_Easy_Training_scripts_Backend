@@ -966,3 +966,49 @@ def adaptive_eps(grad: torch.Tensor, group:dict, rms_grad: torch.Tensor = None) 
         return torch.clamp(val_to_bound, min=group['eps_floor'], max=group['eps'])
     else:
         return group['eps_t']
+
+def apply_weight_decay(
+    p: torch.Tensor,
+    grad: Optional[torch.Tensor],
+    lr: float,
+    weight_decay: float,
+    weight_decouple: bool,
+    fixed_decay: bool,
+    ratio: Optional[float] = None,
+    cautious_weight_decay: bool = False,
+) -> None:
+    """Apply weight decay in an in-place manner.
+
+    Args:
+        p (torch.Tensor): Parameter tensor to apply weight decay to.
+        grad (torch.Tensor): Gradient tensor of parameter p.
+        lr (float): Learning rate to scale the update.
+        weight_decay (float): Weight decay coefficient (L2 penalty).
+        weight_decouple (bool): If True, applies decoupled weight decay as in AdamW.
+        fixed_decay (bool): If True, fixes weight decay to not depend on learning rate.
+        ratio (Optional[float]): Optional scaling factor for weight decay.
+        cautious_weight_decay (bool): If True, applies cautious weight decay.
+    """
+    if cautious_weight_decay:
+        apply_cautious_weight_decay(p, grad, lr, weight_decay)
+    elif weight_decouple:
+        p.mul_(1.0 - weight_decay * (1.0 if fixed_decay else lr) * (ratio if ratio is not None else 1.0))
+    elif weight_decay > 0.0 and grad is not None:
+        grad.add_(p, alpha=weight_decay)
+
+def apply_cautious_weight_decay(
+    p: torch.Tensor,
+    update: torch.Tensor,
+    lr: float,
+    weight_decay: float,
+) -> None:
+    """Apply cautious weight decay (CWD) in an in-place manner.
+
+    Args:
+        p (torch.Tensor): Parameter tensor to apply weight decay to.
+        update (torch.Tensor): update tensor.
+        lr (float): Learning rate to scale the update.
+        weight_decay (float): Weight decay coefficient (L2 penalty).
+
+    """
+    p.copy_(torch.where(update * p >= 0, p * (1.0 - weight_decay * lr), p))
