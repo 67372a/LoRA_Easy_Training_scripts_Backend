@@ -893,7 +893,7 @@ def _approx_sq_grad(exp_avg_sq_row, exp_avg_sq_col, eps=1e-16):
     return torch.mul(r_factor, c_factor)
 
 
-class WiwiOptV2(Optimizer):
+class WiwiOpt(Optimizer):
     r"""
     WiwiOpt (V2.1).
 
