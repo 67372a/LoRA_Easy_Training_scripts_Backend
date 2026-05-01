@@ -56,6 +56,7 @@ from LoraEasyCustomOptimizer.bcos import BCOS
 from LoraEasyCustomOptimizer.projective_adam import ProjectiveAdam
 from LoraEasyCustomOptimizer.wiwiopt import WiwiOpt
 from LoraEasyCustomOptimizer.adam import AdamW8bitKahan
+from LoraEasyCustomOptimizer.cascade import CASCADE
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
@@ -79,6 +80,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     Alice,
     BCOS,
     CAME,
+    CASCADE,
     Compass,
     CompassAO,
     Compass8BitBNB,

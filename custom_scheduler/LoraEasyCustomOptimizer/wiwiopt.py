@@ -1008,6 +1008,7 @@ class WiwiOpt(Optimizer):
         normuon: bool = True,
         rms_max: float = 10.0,
         stochastic_fp: bool = True,
+        **kwargs,
     ):
         if len(betas) == 2:
             betas = (betas[0], betas[0], betas[1])
