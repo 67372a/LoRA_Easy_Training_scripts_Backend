@@ -50,7 +50,7 @@ class RAdamScheduleFree(torch.optim.Optimizer):
             steps (e.g., < 5 when β_2 = 0.999), but just update the momentum values of the optimizer.
             This helps stabilize training by ensuring smoother warmup behavior and more reliable
             calculation of the moving average coefficient (`ckp1`). Recommended to set to True
-            (default False).
+            (default True).
         sync_chunk_size (int): Size of chunks to sync between devices (default: 128)
         state_storage_dtype (str|torch.dtype): Data type for storing optimizer state (default: bfloat16)
         state_storage_device (str|torch.device): Device for storing optimizer state (default: cpu)
@@ -65,7 +65,7 @@ class RAdamScheduleFree(torch.optim.Optimizer):
                  r: float = 0.0,
                  weight_lr_power: float = 2.0,
                  foreach: Optional[bool] = False,
-                 silent_sgd_phase: bool = False,
+                 silent_sgd_phase: bool = True,
                  sync_chunk_size: int = 128,
                  state_storage_dtype: Union[str, torch.dtype] = torch.bfloat16,
                  state_storage_device: Union[str, torch.device] = "cpu",
