@@ -57,6 +57,7 @@ from LoraEasyCustomOptimizer.projective_adam import ProjectiveAdam
 from LoraEasyCustomOptimizer.wiwiopt import WiwiOpt
 from LoraEasyCustomOptimizer.adam import AdamW8bitKahan
 from LoraEasyCustomOptimizer.cascade import CASCADE
+from LoraEasyCustomOptimizer.radam_schedulefree import RAdamScheduleFree
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
@@ -124,6 +125,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     RMSProp,
     RMSPropADOPT,
     RMSPropADOPTMARS,
+    RAdamScheduleFree,
     Ranger21,
     SCION,
     SGDSaI,
