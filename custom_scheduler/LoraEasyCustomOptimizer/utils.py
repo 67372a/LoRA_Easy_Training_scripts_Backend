@@ -80,7 +80,7 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
 
     # copy the higher 16 bit into the target tensor
-    target.copy_(result.view(dtype=torch.float32))
+    target.copy_(result.view(dtype=torch.float32), non_blocking=True)
     
 def agc(p: torch.Tensor, 
         grad: torch.Tensor, 
