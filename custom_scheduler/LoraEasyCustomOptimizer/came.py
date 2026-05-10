@@ -458,6 +458,11 @@ class CAME(BaseOptimizer):
         r"""Lazily compile the core step functions with torch.compile."""
         if self.defaults.get('compile_step', False):
             try:
+                # Raise recompile limit to accommodate diverse parameter shapes
+                # (e.g. LoRA layers with [rank, 768], [rank, 320], [rank, 4096], etc.)
+                torch._dynamo.config.recompile_limit = max(
+                    torch._dynamo.config.recompile_limit, 64
+                )
                 with torch._dynamo.utils.disable_cache_limit():
                     self._compiled_unfactored = torch.compile(
                         self._core_unfactored_fp32, fullgraph=True, dynamic=False
