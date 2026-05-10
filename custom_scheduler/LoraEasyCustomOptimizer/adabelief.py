@@ -6,7 +6,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
-from .utils import copy_stochastic_
+from .utils import apply_weight_decay, copy_stochastic_
 
 
 class AdaBelief(BaseOptimizer):
@@ -46,6 +46,7 @@ class AdaBelief(BaseOptimizer):
         adam_debias: bool = False,
         eps: float = 1e-16,
         cautious: bool = False,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -68,6 +69,7 @@ class AdaBelief(BaseOptimizer):
             'adam_debias': adam_debias,
             'eps': eps,
             'cautious': cautious,
+            'torch_compile': torch_compile,
         }
         if adanorm:
             defaults.update({'r': r})
@@ -152,13 +154,14 @@ class AdaBelief(BaseOptimizer):
                     if group['ams_bound']:
                         state['max_exp_avg_var'] = torch.zeros_like(p)
 
-                self.apply_weight_decay(
+                apply_weight_decay(
                     p=p_fp32,
                     grad=grad,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
                     weight_decouple=group['weight_decouple'],
                     fixed_decay=group['fixed_decay'],
+                    torch_compile=group.get('torch_compile', False),
                 )
 
                 exp_avg, exp_avg_var = state['exp_avg'], state['exp_avg_var']

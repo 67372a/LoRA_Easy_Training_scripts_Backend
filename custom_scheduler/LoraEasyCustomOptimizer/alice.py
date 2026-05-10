@@ -7,7 +7,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 
-from .utils import copy_stochastic_, debias_beta
+from .utils import apply_weight_decay, copy_stochastic_, debias_beta
 
 class Alice(BaseOptimizer):
     r"""Adaptive low-dimensional subspace estimation.
@@ -45,6 +45,7 @@ class Alice(BaseOptimizer):
         adam_lr: float = 5e-4,
         adam_betas: Betas = (0.9, 0.999),
         adam_weight_decay: float = 0.0,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -79,6 +80,7 @@ class Alice(BaseOptimizer):
             'adam_lr': adam_lr,
             'adam_betas': adam_betas,
             'adam_weight_decay': adam_weight_decay,
+            'torch_compile': torch_compile,
         }
         super().__init__(params, defaults)
 
@@ -322,13 +324,14 @@ class Alice(BaseOptimizer):
                     p_fp32 = p.to(torch.float32)
                     q, u, m, v, phi = q.to(torch.float32), u.to(torch.float32), m.to(torch.float32), v.to(torch.float32), phi.to(torch.float32)
 
-                self.apply_weight_decay(
+                apply_weight_decay(
                     p=p_fp32,
                     grad=grad,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
                     weight_decouple=group['weight_decouple'],
                     fixed_decay=False,
+                    torch_compile=group.get('torch_compile', False),
                 )
 
                 if group['step'] == 1 or group['step'] % group['update_interval'] == 0:

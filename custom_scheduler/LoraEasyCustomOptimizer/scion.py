@@ -7,7 +7,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Closure, Defaults, Loss, ParamGroup
-from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, _paper_orthograd, agc, _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl, SSCCosineDecay, newton_schulz_
+from .utils import apply_weight_decay, copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, _paper_orthograd, agc, _get_compiled_stable_spam_clipping, _stable_spam_clipping_impl, SSCCosineDecay, newton_schulz_
 from typing import Dict, Optional
 
 class LMONorm(IntEnum):
@@ -453,9 +453,9 @@ class SCION(BaseOptimizer):
 
                 if use_stable_spam_clipping:
                     if group['torch_compile']:
-                        grad = _stable_spam_clipping_compile_wrapper(state, 
-                                            grad, 
-                                            step=group['step'], 
+                        grad = _get_compiled_stable_spam_clipping()(state,
+                                            grad,
+                                            step=group['step'],
                                             scale=scale)
                     else:
                         grad = _stable_spam_clipping_impl(state, 
@@ -479,13 +479,14 @@ class SCION(BaseOptimizer):
                         p_fp32.mul_(1.0 - group['lr'])
 
                     if not group['constraint'] and group['weight_decay'] > 0.0:
-                        self.apply_weight_decay(
+                        apply_weight_decay(
                             p_fp32,
                             grad,
                             lr=group['lr'],
                             weight_decay=group['weight_decay'],
                             weight_decouple=group['weight_decouple'],
                             fixed_decay=False,
+                            torch_compile=group.get('torch_compile', False),
                         )
 
                 if update_strategy in {'cautious','grams','both'}:

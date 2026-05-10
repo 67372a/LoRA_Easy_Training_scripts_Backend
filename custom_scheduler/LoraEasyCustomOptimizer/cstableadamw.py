@@ -8,7 +8,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 
-from .utils import _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl
+from .utils import apply_weight_decay, _get_compiled_stable_spam_clipping, _stable_spam_clipping_impl
 
 
 class CStableAdamW(BaseOptimizer):
@@ -164,8 +164,8 @@ class CStableAdamW(BaseOptimizer):
             return grad
 
         if torch_compile:
-            return _stable_spam_clipping_compile_wrapper(state, 
-                                grad, 
+            return _get_compiled_stable_spam_clipping()(state,
+                                grad,
                                 step=group_step,
                                 scale=ssc_scale,
                                 eps=ssc_eps_clip,
@@ -278,13 +278,14 @@ class CStableAdamW(BaseOptimizer):
                     exp_avg.lerp_(grad_for_processing, weight=beta1_comp) # beta1_comp is 1-beta1
                     exp_avg_sq.mul_(beta2_for_ema).addcmul_(grad_for_processing, grad_for_processing, value=1.0 - beta2_for_ema)
 
-                self.apply_weight_decay(
+                apply_weight_decay(
                     p=p,
                     grad=grad_for_processing,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
                     weight_decouple=group['weight_decouple'],
                     fixed_decay=False,
+                    torch_compile=group.get('torch_compile', False),
                 )
 
                 if use_rms:

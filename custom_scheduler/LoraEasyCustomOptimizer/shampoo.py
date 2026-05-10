@@ -12,7 +12,7 @@ from .shampoo_utils import (
     PreConditionerType,
     build_graft,
 )
-from .utils import copy_stochastic_
+from .utils import apply_weight_decay, copy_stochastic_
 
 class ScalableShampoo(BaseOptimizer):
     r"""Scalable Preconditioned Stochastic Tensor Optimization.
@@ -89,6 +89,7 @@ class ScalableShampoo(BaseOptimizer):
         diagonal_eps: float = 1e-10,
         matrix_eps: float = 1e-6,
         use_svd: bool = False,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -122,6 +123,7 @@ class ScalableShampoo(BaseOptimizer):
             'decoupled_learning_rate': decoupled_learning_rate,
             'moving_average_for_momentum': moving_average_for_momentum,
             'nesterov': nesterov,
+            'torch_compile': torch_compile,
         }
         super().__init__(params, defaults)
 
@@ -225,13 +227,14 @@ class ScalableShampoo(BaseOptimizer):
                     shampoo_grad.mul_(graft_norm / (shampoo_norm + 1e-16))
 
                 for g in (graft_grad, shampoo_grad):
-                    self.apply_weight_decay(
+                    apply_weight_decay(
                         p_fp32,
                         g,
                         group['lr'],
                         group['weight_decay'],
                         group['decoupled_weight_decay'],
                         fixed_decay=False,
+                        torch_compile=group.get('torch_compile', False),
                     )
 
                 momentum = state['momentum']

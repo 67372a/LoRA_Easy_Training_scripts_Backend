@@ -7,7 +7,7 @@ from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from .galore_utils import GaLoreProjector
 
-from .utils import copy_stochastic_
+from .utils import apply_weight_decay, copy_stochastic_
 
 
 class GaLore(BaseOptimizer):
@@ -27,6 +27,7 @@ class GaLore(BaseOptimizer):
         betas: Betas = (0.9, 0.999),
         weight_decay: float = 0.0,
         eps: float = 1e-6,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -39,6 +40,7 @@ class GaLore(BaseOptimizer):
             'betas': betas,
             'weight_decay': weight_decay,
             'eps': eps,
+            'torch_compile': torch_compile,
             **kwargs,
         }
 
@@ -126,13 +128,14 @@ class GaLore(BaseOptimizer):
 
                 p_fp32.add_(norm_grad, alpha=-step_size)
 
-                self.apply_weight_decay(
+                apply_weight_decay(
                     p=p_fp32,
                     grad=grad,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
                     weight_decouple=True,
                     fixed_decay=False,
+                    torch_compile=group.get('torch_compile', False),
                 )
 
                 copy_stochastic_(state['exp_avg'], exp_avg)

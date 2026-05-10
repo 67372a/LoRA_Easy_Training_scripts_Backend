@@ -12,7 +12,7 @@ from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from pytorch_optimizer.optimizer.gradient_centralization import centralize_gradient
 from pytorch_optimizer.optimizer.utils import normalize_gradient, unit_norm
-from .utils import copy_stochastic_, agc
+from .utils import apply_weight_decay, copy_stochastic_, agc
 
 
 class Ranger21(BaseOptimizer):
@@ -85,6 +85,7 @@ class Ranger21(BaseOptimizer):
         norm_loss_factor: float = 1e-4,
         adam_debias: bool = False,
         eps: float = 1e-8,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -121,6 +122,7 @@ class Ranger21(BaseOptimizer):
             'fixed_decay': fixed_decay,
             'adam_debias': adam_debias,
             'eps': eps,
+            'torch_compile': torch_compile,
         }
         super().__init__(params, defaults)
 
@@ -286,7 +288,7 @@ class Ranger21(BaseOptimizer):
                     grad = grad.to(torch.float32)
 
                 # stable weight decay
-                self.apply_weight_decay(
+                apply_weight_decay(
                     p=p_fp32,
                     grad=grad,
                     lr=lr,
@@ -294,6 +296,7 @@ class Ranger21(BaseOptimizer):
                     weight_decouple=group['weight_decouple'],
                     fixed_decay=group['fixed_decay'],
                     ratio=1.0 / variance_normalized,
+                    torch_compile=group.get('torch_compile', False),
                 )
 
                 # norm loss

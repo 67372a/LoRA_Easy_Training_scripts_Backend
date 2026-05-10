@@ -3,7 +3,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Closure, Defaults, Loss, ParamGroup
-from .utils import copy_stochastic_
+from .utils import apply_weight_decay, copy_stochastic_
 
 class SGDSaI(BaseOptimizer):
     r"""No More Adam: Learning Rate Scaling at Initialization is All You Need.
@@ -25,6 +25,7 @@ class SGDSaI(BaseOptimizer):
         weight_decouple: bool = True,
         eps: float = 1e-8,
         cautious: bool = False,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -41,6 +42,7 @@ class SGDSaI(BaseOptimizer):
             'weight_decouple': weight_decouple,
             'cautious': cautious,
             'eps': eps,
+            'torch_compile': torch_compile,
         }
         super().__init__(params, defaults)
 
@@ -136,13 +138,14 @@ class SGDSaI(BaseOptimizer):
                 else:
                     momentum_buffer = grad
 
-                self.apply_weight_decay(
+                apply_weight_decay(
                     p_fp32,
                     grad,
                     group['lr'],
                     group['weight_decay'],
                     group['weight_decouple'],
                     False,
+                    torch_compile=group.get('torch_compile', False),
                 )
 
                 if group["cautious"] and momentum > 0.0:

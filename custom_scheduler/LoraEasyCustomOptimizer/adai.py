@@ -7,7 +7,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError, ZeroParamete
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from pytorch_optimizer.optimizer.gradient_centralization import centralize_gradient
-from .utils import copy_stochastic_
+from .utils import apply_weight_decay, copy_stochastic_
 
 
 class Adai(BaseOptimizer):
@@ -37,6 +37,7 @@ class Adai(BaseOptimizer):
         dampening: float = 1.0,
         use_gc: bool = False,
         eps: float = 1e-3,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -55,6 +56,7 @@ class Adai(BaseOptimizer):
             'stable_weight_decay': stable_weight_decay,
             'dampening': dampening,
             'eps': eps,
+            'torch_compile': torch_compile,
         }
         super().__init__(params, defaults)
 
@@ -122,13 +124,14 @@ class Adai(BaseOptimizer):
                 bias_correction2: float = self.debias(beta2, group['step'])
 
                 if not group['stable_weight_decay'] and group['weight_decay'] > 0.0:
-                    self.apply_weight_decay(
+                    apply_weight_decay(
                         p=p_fp32,
                         grad=grad,
                         lr=group['lr'],
                         weight_decay=group['weight_decay'],
                         weight_decouple=group['weight_decouple'],
                         fixed_decay=group['fixed_decay'],
+                        torch_compile=group.get('torch_compile', False),
                     )
 
                 exp_avg_sq = state['exp_avg_sq']
@@ -169,13 +172,14 @@ class Adai(BaseOptimizer):
                     p_fp32 = p.clone().to(torch.float32)
 
                 if group['stable_weight_decay'] and group['weight_decay'] > 0.0:
-                    self.apply_weight_decay(
+                    apply_weight_decay(
                         p=p_fp32,
                         grad=grad,
                         lr=group['lr'],
                         weight_decay=group['weight_decay'],
                         weight_decouple=group['weight_decouple'],
                         fixed_decay=group['fixed_decay'],
+                        torch_compile=group.get('torch_compile', False),
                     )
 
                 bias_correction2: float = self.debias(beta2, group['step'])

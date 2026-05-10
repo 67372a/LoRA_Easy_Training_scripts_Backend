@@ -5,7 +5,7 @@ from torch.optim import Optimizer
 from math import sqrt
 from enum import IntEnum
 import math
-from .utils import _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl, orthograd_atan, copy_stochastic_
+from .utils import _get_compiled_stable_spam_clipping, _stable_spam_clipping_impl, orthograd_atan, copy_stochastic_
 
 # https://github.com/kozistr/pytorch_optimizer/blob/6397d56279ad80b26c4bba7fb4b04852b517fdeb/pytorch_optimizer/optimizer/shampoo_utils.py#L533
 def zero_power_via_newton_schulz_5(
@@ -509,8 +509,8 @@ class SCORN(Optimizer):
 
                 if use_stable_spam_clipping:
                     if group['torch_compile']:
-                        grad = _stable_spam_clipping_compile_wrapper(state, 
-                                            grad, 
+                        grad = _get_compiled_stable_spam_clipping()(state,
+                                            grad,
                                             step=group['step'])
                     else:
                         grad = _stable_spam_clipping_impl(state, 

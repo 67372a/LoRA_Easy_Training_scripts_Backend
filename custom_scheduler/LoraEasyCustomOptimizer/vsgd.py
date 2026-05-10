@@ -7,7 +7,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Closure, Defaults, Loss, ParamGroup
-from .utils import copy_stochastic_
+from .utils import apply_weight_decay, copy_stochastic_
 
 
 class VSGD(BaseOptimizer):
@@ -37,6 +37,7 @@ class VSGD(BaseOptimizer):
         weight_decouple: bool = True,
         eps: float = 1e-8,
         maximize: bool = False,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -59,6 +60,7 @@ class VSGD(BaseOptimizer):
             'weight_decay': weight_decay,
             'weight_decouple': weight_decouple,
             'eps': eps,
+            'torch_compile': torch_compile,
         }
 
         super().__init__(params, defaults)
@@ -122,13 +124,14 @@ class VSGD(BaseOptimizer):
                     p_fp32 = p.to(torch.float32)
                     grad = grad.to(torch.float32)
 
-                self.apply_weight_decay(
+                apply_weight_decay(
                     p_fp32,
                     grad=grad,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
                     weight_decouple=group['weight_decouple'],
                     fixed_decay=False,
+                    torch_compile=group.get('torch_compile', False),
                 )
 
                 bg, bhg, mug = state['bg'], state['bhg'], state['mug']

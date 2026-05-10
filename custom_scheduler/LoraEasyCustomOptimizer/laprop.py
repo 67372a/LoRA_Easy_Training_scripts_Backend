@@ -5,7 +5,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
-from .utils import copy_stochastic_
+from .utils import apply_weight_decay, copy_stochastic_
 
 
 class LaProp(BaseOptimizer):
@@ -36,6 +36,7 @@ class LaProp(BaseOptimizer):
         ams_bound: bool = False,
         cautious: bool = False,
         eps: float = 1e-15,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -55,6 +56,7 @@ class LaProp(BaseOptimizer):
             'fixed_decay': fixed_decay,
             'ams_bound': ams_bound,
             'eps': eps,
+            'torch_compile': torch_compile,
         }
 
         super().__init__(params, defaults)
@@ -180,13 +182,14 @@ class LaProp(BaseOptimizer):
 
                 p_fp32.add_(exp_avg * mask, alpha=-step_size)
 
-                self.apply_weight_decay(
+                apply_weight_decay(
                     p=p_fp32,
                     grad=grad,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
                     weight_decouple=group['weight_decouple'],
                     fixed_decay=group['fixed_decay'],
+                    torch_compile=group.get('torch_compile', False),
                 )
 
                 # pack

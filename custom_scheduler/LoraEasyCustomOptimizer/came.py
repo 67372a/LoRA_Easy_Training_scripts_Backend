@@ -10,7 +10,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
-from .utils import apply_weight_decay, copy_stochastic_, UPDATE_STRATEGY, apply_cautious
+from .utils import copy_stochastic_, UPDATE_STRATEGY
 import logging
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class CAME(BaseOptimizer):
     :param cautious_weight_decay: bool: Applies weight decay only to parameter coordinates whose signs align with the optimizer update. (default: False)
     :param compile_step: bool: Use torch.compile on the core per-parameter step (default: False)
     :param foreach: bool: Use torch._foreach_* operations for unfactored (1D/0D) parameters (default: False)
-    :param non_factored_confidence: bool: Apply confidence/residual mechanism to non-factored (1D/0D) parameters (default: False)
+    :param non_factored_confidence: bool: Apply confidence/residual mechanism to non-factored (1D/0D) parameters (default: True)
     """
 
     def __init__(
@@ -454,8 +454,98 @@ class CAME(BaseOptimizer):
         # === Parameter update ===
         p_fp32.add_(-update)
 
+    @staticmethod
+    @torch.no_grad()
+    def _core_unfactored_full_fp32(
+        grad: torch.Tensor,
+        exp_avg: torch.Tensor,
+        exp_avg_sq: torch.Tensor,
+        exp_avg_res: torch.Tensor,
+        exp_avg_sq_hat: torch.Tensor,
+        beta1: torch.Tensor,
+        beta2: torch.Tensor,
+        beta3: torch.Tensor,
+        eps1: torch.Tensor,
+        eps2: torch.Tensor,
+        clip_threshold: torch.Tensor,
+        use_amsbound: bool,
+        use_nfc: bool,
+        lr: torch.Tensor,
+        weight_decay: torch.Tensor,
+        weight_decouple: bool,
+        fixed_decay: bool,
+        cautious_weight_decay: bool,
+        use_cautious: bool,
+        use_grams: bool,
+        p_fp32: torch.Tensor,
+    ) -> None:
+        r"""Core unfactored per-parameter step INCLUDING confidence, weight decay, LR scale, update strategy, and param update.
+
+        All inputs are FP32 tensors on the compute device.
+        Modifies all state tensors and p_fp32 in-place.
+        Branch booleans are compile-time constants resolved during tracing.
+        """
+        # update = grad^2 + eps1
+        update = torch.mul(grad, grad).add_(eps1)
+
+        # EMA of squared gradient
+        exp_avg_sq.mul_(beta2).add_(update, alpha=1.0 - beta2)
+        torch.rsqrt(exp_avg_sq, out=update)
+
+        # AMSBound
+        if use_amsbound:
+            torch.max(exp_avg_sq_hat, 1.0 / update, out=exp_avg_sq_hat)
+            torch.rsqrt(exp_avg_sq_hat / beta2, out=update)
+
+        # Precondition gradient
+        update.mul_(grad)
+
+        # RMS clip -- numel is static with dynamic=False, so math.sqrt is trace-time constant
+        rms = update.norm(2) / math.sqrt(update.numel())
+        clip_factor = (rms / clip_threshold).clamp_(min=1.0)
+        update.div_(clip_factor)
+
+        # Momentum exp_avg = beta1*exp_avg + (1-beta1)*update
+        exp_avg.mul_(beta1).add_(update, alpha=1.0 - beta1)
+
+        # Non-factored confidence: apply residual modulation
+        if use_nfc:
+            # update still holds pre-momentum value; res = (pre - post)^2 + eps2
+            res = update.sub(exp_avg).pow_(2).add_(eps2)
+            exp_avg_res.mul_(beta3).add_(res, alpha=1.0 - beta3)
+            # update = exp_avg / (sqrt(exp_avg_res) + eps2)
+            update.copy_(exp_avg).div_(exp_avg_res.sqrt().add_(eps2))
+        else:
+            # copy exp_avg into update so subsequent in-place ops don't corrupt exp_avg
+            update.copy_(exp_avg)
+
+        # === Weight decay (inlined for compilation; branch resolved at trace time) ===
+        if cautious_weight_decay:
+            cwd_mask = (grad * p_fp32 >= 0).to(p_fp32.dtype)
+            p_fp32.mul_(1.0 - weight_decay * lr * cwd_mask)
+        elif weight_decouple:
+            wd_factor = 1.0 if fixed_decay else lr
+            p_fp32.mul_(1.0 - weight_decay * wd_factor)
+        else:
+            grad.add_(p_fp32, alpha=weight_decay)
+
+        # === LR scale ===
+        update.mul_(lr)
+
+        # === Update strategy (resolved at compile time) ===
+        if use_cautious:
+            mask = (update * grad > 0).to(grad.dtype)
+            mask.div_(mask.mean().clamp_(min=1e-3))
+            update.mul_(mask)
+        if use_grams:
+            update.copy_(torch.sign(grad) * update.abs())
+
+        # === Parameter update ===
+        p_fp32.add_(-update)
+
     def _compile_core_fns(self) -> None:
         r"""Lazily compile the core step functions with torch.compile."""
+        use_foreach = self.defaults.get('foreach', False)
         if self.defaults.get('compile_step', False):
             try:
                 # Raise recompile limit to accommodate diverse parameter shapes
@@ -464,19 +554,25 @@ class CAME(BaseOptimizer):
                     torch._dynamo.config.recompile_limit, 64
                 )
                 with torch._dynamo.utils.disable_cache_limit():
-                    self._compiled_unfactored = torch.compile(
-                        self._core_unfactored_fp32, fullgraph=True, dynamic=False
-                    )
+                    # Always compile the factored step (used for 2D+ params regardless of foreach)
                     self._compiled_factored = torch.compile(
                         self._core_factored_full_fp32, fullgraph=True, dynamic=False
                     )
+                    # Skip compiling unfactored step when foreach is enabled;
+                    # all 1D/0D params are handled by _foreach_unfactored_step instead.
+                    if not use_foreach:
+                        self._compiled_unfactored = torch.compile(
+                            self._core_unfactored_full_fp32, fullgraph=True, dynamic=False
+                        )
+                    else:
+                        self._compiled_unfactored = self._core_unfactored_full_fp32
                 logger.info("CAME core functions compiled with torch.compile(fullgraph=True, dynamic=False).")
             except Exception as e:
                 logger.warning(f"torch.compile(fullgraph=True, dynamic=False) failed: {e}. Falling back to uncompiled step.")
-                self._compiled_unfactored = self._core_unfactored_fp32
+                self._compiled_unfactored = self._core_unfactored_full_fp32
                 self._compiled_factored = self._core_factored_full_fp32
         else:
-            self._compiled_unfactored = self._core_unfactored_fp32
+            self._compiled_unfactored = self._core_unfactored_full_fp32
             self._compiled_factored = self._core_factored_full_fp32
 
     # --- Scalar Tensor Caching (avoids per-parameter allocation) ---
@@ -583,8 +679,8 @@ class CAME(BaseOptimizer):
 
         # 1. Denominator: update = grad^2 + eps1, then EMA, then rsqrt
         #    We reuse exp_avg_sq_list as 'update' after setting it to grad^2 + eps1
-        update_list = [g.mul(g) for g in grad_list]  # grad^2 (per-tensor, no foreach variant for mul)
-        _ = [u.add_(group['eps1']) for u in update_list]  # + eps1
+        update_list = torch._foreach_mul(grad_list, grad_list)  # grad^2 — batched
+        torch._foreach_add_(update_list, group['eps1'])  # + eps1 — batched
 
         # EMA of squared gradient: exp_avg_sq = beta2 * exp_avg_sq + (1-beta2) * update
         torch._foreach_mul_(exp_avg_sq_list, beta2)
@@ -619,52 +715,64 @@ class CAME(BaseOptimizer):
         torch._foreach_mul_(exp_avg_list, beta1)
         torch._foreach_add_(exp_avg_list, denom_list, alpha=1.0 - beta1)
 
-        # 5. Confidence residual modulation (non-factored)
+        # 5. Confidence residual modulation (non-factored) — batched via foreach, zero intermediate allocations
         if nfc:
-            # For each param: res = (pre_momentum_update - post_momentum_exp_avg)^2 + eps2
-            # Then: exp_avg_res = beta3 * exp_avg_res + (1-beta3) * res
-            # Then: final_update = exp_avg / sqrt(exp_avg_res)
-            final_update_list = []
-            for i in range(len(exp_avg_list)):
-                pre_upd = pre_momentum_updates[i]
-                post_exp_avg = exp_avg_list[i]
-                ear = exp_avg_res_list[i]
+            # Reuse pre_momentum_updates as scratch buffer (clones of denom_list, no longer needed)
+            # Compute residual in-place: res = (pre_momentum_update - exp_avg)^2 + eps2
+            torch._foreach_sub_(pre_momentum_updates, exp_avg_list)
+            torch._foreach_mul_(pre_momentum_updates, pre_momentum_updates)
+            torch._foreach_add_(pre_momentum_updates, group['eps2'])
 
-                res = pre_upd.sub(post_exp_avg).pow_(2).add_(group['eps2'])
-                ear.mul_(beta3).add_(res, alpha=1.0 - beta3)
-                final_update = post_exp_avg.div_(ear.sqrt_().add_(group['eps2']))
-                final_update_list.append(final_update)
+            # EMA of residual: exp_avg_res = beta3 * exp_avg_res + (1-beta3) * res
+            torch._foreach_mul_(exp_avg_res_list, beta3)
+            torch._foreach_add_(exp_avg_res_list, pre_momentum_updates, alpha=1.0 - beta3)
+
+            # final_update = exp_avg / (sqrt(exp_avg_res) + eps2)
+            # Copy exp_avg_res into scratch, then sqrt in-place to preserve exp_avg_res state
+            for i in range(len(pre_momentum_updates)):
+                pre_momentum_updates[i].copy_(exp_avg_res_list[i])
+            torch._foreach_sqrt_(pre_momentum_updates)
+            torch._foreach_add_(pre_momentum_updates, group['eps2'])
+            # Reciprocal in-place then multiply by exp_avg to avoid _foreach_div allocation
+            torch._foreach_pow_(pre_momentum_updates, -1.0)
+            torch._foreach_mul_(pre_momentum_updates, exp_avg_list)
+            final_update_list = pre_momentum_updates
         else:
             # update = exp_avg (no confidence)
             final_update_list = exp_avg_list
 
-        # 6. Weight decay
-        for i, p_fp32 in enumerate(p_fp32_list):
-            apply_weight_decay(
-                p=p_fp32,
-                grad=grad_list[i],
-                lr=lr,
-                weight_decay=wd,
-                weight_decouple=wd_decouple,
-                fixed_decay=fixed_decay,
-                cautious_weight_decay=cwd,
-            )
+        # 6. Weight decay (inlined foreach variant — mirrors _core_unfactored_full_fp32)
+        if cwd:
+            # Cautious weight decay: apply WD only where gradient and param agree in sign
+            wd_scaled = wd * lr
+            for i in range(len(p_fp32_list)):
+                cwd_mask = (grad_list[i] * p_fp32_list[i] >= 0).to(p_fp32_list[i].dtype)
+                p_fp32_list[i].mul_(1.0 - wd_scaled * cwd_mask)
+        elif wd_decouple:
+            wd_factor = 1.0 if fixed_decay else lr
+            torch._foreach_mul_(p_fp32_list, 1.0 - wd * wd_factor)
+        elif wd > 0.0:
+            # Standard (non-decoupled) weight decay: add scaled parameter to gradient
+            torch._foreach_add_(grad_list, p_fp32_list, alpha=wd)
 
         # 7. LR scale
         torch._foreach_mul_(final_update_list, lr)
 
-        # 8. Update strategy
-        if update_strategy == 'cautious':
+        # 8. Update strategy (inlined foreach variant — mirrors _core_unfactored_full_fp32)
+        if update_strategy in ('cautious', 'both'):
+            # Cautious: mask = (update * grad > 0), normalized by mean
+            mask_list = []
             for i in range(len(final_update_list)):
-                apply_cautious(final_update_list[i], grad_list[i])
-                # apply_cautious modifies in-place, no mask needed
-        elif update_strategy == 'grams':
-            for i in range(len(final_update_list)):
-                final_update_list[i].copy_(torch.sign(grad_list[i]) * final_update_list[i].abs())
-        elif update_strategy == 'both':
-            for i in range(len(final_update_list)):
-                apply_cautious(final_update_list[i], grad_list[i])
-                final_update_list[i].copy_(torch.sign(grad_list[i]) * final_update_list[i].abs())
+                mask = (final_update_list[i] * grad_list[i] > 0).to(grad_list[i].dtype)
+                mask.div_(mask.mean().clamp_(min=1e-3))
+                mask_list.append(mask)
+            torch._foreach_mul_(final_update_list, mask_list)
+        if update_strategy in ('grams', 'both'):
+            # Grams: update = sign(grad) * |update|
+            final_update_list = torch._foreach_mul(
+                torch._foreach_sign(grad_list),
+                torch._foreach_abs(final_update_list),
+            )
 
         # 9. Apply: p -= update
         torch._foreach_add_(p_fp32_list, final_update_list, alpha=-1.0)
@@ -730,7 +838,6 @@ class CAME(BaseOptimizer):
             use_foreach = group.get('foreach', False)
             nfc = group.get('non_factored_confidence', False)
             update_strategy = group['update_strategy']
-            lr = group['lr']
 
             # Lazily compile core functions on first step
             if self._compiled_unfactored is None:
@@ -915,22 +1022,12 @@ class CAME(BaseOptimizer):
                         p_fp32,
                     )
                 else:
-                    # Unfactored path (not handled by foreach)
-                    beta1_t = torch.tensor(beta1, device=compute_device, dtype=torch.float32)
-                    beta2_t = torch.tensor(beta2, device=compute_device, dtype=torch.float32)
-                    beta3_t = torch.tensor(beta3, device=compute_device, dtype=torch.float32)
-                    eps1_t = torch.tensor(group['eps1'], device=compute_device, dtype=torch.float32)
-                    eps2_t = torch.tensor(group['eps2'], device=compute_device, dtype=torch.float32)
-                    clip_t = torch.tensor(group['clip_threshold'], device=compute_device, dtype=torch.float32)
+                    # Unfactored path (not handled by foreach) -- use full compiled step
+                    group_idx = self.param_groups.index(group)
+                    scalars = self._get_scalar_tensors(compute_device, group_idx, group)
 
-                    exp_avg_result, pre_momentum_update = core_unfactored_fn(
-                        grad, exp_avg, exp_avg_sq,
-                        exp_avg_sq_hat if group['ams_bound'] else torch.empty(0, device=compute_device),
-                        beta1_t, beta2_t, eps1_t, clip_t,
-                        group['ams_bound'],
-                    )
+                    ams_hat = exp_avg_sq_hat if group['ams_bound'] else self._get_empty_tensor(compute_device)
 
-                    # Non-factored confidence: apply residual modulation
                     if nfc:
                         if 'exp_avg_res' not in state:
                             # Lazy creation if state was already initialized without nfc
@@ -942,40 +1039,25 @@ class CAME(BaseOptimizer):
                         exp_avg_res_nonfac = state['exp_avg_res'].to(
                             compute_device, non_blocking=True, dtype=torch.float32
                         )
-
-                        # Residual: (pre_momentum_update - post_momentum_exp_avg)^2 + eps2
-                        res = pre_momentum_update.sub(exp_avg_result).pow_(2).add_(eps2_t)
-
-                        # EMA of residual
-                        exp_avg_res_nonfac.mul_(beta3_t).add_(res, alpha=1.0 - beta3_t)
-
-                        # Confidence modulation: update = exp_avg / sqrt(exp_avg_res)
-                        # Use division (not div_) to avoid corrupting exp_avg_result which IS exp_avg
-                        update = exp_avg_result / (exp_avg_res_nonfac.sqrt() + eps2_t)
                     else:
-                        # Standard unfactored: update = exp_avg
-                        update = exp_avg_result
+                        exp_avg_res_nonfac = self._get_empty_tensor(compute_device)
 
-                # For unfactored (non-foreach) path: apply weight decay, LR scale,
-                # update strategy, and parameter update.
-                # Factored path is fully handled by _core_factored_full_fp32().
-                if not factored:
-                    apply_weight_decay(
-                        p=p_fp32,
-                        grad=grad,
-                        lr=lr,
-                        weight_decay=group['weight_decay'],
-                        weight_decouple=group['weight_decouple'],
-                        fixed_decay=group['fixed_decay'],
-                        cautious_weight_decay=group['cautious_weight_decay'],
+                    core_unfactored_fn(
+                        grad, exp_avg, exp_avg_sq,
+                        exp_avg_res_nonfac,
+                        ams_hat,
+                        scalars['beta1_t'], scalars['beta2_t'], scalars['beta3_t'],
+                        scalars['eps1_t'], scalars['eps2_t'], scalars['clip_t'],
+                        group['ams_bound'],
+                        nfc,
+                        scalars['lr_t'], scalars['wd_t'],
+                        group['weight_decouple'],
+                        group['fixed_decay'],
+                        group['cautious_weight_decay'],
+                        update_strategy in {'cautious', 'both'},
+                        update_strategy in {'grams', 'both'},
+                        p_fp32,
                     )
-                    update.mul_(lr)
-                    if update_strategy in {'cautious', 'grams', 'both'}:
-                        if update_strategy in {'cautious', 'both'}:
-                            apply_cautious(update, grad)
-                        if update_strategy in {'grams', 'both'}:
-                            update.copy_(torch.sign(grad) * update.abs())
-                    p_fp32.add_(-update)
 
                 # ========= Write-back =========
                 if device.type == "cpu":

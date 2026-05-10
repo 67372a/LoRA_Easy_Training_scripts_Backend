@@ -3,23 +3,7 @@ from torch.optim import Optimizer
 from typing import Tuple, Iterable
 import math
 
-
-def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
-    """
-    Fast stochastic rounding implementation for half-precision tensors.
-    Thanks to Nerogar for fast stochastic pytorch implementation:
-    https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
-    """
-    with torch.no_grad():
-        result = torch.randint_like(
-            source,
-            dtype=torch.int32,
-            low=0,
-            high=(1 << 16),
-        )
-        result.add_(source.view(dtype=torch.int32))
-        result.bitwise_and_(-65536)
-        target.copy_(result.view(dtype=torch.float32))
+from .utils import copy_stochastic_
 
 
 @torch.no_grad()

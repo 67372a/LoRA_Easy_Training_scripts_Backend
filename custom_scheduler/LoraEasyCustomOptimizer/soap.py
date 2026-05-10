@@ -11,6 +11,7 @@ from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
 from pytorch_optimizer.optimizer.shampoo_utils import merge_small_dims
+from .utils import apply_weight_decay
 
 DATA_FORMAT = Literal['channels_first', 'channels_last']
 
@@ -46,6 +47,7 @@ class SOAP(BaseOptimizer):
         correct_bias: bool = True,
         data_format: DATA_FORMAT = 'channels_first',
         eps: float = 1e-8,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -69,6 +71,7 @@ class SOAP(BaseOptimizer):
             'precondition_1d': precondition_1d,
             'correct_bias': correct_bias,
             'eps': eps,
+            'torch_compile': torch_compile,
         }
         super().__init__(params, defaults)
 
@@ -321,13 +324,14 @@ class SOAP(BaseOptimizer):
 
                 p.add_(norm_grad, alpha=-step_size)
 
-                self.apply_weight_decay(
+                apply_weight_decay(
                     p,
                     grad,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
                     weight_decouple=True,
                     fixed_decay=False,
+                    torch_compile=group.get('torch_compile', False),
                 )
 
                 self.update_pre_conditioner(

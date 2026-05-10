@@ -9,6 +9,7 @@ from torch import nn
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss
+from .utils import apply_weight_decay
 
 
 class AdamMini(BaseOptimizer):  # pragma: no cover
@@ -39,6 +40,7 @@ class AdamMini(BaseOptimizer):  # pragma: no cover
         num_heads: int = 32,
         num_query_groups: Optional[int] = None,
         eps: float = 1e-8,
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -63,7 +65,7 @@ class AdamMini(BaseOptimizer):  # pragma: no cover
 
         groups = self.get_optimizer_groups(weight_decay)
 
-        defaults: Defaults = {'lr': lr, 'betas': betas, 'eps': eps}
+        defaults: Defaults = {'lr': lr, 'betas': betas, 'eps': eps, 'torch_compile': torch_compile}
         super().__init__(groups, defaults)
 
     def __str__(self) -> str:
@@ -296,13 +298,14 @@ class AdamMini(BaseOptimizer):  # pragma: no cover
 
                 state = self.state[p]
 
-                self.apply_weight_decay(
+                apply_weight_decay(
                     p=p,
                     grad=grad,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
                     weight_decouple=True,
                     fixed_decay=False,
+                    torch_compile=group.get('torch_compile', False),
                 )
 
                 if any(block in name for block in self.embed_blocks):

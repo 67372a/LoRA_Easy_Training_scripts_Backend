@@ -2,11 +2,7 @@
 
 import torch
 from torch.optim import Optimizer
-from math import sqrt
-from enum import IntEnum
-import math
-from .utils import copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, agc, _paper_orthograd, adaptive_eps, _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl
-
+from .utils import copy_stochastic_
 
 @torch.no_grad()
 def zero_power_via_newton_schulz_6(grad: torch.Tensor) -> torch.Tensor:

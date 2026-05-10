@@ -9,32 +9,11 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
-from .utils import UPDATE_STRATEGY, NORM_TYPE, agc, _paper_orthograd, adaptive_eps, _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl
+from .utils import apply_weight_decay, copy_stochastic_, UPDATE_STRATEGY, NORM_TYPE, agc, _paper_orthograd, adaptive_eps, _get_compiled_stable_spam_clipping, _stable_spam_clipping_impl
 import logging
 
 logger = logging.getLogger(__name__)
 
-
-def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
-    # thanks to Nerogar for fast stochastic pytorch implementation
-    # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
-    with torch.no_grad():
-        # create a random 16 bit integer using torch.randint with explicit shape
-        result = torch.randint_like(
-            source,
-            dtype=torch.int32,
-            low=0,
-            high=(1 << 16),
-        )
-
-        # add the random number to the lower 16 bit of the mantissa
-        result.add_(source.view(dtype=torch.int32))
-
-        # mask off the lower 16 bit of the mantissa
-        result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
-
-        # copy the higher 16 bit into the target tensor
-        target.copy_(result.view(dtype=torch.float32), non_blocking=True)
 
 # https://github.com/kozistr/pytorch_optimizer/blob/6397d56279ad80b26c4bba7fb4b04852b517fdeb/pytorch_optimizer/optimizer/shampoo_utils.py#L533
 @torch.no_grad()
@@ -323,13 +302,14 @@ class AdEMAMix(BaseOptimizer):
 
                     update = update / de_nom
 
-                    self.apply_weight_decay(
+                    apply_weight_decay(
                         p=p_fp32,
                         grad=update,
                         lr=group['lr'],
                         weight_decay=group['weight_decay'],
                         weight_decouple=group['weight_decouple'],
                         fixed_decay=group['fixed_decay'],
+                        torch_compile=group.get('torch_compile', False),
                     )
 
                     p_fp32.add_(-group['lr'] * update)
@@ -575,8 +555,8 @@ class SimplifiedAdEMAMix(BaseOptimizer):
 
                 if use_stable_spam_clipping:
                     if group['torch_compile']:
-                        grad = _stable_spam_clipping_compile_wrapper(state, 
-                                            grad, 
+                        grad = _get_compiled_stable_spam_clipping()(state,
+                                            grad,
                                             step=group['step'])
                     else:
                         grad = _stable_spam_clipping_impl(state, 
@@ -621,13 +601,14 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                     if use_adopt:
                         update.clamp_(-adopt_clip, adopt_clip)
 
-                    self.apply_weight_decay(
+                    apply_weight_decay(
                         p=p_fp32,
                         grad=grad,
                         lr=group['lr'],
                         weight_decay=group['weight_decay'],
                         weight_decouple=group['weight_decouple'],
                         fixed_decay=group['fixed_decay'],
+                        torch_compile=group.get('torch_compile', False),
                     )
 
                     p_fp32.add_(update, alpha=-group['lr'])
@@ -891,8 +872,8 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
 
                 if use_stable_spam_clipping:
                     if torch_compile:
-                        grad = _stable_spam_clipping_compile_wrapper(state, 
-                                            grad, 
+                        grad = _get_compiled_stable_spam_clipping()(state,
+                                            grad,
                                             step=step,
                                             eps=eps_floor)
                     else:
@@ -972,13 +953,14 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
 
                     update.clamp_(-adopt_clip, adopt_clip)
 
-                    self.apply_weight_decay(
+                    apply_weight_decay(
                         p=p_fp32,
                         grad=grad_normed,
                         lr=group['lr'],
                         weight_decay=group['weight_decay'],
                         weight_decouple=group['weight_decouple'],
                         fixed_decay=False,
+                        torch_compile=group.get('torch_compile', False),
                     )
 
                     p_fp32.add_(update, alpha=-group['lr'])

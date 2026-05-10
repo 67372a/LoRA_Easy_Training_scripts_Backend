@@ -7,7 +7,7 @@ import torch
 from torch.optim import Optimizer
 from .utils import (_paper_orthograd, CosineDecay, CLIP_TYPE, copy_stochastic_, agc, 
                     NORM_TYPE, create_factored_dims, get_denom, update_second_moment, STATE_PRECISION, 
-                    UPDATE_STRATEGY, spam_grad_clipping_logging, spam_grad_clipping, _stable_spam_clipping_compile_wrapper, _stable_spam_clipping_impl, SSCCosineDecay, adaptive_eps)
+                    UPDATE_STRATEGY, spam_grad_clipping_logging, spam_grad_clipping, _get_compiled_stable_spam_clipping, _stable_spam_clipping_impl, SSCCosineDecay, adaptive_eps)
 import math
 from torch.nn.functional import softplus
 from typing import Optional
@@ -1399,9 +1399,9 @@ class CompassADOPT(BaseOptimizer):
                 
                 if use_stable_spam_clipping:
                     if group['torch_compile']:
-                        grad = _stable_spam_clipping_compile_wrapper(state, 
-                                            grad, 
-                                            step=group['step'], 
+                        grad = _get_compiled_stable_spam_clipping()(state,
+                                            grad,
+                                            step=group['step'],
                                             scale=scale)
                     else:
                         grad = _stable_spam_clipping_impl(state, 

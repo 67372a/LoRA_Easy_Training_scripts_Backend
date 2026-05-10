@@ -4,47 +4,7 @@ import math
 import warnings
 from typing import Tuple, Dict, Any
 
-# Provided stochastic rounding function
-def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
-    """
-    Stochastically rounds a float32 tensor to bfloat16/float16 and copies it
-    into a target tensor of that dtype. Assumes target is bfloat16 or float16.
-    Based on fast stochastic pytorch implementation by Nerogar.
-    https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
-    """
-    if target.dtype == torch.float32:
-         # If target is float32, just do a regular copy (no rounding needed)
-         target.copy_(source)
-         return
-
-    if source.dtype != torch.float32:
-        raise ValueError("Source tensor must be float32 for stochastic rounding.")
-    if target.dtype not in [torch.bfloat16, torch.float16]:
-         raise ValueError("Target tensor must be bfloat16 or float16 for stochastic rounding.")
-
-    with torch.no_grad():
-        # Ensure tensors are on the same device
-        if source.device != target.device:
-             source = source.to(target.device)
-
-        # Generate random bits based on the shape of the source tensor
-        random_bits = torch.randint_like(
-            source,
-            dtype=torch.int32,
-            low=0,
-            high=(1 << 16),
-            device=source.device
-        )
-
-        # Add the random bits to the int32 representation of the float32 source.
-        source_int32_view = source.view(torch.int32)
-        result_int32_view = torch.add(source_int32_view, random_bits)
-
-        # Mask off the lower 16 bits.
-        result_int32_view = torch.bitwise_and(result_int32_view, torch.tensor(-65536, dtype=torch.int32, device=source.device))
-
-        # Copy the result bits viewed back as float32 into the target tensor.
-        target.copy_(result_int32_view.view(torch.float32))
+from .utils import copy_stochastic_
 
 
 class AdaGC(optim.Optimizer):

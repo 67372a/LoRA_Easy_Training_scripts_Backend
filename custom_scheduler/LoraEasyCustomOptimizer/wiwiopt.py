@@ -4,20 +4,7 @@ from typing import Optional, Tuple, Iterable, Literal, List
 import math
 
 
-def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
-    """
-    Fast stochastic rounding implementation for half-precision tensors.
-    """
-    with torch.no_grad():
-        result = torch.randint_like(
-            source,
-            dtype=torch.int32,
-            low=0,
-            high=(1 << 16),
-        )
-        result.add_(source.view(dtype=torch.int32))
-        result.bitwise_and_(-65536)
-        target.copy_(result.view(dtype=torch.float32))
+from .utils import copy_stochastic_
 
 
 # Newton-Schulz iteration coefficients for orthogonalization

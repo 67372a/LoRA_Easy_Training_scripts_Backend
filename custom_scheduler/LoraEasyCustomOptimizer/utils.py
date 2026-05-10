@@ -459,16 +459,16 @@ def stable_spam_clipping(state: dict,
                          torch_compile: bool = False) -> torch.Tensor:    
     
     if torch_compile:
-        return _stable_spam_clipping_compile_wrapper(state, 
-                            grad, 
-                            step, 
-                            scale, 
-                            eps, 
-                            gamma1, 
-                            gamma2, 
+        return _get_compiled_stable_spam_clipping()(state,
+                            grad,
+                            step,
+                            scale,
+                            eps,
+                            gamma1,
+                            gamma2,
                             gamma3)
     else:
-        return _stable_spam_clipping_impl(state, 
+        return _stable_spam_clipping_impl(state,
                             grad, 
                             step, 
                             scale, 
@@ -477,24 +477,34 @@ def stable_spam_clipping(state: dict,
                             gamma2, 
                             gamma3)
 
-@torch._dynamo.utils.disable_cache_limit()
-@torch.compile()
-def _stable_spam_clipping_compile_wrapper(state: dict, 
-                         grad: torch.Tensor, 
-                         step: int|torch.Tensor, 
-                         scale: float|torch.Tensor = 1.0, 
-                         eps: float|torch.Tensor = 1e-8, 
-                         gamma1: float|torch.Tensor = 0.85, 
-                         gamma2: float|torch.Tensor = 0.99999, 
-                         gamma3: float|torch.Tensor = 0.999) -> torch.Tensor:    
-    return _stable_spam_clipping_impl(state, 
-                         grad, 
-                         step, 
-                         scale, 
-                         eps, 
-                         gamma1, 
-                         gamma2, 
+def _stable_spam_clipping_compile_wrapper(state: dict,
+                         grad: torch.Tensor,
+                         step: int|torch.Tensor,
+                         scale: float|torch.Tensor = 1.0,
+                         eps: float|torch.Tensor = 1e-8,
+                         gamma1: float|torch.Tensor = 0.85,
+                         gamma2: float|torch.Tensor = 0.99999,
+                         gamma3: float|torch.Tensor = 0.999) -> torch.Tensor:
+    return _stable_spam_clipping_impl(state,
+                         grad,
+                         step,
+                         scale,
+                         eps,
+                         gamma1,
+                         gamma2,
                          gamma3)
+
+# Module-level cache for lazily compiled functions (avoids looping compile)
+_compiled_fns: dict = {}
+
+def _get_compiled_stable_spam_clipping():
+    r"""Lazily compile _stable_spam_clipping_compile_wrapper using torch.compile function call."""
+    if 'stable_spam_clipping' not in _compiled_fns:
+        with torch._dynamo.utils.disable_cache_limit():
+            _compiled_fns['stable_spam_clipping'] = torch.compile(
+                _stable_spam_clipping_compile_wrapper, fullgraph=True, dynamic=False
+            )
+    return _compiled_fns['stable_spam_clipping']
 
 @torch.no_grad()
 def _stable_spam_clipping_impl(state: dict, 
@@ -801,16 +811,37 @@ def _paper_orthograd_compile(param, grad, alpha: float = 1.0, eps: float|torch.T
     grad.copy_(torch.where(w_norm_sq > eps, g_orth_scaled.view_as(grad), grad))
     # Else: w_norm_sq is too small, leave p.grad as is.
 
+def _apply_cautious_compile(update: torch.Tensor, grad: torch.Tensor) -> None:
+    r"""Compiled variant of apply_cautious — fullgraph-safe with boolean op resolved at trace time."""
+    mask = (update * grad > 0).to(grad.dtype)
+    mask.div_(mask.mean().clamp_(min=1e-3))
+    update.mul_(mask)
+
+
+def _get_compiled_apply_cautious():
+    r"""Lazily compile _apply_cautious_compile using torch.compile function call."""
+    if 'apply_cautious' not in _compiled_fns:
+        with torch._dynamo.utils.disable_cache_limit():
+            _compiled_fns['apply_cautious'] = torch.compile(
+                _apply_cautious_compile, fullgraph=True, mode="reduce-overhead"
+            )
+    return _compiled_fns['apply_cautious']
+
+
 @torch.no_grad()
-def apply_cautious(update: torch.Tensor, grad: torch.Tensor) -> None:
+def apply_cautious(update: torch.Tensor, grad: torch.Tensor, torch_compile: bool = False) -> None:
     r"""Apply the Cautious Optimizer feature.
 
     :param update: torch.Tensor. update. it'll be masked in in-place manner.
     :param grad: torch.Tensor. gradient.
+    :param torch_compile: bool. route through torch.compile'd wrapper.
     """
-    mask = (update * grad > 0).to(grad.dtype)
-    mask.div_(mask.mean().clamp_(min=1e-3))
-    update.mul_(mask)
+    if torch_compile:
+        _get_compiled_apply_cautious()(update, grad)
+    else:
+        mask = (update * grad > 0).to(grad.dtype)
+        mask.div_(mask.mean().clamp_(min=1e-3))
+        update.mul_(mask)
 
 def debias(beta: float, step: int) -> float:
     """Adam-style debias correction. Returns `1 - beta ** step`."""
@@ -967,6 +998,36 @@ def adaptive_eps(grad: torch.Tensor, group:dict, rms_grad: torch.Tensor = None) 
     else:
         return group['eps_t']
 
+def _apply_weight_decay_compile(
+    p: torch.Tensor,
+    grad: Optional[torch.Tensor],
+    lr: torch.Tensor,
+    weight_decay: torch.Tensor,
+    weight_decouple: bool,
+    fixed_decay: bool,
+    ratio: Optional[torch.Tensor] = None,
+    cautious_weight_decay: bool = False,
+) -> None:
+    r"""Compiled variant of apply_weight_decay.  Scalar arguments are tensors so that
+    torch.compile traces data-dependent branches correctly."""
+    if cautious_weight_decay:
+        apply_cautious_weight_decay(p, grad, lr, weight_decay)
+    elif weight_decouple:
+        p.mul_(1.0 - weight_decay * (1.0 if fixed_decay else lr) * (ratio if ratio is not None else torch.tensor(1.0, device=p.device, dtype=p.dtype)))
+    elif weight_decay > 0.0 and grad is not None:
+        grad.add_(p, alpha=weight_decay)
+
+
+def _get_compiled_apply_weight_decay():
+    r"""Lazily compile _apply_weight_decay_compile using torch.compile function call."""
+    if 'apply_weight_decay' not in _compiled_fns:
+        with torch._dynamo.utils.disable_cache_limit():
+            _compiled_fns['apply_weight_decay'] = torch.compile(
+                _apply_weight_decay_compile, fullgraph=True, dynamic=False
+            )
+    return _compiled_fns['apply_weight_decay']
+
+
 def apply_weight_decay(
     p: torch.Tensor,
     grad: Optional[torch.Tensor],
@@ -976,6 +1037,7 @@ def apply_weight_decay(
     fixed_decay: bool,
     ratio: Optional[float] = None,
     cautious_weight_decay: bool = False,
+    torch_compile: bool = False,
 ) -> None:
     """Apply weight decay in an in-place manner.
 
@@ -988,8 +1050,14 @@ def apply_weight_decay(
         fixed_decay (bool): If True, fixes weight decay to not depend on learning rate.
         ratio (Optional[float]): Optional scaling factor for weight decay.
         cautious_weight_decay (bool): If True, applies cautious weight decay.
+        torch_compile (bool): If True, route through torch.compile'd wrapper.
     """
-    if cautious_weight_decay:
+    if torch_compile:
+        lr_t = torch.tensor(lr, device=p.device, dtype=p.dtype) if not isinstance(lr, torch.Tensor) else lr
+        wd_t = torch.tensor(weight_decay, device=p.device, dtype=p.dtype) if not isinstance(weight_decay, torch.Tensor) else weight_decay
+        ratio_t = torch.tensor(ratio, device=p.device, dtype=p.dtype) if (ratio is not None and not isinstance(ratio, torch.Tensor)) else ratio
+        _get_compiled_apply_weight_decay()(p, grad, lr_t, wd_t, weight_decouple, fixed_decay, ratio_t, cautious_weight_decay)
+    elif cautious_weight_decay:
         apply_cautious_weight_decay(p, grad, lr, weight_decay)
     elif weight_decouple:
         p.mul_(1.0 - weight_decay * (1.0 if fixed_decay else lr) * (ratio if ratio is not None else 1.0))

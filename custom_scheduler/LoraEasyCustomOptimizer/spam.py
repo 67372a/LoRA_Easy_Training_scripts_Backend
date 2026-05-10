@@ -5,7 +5,7 @@ import torch
 from pytorch_optimizer.base.exception import NoSparseGradientError
 from pytorch_optimizer.base.optimizer import BaseOptimizer
 from pytorch_optimizer.base.type import Betas, Closure, Defaults, Loss, ParamGroup
-from .utils import copy_stochastic_, UPDATE_STRATEGY, _paper_orthograd, SSCCosineDecay
+from .utils import apply_weight_decay, copy_stochastic_, UPDATE_STRATEGY, _paper_orthograd, SSCCosineDecay
 from typing import Optional
 
 class StableSPAM(BaseOptimizer):
@@ -40,6 +40,7 @@ class StableSPAM(BaseOptimizer):
         use_orthograd: bool = False,
         use_adopt: bool = False,
         update_strategy: UPDATE_STRATEGY = 'unmodified',
+        torch_compile: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -65,13 +66,14 @@ class StableSPAM(BaseOptimizer):
         self.total_step: int = 0
 
         defaults: Defaults = {
-            'lr': lr, 
-            'betas': betas, 
-            'weight_decay': weight_decay, 
+            'lr': lr,
+            'betas': betas,
+            'weight_decay': weight_decay,
             'eps': eps,
             'use_orthograd': use_orthograd,
             'use_adopt':use_adopt,
             'update_strategy': update_strategy,
+            'torch_compile': torch_compile,
             **kwargs}
         super().__init__(params, defaults)
 
@@ -146,13 +148,14 @@ class StableSPAM(BaseOptimizer):
                 if use_orthograd:
                     _paper_orthograd(p_fp32, grad)
 
-                self.apply_weight_decay(
+                apply_weight_decay(
                     p_fp32,
                     grad=grad,
                     lr=group['lr'],
                     weight_decay=group['weight_decay'],
                     weight_decouple=True,
                     fixed_decay=False,
+                    torch_compile=group.get('torch_compile', False),
                 )
 
                 max_grad = torch.max(grad.abs())
