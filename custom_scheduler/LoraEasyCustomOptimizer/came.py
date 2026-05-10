@@ -41,6 +41,10 @@ class CAME(BaseOptimizer):
     :param compile_step: bool: Use torch.compile on the core per-parameter step (default: False)
     :param foreach: bool: Use torch._foreach_* operations for unfactored (1D/0D) parameters (default: False)
     :param non_factored_confidence: bool: Apply confidence/residual mechanism to non-factored (1D/0D) parameters (default: False)
+    :param kahan_sum: bool: Enable Kahan summation for parameter updates in low-precision (bf16/fp16) training.
+        Tracks rounding error from each low-precision write-back and compensates in the next step,
+        preventing small gradient updates from being lost to rounding. Only applies to bf16/fp16 parameters.
+        (default: False)
     """
 
     def __init__(
@@ -64,6 +68,7 @@ class CAME(BaseOptimizer):
         compile_step: bool = False,
         foreach: bool = False,
         non_factored_confidence: bool = False,
+        kahan_sum: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -148,6 +153,7 @@ class CAME(BaseOptimizer):
             'compile_step': compile_step,
             'foreach': foreach,
             'non_factored_confidence': non_factored_confidence,
+            'kahan_sum': kahan_sum,
         }
         super().__init__(params, defaults)
 
@@ -211,6 +217,14 @@ class CAME(BaseOptimizer):
                         device=self.state_storage_device
                     )
 
+                # Kahan compensation state for parameter (bf16/fp16 only)
+                if group['kahan_sum'] and p.dtype in {torch.float16, torch.bfloat16}:
+                    state['kahan_comp'] = torch.zeros(
+                        p.shape,
+                        dtype=torch.float32,
+                        device=self.state_storage_device
+                    )
+
                 if self.state_storage_device == "cpu":
                     state["exp_avg"] = state["exp_avg"].pin_memory()
 
@@ -227,6 +241,9 @@ class CAME(BaseOptimizer):
 
                     if not factored and group['non_factored_confidence']:
                         state['exp_avg_res'] = state['exp_avg_res'].pin_memory()
+
+                    if 'kahan_comp' in state:
+                        state['kahan_comp'] = state['kahan_comp'].pin_memory()
 
     @staticmethod
     def get_options(shape: Tuple[int, ...]) -> bool:
@@ -495,12 +512,13 @@ class CAME(BaseOptimizer):
         factored: bool,
         ams_bound: bool,
         nfc: bool,
+        kahan: bool = False,
     ) -> dict:
         r"""Create pre-allocated GPU FP32 staging buffers for a parameter and cache them.
 
         Returns a dict with keys ``'p_fp32'``, ``'grad'``, ``'exp_avg'``, and shape-dependent
         state buffers (``'exp_avg_sq'`` for unfactored, ``'exp_avg_sq_row'``/``'exp_avg_sq_col'``
-        for factored, plus optional ``'exp_avg_sq_hat'`` and ``'exp_avg_res'``).
+        for factored, plus optional ``'exp_avg_sq_hat'``, ``'exp_avg_res'``, and Kahan buffers).
         """
         grad_shape = tuple(p.shape)
         buf = {
@@ -527,6 +545,10 @@ class CAME(BaseOptimizer):
         if not factored and nfc:
             buf['exp_avg_res'] = torch.empty(grad_shape, dtype=torch.float32, device=compute_device)
 
+        if kahan:
+            buf['kahan_comp'] = torch.empty(grad_shape, dtype=torch.float32, device=compute_device)
+            buf['kahan_sim'] = torch.empty(grad_shape, dtype=torch.float32, device=compute_device)
+
         self._staging_bufs[id(p)] = buf
         return buf
 
@@ -537,15 +559,19 @@ class CAME(BaseOptimizer):
         factored: bool,
         ams_bound: bool,
         nfc: bool,
+        kahan: bool = False,
     ) -> dict:
         r"""Get or create staging buffers for a parameter, validating device and shape."""
         pid = id(p)
         buf = self._staging_bufs.get(pid)
         p_shape = tuple(p.shape)
         if buf is not None and buf['_device'] == compute_device and buf['_shape'] == p_shape:
+            # Check if kahan buffers are present when needed (handles stale cache from non-kahan creation)
+            if kahan and 'kahan_comp' not in buf:
+                return self._create_staging(p, compute_device, factored, ams_bound, nfc, kahan=True)
             return buf
         # Stale or missing — (re-)create
-        return self._create_staging(p, compute_device, factored, ams_bound, nfc)
+        return self._create_staging(p, compute_device, factored, ams_bound, nfc, kahan=kahan)
 
     def _get_srng_buf(self, like_tensor: torch.Tensor) -> torch.Tensor:
         r"""Get or create a cached int32 scratch buffer for stochastic rounding.
@@ -588,6 +614,7 @@ class CAME(BaseOptimizer):
         fixed_decay = group['fixed_decay']
         cwd = group['cautious_weight_decay']
         nfc = group['non_factored_confidence']
+        use_kahan = group.get('kahan_sum', False)
 
         # Collect phase: build lists of FP32 tensors on compute device
         p_fp32_list = []
@@ -596,6 +623,9 @@ class CAME(BaseOptimizer):
         exp_avg_sq_list = []
         exp_avg_sq_hat_list = [] if use_amsbound else None
         exp_avg_res_list = [] if nfc else None
+        kahan_comp_list = [] if use_kahan else None
+        kahan_sim_list = [] if use_kahan else None
+        param_kahan_flags = []  # per-param: whether this param has kahan enabled
         state_list = []
         srng_bufs = []  # stochastic rounding scratch per parameter
 
@@ -605,10 +635,12 @@ class CAME(BaseOptimizer):
 
             state = self.state[p]
             state_list.append(state)
+            param_kahan = use_kahan and p.dtype in {torch.float16, torch.bfloat16}
+            param_kahan_flags.append(param_kahan)
 
             if self._use_staging:
                 staging = self._get_staging(p, compute_device, factored=False,
-                                            ams_bound=use_amsbound, nfc=nfc)
+                                            ams_bound=use_amsbound, nfc=nfc, kahan=param_kahan)
                 # Copy data into pre-allocated staging buffers (avoids .to() allocation)
                 staging['p_fp32'].copy_(p, non_blocking=True)
                 staging['grad'].copy_(p.grad.data, non_blocking=True)  # single .to(), no intermediate
@@ -627,6 +659,11 @@ class CAME(BaseOptimizer):
                 if nfc:
                     staging['exp_avg_res'].copy_(state['exp_avg_res'], non_blocking=True)
                     exp_avg_res_list.append(staging['exp_avg_res'])
+
+                if param_kahan:
+                    staging['kahan_comp'].copy_(state['kahan_comp'], non_blocking=True)
+                    kahan_comp_list.append(staging['kahan_comp'])
+                    kahan_sim_list.append(staging['kahan_sim'])
 
                 # Pre-allocate stochastic rounding scratch (shared across write-backs for this param)
                 srng_bufs.append(self._get_srng_buf(staging['exp_avg']))
@@ -647,10 +684,26 @@ class CAME(BaseOptimizer):
                         state['exp_avg_res'].to(compute_device, non_blocking=True, dtype=torch.float32)
                     )
 
+                if param_kahan:
+                    kahan_comp_list.append(
+                        state['kahan_comp'].to(compute_device, non_blocking=True, dtype=torch.float32)
+                    )
+                    kahan_sim_list.append(torch.empty_like(p, dtype=torch.float32, device=compute_device))
+
                 srng_bufs.append(None)
 
         if not p_fp32_list:
             return
+
+        # ---- Kahan pre-compensation (per-param, before foreach batch) ----
+        if use_kahan and kahan_comp_list:
+            for i, p in enumerate(active_params):
+                if p.grad is None:
+                    continue
+                if param_kahan_flags[i]:
+                    # Map from active_params index to kahan_comp_list index
+                    k_idx = sum(1 for j in range(i) if param_kahan_flags[j])
+                    p_fp32_list[i].add_(kahan_comp_list[k_idx])
 
         # ---- Batch compute phase ----
 
@@ -777,23 +830,61 @@ class CAME(BaseOptimizer):
         torch._foreach_add_(p_fp32_list, final_update_list, alpha=-1.0)
 
         # ---- Write-back phase with sync chunking ----
+        kahan_iter = 0  # tracks position in kahan_comp_list / kahan_sim_list
         for i, state in enumerate(state_list):
             p = active_params[i]
             p_fp32 = p_fp32_list[i]
             device = p.device
             srng = srng_bufs[i] if i < len(srng_bufs) else None
 
-            # Parameter write-back
-            if device.type == "cpu":
+            # Parameter write-back (with optional Kahan compensation)
+            param_kahan = param_kahan_flags[i]
+            if param_kahan:
+                kahan_sim = kahan_sim_list[kahan_iter]
+                kahan_comp = kahan_comp_list[kahan_iter]
+                kahan_iter += 1
+
+                # Simulate rounding to compute new compensation
+                kahan_sim.copy_(p_fp32)
                 if p.dtype == torch.bfloat16:
-                    copy_stochastic_(p.data, p_fp32, scratch=srng)
+                    # Simulate stochastic rounding (same bit manipulation as copy_stochastic_)
+                    sim_int = kahan_sim.view(dtype=torch.int32)
+                    if srng is not None:
+                        srng.random_(0, 1 << 16)
+                        sim_int.add_(srng)
+                    else:
+                        sim_int.add_(torch.randint_like(sim_int, 0, 1 << 16))
+                    sim_int.bitwise_and_(-65536)
                 else:
-                    p.data.copy_(p_fp32)
+                    # fp16: simulate deterministic rounding
+                    kahan_sim.copy_(p_fp32.to(p.dtype).to(torch.float32))
+
+                # Write rounded value to parameter
+                if device.type == "cpu":
+                    p.data.copy_(kahan_sim)
+                else:
+                    p.data.copy_(kahan_sim, non_blocking=True)
+
+                # Compute new compensation: rounded - exact
+                kahan_sim.sub_(p_fp32)
+
+                # Store compensation back to state
+                if self.state_storage_dtype == torch.bfloat16:
+                    copy_stochastic_(state['kahan_comp'], kahan_sim, scratch=srng)
+                else:
+                    state['kahan_comp'].copy_(kahan_sim, non_blocking=True)
             else:
-                if p.dtype == torch.bfloat16:
-                    copy_stochastic_(p, p_fp32, scratch=srng)
+                # Standard parameter write-back
+                if device.type == "cpu":
+                    if p.dtype == torch.bfloat16:
+                        copy_stochastic_(p.data, p_fp32, scratch=srng)
+                    else:
+                        p.data.copy_(p_fp32)
                 else:
-                    p.data.copy_(p_fp32, non_blocking=True)
+                    if p.dtype == torch.bfloat16:
+                        copy_stochastic_(p, p_fp32, scratch=srng)
+                    else:
+                        p.data.copy_(p_fp32, non_blocking=True)
 
             # State write-back
             exp_avg = exp_avg_list[i]
@@ -837,6 +928,7 @@ class CAME(BaseOptimizer):
             beta1, beta2, beta3 = group['betas']
             use_foreach = group.get('foreach', False)
             nfc = group.get('non_factored_confidence', False)
+            use_kahan = group.get('kahan_sum', False)
             update_strategy = group['update_strategy']
 
             # Lazily compile core functions on first step
@@ -936,6 +1028,14 @@ class CAME(BaseOptimizer):
                             device=self.state_storage_device
                         )
 
+                    # Kahan compensation state for parameter (bf16/fp16 only)
+                    if use_kahan and p.dtype in {torch.float16, torch.bfloat16}:
+                        state['kahan_comp'] = torch.zeros(
+                            p.shape,
+                            dtype=torch.float32,
+                            device=self.state_storage_device
+                        )
+
                     if self.state_storage_device == "cpu":
                         state["exp_avg"] = state["exp_avg"].pin_memory()
 
@@ -953,16 +1053,22 @@ class CAME(BaseOptimizer):
                         if not factored and nfc:
                             state['exp_avg_res'] = state['exp_avg_res'].pin_memory()
 
+                        if 'kahan_comp' in state:
+                            state['kahan_comp'] = state['kahan_comp'].pin_memory()
+
                 # ========= Determine compute device =========
                 if device.type == "cpu":
                     compute_device = torch.cuda.current_device()
                 else:
                     compute_device = device
 
+                # ========= Per-parameter Kahan flag =========
+                param_kahan = use_kahan and p.dtype in {torch.float16, torch.bfloat16}
+
                 # ========= Transfer state to compute device (staging or .to()) =========
                 if self._use_staging:
                     staging = self._get_staging(p, compute_device, factored,
-                                                group['ams_bound'], nfc)
+                                                group['ams_bound'], nfc, kahan=param_kahan)
                     staging['exp_avg'].copy_(state["exp_avg"], non_blocking=True)
                     exp_avg = staging['exp_avg']
 
@@ -987,6 +1093,11 @@ class CAME(BaseOptimizer):
                     grad = staging['grad']
                     staging['p_fp32'].copy_(p, non_blocking=True)
                     p_fp32 = staging['p_fp32']
+
+                    if param_kahan:
+                        staging['kahan_comp'].copy_(state['kahan_comp'], non_blocking=True)
+                        kahan_comp = staging['kahan_comp']
+                        kahan_sim = staging['kahan_sim']
 
                     # Stochastic rounding scratch for this parameter
                     srng = self._get_srng_buf(exp_avg)
@@ -1021,6 +1132,16 @@ class CAME(BaseOptimizer):
                     grad = grad.to(compute_device, dtype=torch.float32, non_blocking=True)  # single .to()
                     p_fp32 = p.to(compute_device, dtype=torch.float32, non_blocking=True)
                     srng = None
+
+                    if param_kahan:
+                        kahan_comp = state['kahan_comp'].to(
+                            compute_device, non_blocking=True, dtype=torch.float32
+                        )
+                        kahan_sim = torch.empty_like(p_fp32)
+
+                # ========= Kahan pre-compensation =========
+                if param_kahan:
+                    p_fp32.add_(kahan_comp)
 
                 # ========= Core computation (compiled or uncompiled) =========
                 if factored:
@@ -1087,17 +1208,49 @@ class CAME(BaseOptimizer):
                         p_fp32,
                     )
 
-                # ========= Write-back =========
-                if device.type == "cpu":
+                # ========= Write-back (with optional Kahan compensation) =========
+                if param_kahan:
+                    # Kahan write-back: simulate rounding, compute compensation, write parameter
+                    kahan_sim.copy_(p_fp32)
                     if p.dtype == torch.bfloat16:
-                        copy_stochastic_(p.data, p_fp32, scratch=srng)
+                        # Simulate stochastic rounding (same bit manipulation as copy_stochastic_)
+                        sim_int = kahan_sim.view(dtype=torch.int32)
+                        if srng is not None:
+                            srng.random_(0, 1 << 16)
+                            sim_int.add_(srng)
+                        else:
+                            sim_int.add_(torch.randint_like(sim_int, 0, 1 << 16))
+                        sim_int.bitwise_and_(-65536)
                     else:
-                        p.data.copy_(p_fp32)
+                        # fp16: simulate deterministic rounding
+                        kahan_sim.copy_(p_fp32.to(p.dtype).to(torch.float32))
+
+                    # Write rounded value to parameter
+                    if device.type == "cpu":
+                        p.data.copy_(kahan_sim)
+                    else:
+                        p.data.copy_(kahan_sim, non_blocking=True)
+
+                    # Compute new compensation: rounded - exact
+                    kahan_sim.sub_(p_fp32)
+
+                    # Store compensation back to state
+                    if self.state_storage_dtype == torch.bfloat16:
+                        copy_stochastic_(state['kahan_comp'], kahan_sim, scratch=srng)
+                    else:
+                        state['kahan_comp'].copy_(kahan_sim, non_blocking=True)
                 else:
-                    if p.dtype == torch.bfloat16:
-                        copy_stochastic_(p, p_fp32, scratch=srng)
+                    # Standard parameter write-back
+                    if device.type == "cpu":
+                        if p.dtype == torch.bfloat16:
+                            copy_stochastic_(p.data, p_fp32, scratch=srng)
+                        else:
+                            p.data.copy_(p_fp32)
                     else:
-                        p.data.copy_(p_fp32, non_blocking=True)
+                        if p.dtype == torch.bfloat16:
+                            copy_stochastic_(p, p_fp32, scratch=srng)
+                        else:
+                            p.data.copy_(p_fp32, non_blocking=True)
 
                 if self.state_storage_dtype == torch.bfloat16:
                     copy_stochastic_(state["exp_avg"], exp_avg, scratch=srng)
