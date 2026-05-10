@@ -439,14 +439,9 @@ class CAME(BaseOptimizer):
                     self._compiled_factored = torch.compile(
                         self._core_factored_full_fp32, fullgraph=True, dynamic=False
                     )
-                    # Skip compiling unfactored step when foreach is enabled;
-                    # all 1D/0D params are handled by _foreach_unfactored_step instead.
-                    if not use_foreach:
-                        self._compiled_unfactored = torch.compile(
-                            self._core_unfactored_full_fp32, fullgraph=True, dynamic=False
-                        )
-                    else:
-                        self._compiled_unfactored = self._core_unfactored_full_fp32
+                    self._compiled_unfactored = torch.compile(
+                        self._core_unfactored_full_fp32, fullgraph=True, dynamic=False
+                    )
                 logger.info("CAME core functions compiled with torch.compile(fullgraph=True, dynamic=False).")
             except Exception as e:
                 logger.warning(f"torch.compile(fullgraph=True, dynamic=False) failed: {e}. Falling back to uncompiled step.")
