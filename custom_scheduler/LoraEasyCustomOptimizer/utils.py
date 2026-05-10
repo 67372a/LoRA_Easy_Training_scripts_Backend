@@ -53,6 +53,7 @@ def unit_norm_logging(x: torch.Tensor, norm: float = 2.0):
     logging.info(f"unit_norm norms={str(torch.norm(x, p=norm, dim=dim, keepdim=keep_dim))}")
 
 @torch.no_grad()
+@torch.compiler.disable()
 def copy_stochastic_(target: torch.Tensor, source: torch.Tensor, scratch: Optional[torch.Tensor] = None):
     r"""Copy source to target with stochastic rounding for reduced-precision targets.
 

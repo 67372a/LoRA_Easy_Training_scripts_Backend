@@ -40,7 +40,7 @@ class CAME(BaseOptimizer):
     :param cautious_weight_decay: bool: Applies weight decay only to parameter coordinates whose signs align with the optimizer update. (default: False)
     :param compile_step: bool: Use torch.compile on the core per-parameter step (default: False)
     :param foreach: bool: Use torch._foreach_* operations for unfactored (1D/0D) parameters (default: False)
-    :param non_factored_confidence: bool: Apply confidence/residual mechanism to non-factored (1D/0D) parameters (default: True)
+    :param non_factored_confidence: bool: Apply confidence/residual mechanism to non-factored (1D/0D) parameters (default: False)
     """
 
     def __init__(
@@ -63,7 +63,7 @@ class CAME(BaseOptimizer):
         cautious_weight_decay: bool = False,
         compile_step: bool = False,
         foreach: bool = False,
-        non_factored_confidence: bool = True,
+        non_factored_confidence: bool = False,
         **kwargs,
     ):
         self.validate_learning_rate(lr)
@@ -426,7 +426,6 @@ class CAME(BaseOptimizer):
 
     def _compile_core_fns(self) -> None:
         r"""Lazily compile the core step functions with torch.compile."""
-        use_foreach = self.defaults.get('foreach', False)
         if self.defaults.get('compile_step', False):
             try:
                 # Raise recompile limit to accommodate diverse parameter shapes
@@ -851,8 +850,8 @@ class CAME(BaseOptimizer):
             # Pre-compute group_idx once (avoids O(n) list.index() per parameter)
             group_idx = self.param_groups.index(group)
 
-            # Bucket params for foreach (unfactored only, numel >= 32)
-            # Bypass foreach for 0D and very small tensors (numel < 32) where
+            # Bucket params for foreach (unfactored only, numel >= 16)
+            # Bypass foreach for 0D and very small tensors (numel < 16) where
             # kernel launch overhead dominates and per-param compiled path is faster.
             unfactored_foreach_params = []
             if use_foreach:
@@ -861,7 +860,7 @@ class CAME(BaseOptimizer):
                     if p.grad is None:
                         continue
                     grad_shape = p.grad.shape
-                    if not self.get_options(grad_shape) and p.numel() >= 32:
+                    if not self.get_options(grad_shape) and p.numel() >= 16:
                         unfactored_foreach_params.append(p)
                         if compute_device_for_foreach is None:
                             first_device = p.device
@@ -884,8 +883,8 @@ class CAME(BaseOptimizer):
                     raise NoSparseGradientError(str(self))
 
                 # Skip unfactored params that were already handled by foreach
-                # (only those with numel >= 32; small/0D params fall through to per-param path)
-                if use_foreach and not self.get_options(grad.shape) and p.numel() >= 32:
+                # (only those with numel  and p.numel() >= 16; small/0D params fall through to per-param path)
+                if use_foreach and not self.get_options(grad.shape) and p.numel() >= 16:
                     continue
 
                 state = self.state[p]
