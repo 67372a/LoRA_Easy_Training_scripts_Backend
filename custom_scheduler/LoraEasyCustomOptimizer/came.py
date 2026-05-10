@@ -99,6 +99,21 @@ class CAME(BaseOptimizer):
         self._scalar_cache: dict = {}       # (device, group_idx) -> dict of scalar tensors
         self._empty_tensor_cache: dict = {}  # device -> empty(0) tensor for AMSBound placeholder
 
+        # Pre-allocated GPU staging buffers to avoid per-step allocation through the CUDA caching allocator.
+        # Only used when state transfer involves device change (CPU→GPU) or dtype conversion (bfloat16→float32).
+        # Maps id(p) -> dict of GPU FP32 tensors keyed by buffer name ('p_fp32', 'exp_avg', 'grad', etc.)
+        self._staging_bufs: dict = {}
+
+        # Pre-allocated int32 scratch buffers for stochastic rounding, indexed by (device, shape_tuple).
+        # Eliminates the per-call torch.randint_like allocation in copy_stochastic_.
+        self._srng_bufs: dict = {}
+
+        # Staging is beneficial when state transfer requires work (device or dtype change).
+        # When storage is already on GPU in float32, .to() is a no-op and staging would waste memory.
+        self._use_staging: bool = not (
+            str(state_storage_device).startswith("cuda") and final_dtype == torch.float32
+        )
+
         if update_strategy is not None and update_strategy not in {'unmodified','cautious','grams','both'}:
             raise ValueError("Invalid update strategy: {}".format(update_strategy))
 
@@ -218,141 +233,7 @@ class CAME(BaseOptimizer):
         r"""Get `factored`."""
         return len(shape) >= 2
 
-    @staticmethod
-    def get_rms(x: torch.Tensor) -> float:
-        r"""Get RMS."""
-        return x.norm(2) / math.sqrt(x.numel())
-
-    @staticmethod
-    def approximate_sq_grad(
-        exp_avg_sq_row: torch.Tensor,
-        exp_avg_sq_col: torch.Tensor,
-        output: torch.Tensor,
-    ):
-        r"""Get approximation of EMA of squared gradient."""
-        r_factor: torch.Tensor = (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True)).rsqrt_().unsqueeze(-1)
-        c_factor: torch.Tensor = exp_avg_sq_col.unsqueeze(-2).rsqrt()
-        torch.mul(r_factor, c_factor, out=output)
-
     # --- Compiled Core Functions ---
-
-    @staticmethod
-    @torch.no_grad()
-    def _core_unfactored_fp32(
-        grad: torch.Tensor,
-        exp_avg: torch.Tensor,
-        exp_avg_sq: torch.Tensor,
-        exp_avg_sq_hat: torch.Tensor,
-        beta1: torch.Tensor,
-        beta2: torch.Tensor,
-        eps1: torch.Tensor,
-        clip_threshold: torch.Tensor,
-        use_amsbound: bool,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        r"""Core unfactored per-parameter step. All inputs are FP32 tensors on the compute device.
-
-        Modifies exp_avg and exp_avg_sq in-place.
-        Returns ``(exp_avg_post_momentum, pre_momentum_update)`` as a tuple.
-        The pre-momentum update is needed for non-factored confidence computation.
-        """
-        # update = grad^2 + eps1
-        update = torch.mul(grad, grad).add_(eps1)
-
-        # EMA of squared gradient
-        exp_avg_sq.mul_(beta2).add_(update, alpha=1.0 - beta2)
-        torch.rsqrt(exp_avg_sq, out=update)
-
-        # AMSBound
-        if use_amsbound:
-            torch.max(exp_avg_sq_hat, 1.0 / update, out=exp_avg_sq_hat)
-            torch.rsqrt(exp_avg_sq_hat / beta2, out=update)
-
-        # Precondition gradient
-        update.mul_(grad)
-
-        # RMS clip
-        rms = update.norm(2) / torch.sqrt(
-            torch.tensor(update.numel(), device=update.device, dtype=torch.float32)
-        )
-        clip_factor = (rms / clip_threshold).clamp_(min=1.0)
-        update.div_(clip_factor)
-
-        # Save pre-momentum update for confidence computation
-        pre_momentum_update = update.clone()
-
-        # Momentum
-        exp_avg.mul_(beta1).add_(update, alpha=1.0 - beta1)
-
-        # Return (post-momentum exp_avg, pre-momentum update)
-        return exp_avg, pre_momentum_update
-
-    @staticmethod
-    @torch.no_grad()
-    def _core_factored_fp32(
-        grad: torch.Tensor,
-        exp_avg: torch.Tensor,
-        exp_avg_sq_row: torch.Tensor,
-        exp_avg_sq_col: torch.Tensor,
-        exp_avg_res_row: torch.Tensor,
-        exp_avg_res_col: torch.Tensor,
-        exp_avg_sq_hat: torch.Tensor,
-        beta1: torch.Tensor,
-        beta2: torch.Tensor,
-        beta3: torch.Tensor,
-        eps1: torch.Tensor,
-        eps2: torch.Tensor,
-        clip_threshold: torch.Tensor,
-        use_amsbound: bool,
-    ) -> torch.Tensor:
-        r"""Core factored per-parameter step. All inputs are FP32 tensors on the compute device.
-
-        Modifies all state tensors in-place. Returns the ``update`` tensor
-        with confidence modulation applied.
-        """
-        # update = grad^2 + eps1
-        update = torch.mul(grad, grad).add_(eps1)
-
-        # Factored second moment EMA
-        exp_avg_sq_row.mul_(beta2).add_(update.mean(dim=-1), alpha=1.0 - beta2)
-        exp_avg_sq_col.mul_(beta2).add_(update.mean(dim=-2), alpha=1.0 - beta2)
-
-        # Approximate sq grad as denominator
-        r_factor = (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True)).rsqrt_().unsqueeze(-1)
-        c_factor = exp_avg_sq_col.unsqueeze(-2).rsqrt()
-        torch.mul(r_factor, c_factor, out=update)
-
-        # AMSBound
-        if use_amsbound:
-            torch.max(exp_avg_sq_hat, 1.0 / update, out=exp_avg_sq_hat)
-            torch.rsqrt(exp_avg_sq_hat / beta2, out=update)
-
-        # Precondition gradient
-        update.mul_(grad)
-
-        # RMS clip
-        rms = update.norm(2) / torch.sqrt(
-            torch.tensor(update.numel(), device=update.device, dtype=torch.float32)
-        )
-        clip_factor = (rms / clip_threshold).clamp_(min=1.0)
-        update.div_(clip_factor)
-
-        # Momentum
-        exp_avg.mul_(beta1).add_(update, alpha=1.0 - beta1)
-
-        # Confidence (residual)
-        res = update - exp_avg
-        res.pow_(2).add_(eps2)
-
-        exp_avg_res_row.mul_(beta3).add_(res.mean(dim=-1), alpha=1.0 - beta3)
-        exp_avg_res_col.mul_(beta3).add_(res.mean(dim=-2), alpha=1.0 - beta3)
-
-        # Approximate sq grad for confidence modulation
-        r_factor_res = (exp_avg_res_row / exp_avg_res_row.mean(dim=-1, keepdim=True)).rsqrt_().unsqueeze(-1)
-        c_factor_res = exp_avg_res_col.unsqueeze(-2).rsqrt()
-        torch.mul(r_factor_res, c_factor_res, out=update)
-        update.mul_(exp_avg)
-
-        return update
 
     @staticmethod
     @torch.no_grad()
@@ -611,6 +492,81 @@ class CAME(BaseOptimizer):
             self._empty_tensor_cache[device] = torch.empty(0, device=device)
         return self._empty_tensor_cache[device]
 
+    # --- GPU Staging Buffer Management (avoids per-step .to() allocations) ---
+
+    def _create_staging(
+        self,
+        p: torch.Tensor,
+        compute_device: torch.device,
+        factored: bool,
+        ams_bound: bool,
+        nfc: bool,
+    ) -> dict:
+        r"""Create pre-allocated GPU FP32 staging buffers for a parameter and cache them.
+
+        Returns a dict with keys ``'p_fp32'``, ``'grad'``, ``'exp_avg'``, and shape-dependent
+        state buffers (``'exp_avg_sq'`` for unfactored, ``'exp_avg_sq_row'``/``'exp_avg_sq_col'``
+        for factored, plus optional ``'exp_avg_sq_hat'`` and ``'exp_avg_res'``).
+        """
+        grad_shape = tuple(p.shape)
+        buf = {
+            '_device': compute_device,
+            '_shape': grad_shape,
+            'p_fp32': torch.empty(grad_shape, dtype=torch.float32, device=compute_device),
+            'grad': torch.empty(grad_shape, dtype=torch.float32, device=compute_device),
+            'exp_avg': torch.empty(grad_shape, dtype=torch.float32, device=compute_device),
+        }
+
+        if factored:
+            row_shape = grad_shape[:-1]
+            col_shape = grad_shape[:-2] + grad_shape[-1:]
+            buf['exp_avg_sq_row'] = torch.empty(row_shape, dtype=torch.float32, device=compute_device)
+            buf['exp_avg_sq_col'] = torch.empty(col_shape, dtype=torch.float32, device=compute_device)
+            buf['exp_avg_res_row'] = torch.empty(row_shape, dtype=torch.float32, device=compute_device)
+            buf['exp_avg_res_col'] = torch.empty(col_shape, dtype=torch.float32, device=compute_device)
+        else:
+            buf['exp_avg_sq'] = torch.empty(grad_shape, dtype=torch.float32, device=compute_device)
+
+        if ams_bound:
+            buf['exp_avg_sq_hat'] = torch.empty(grad_shape, dtype=torch.float32, device=compute_device)
+
+        if not factored and nfc:
+            buf['exp_avg_res'] = torch.empty(grad_shape, dtype=torch.float32, device=compute_device)
+
+        self._staging_bufs[id(p)] = buf
+        return buf
+
+    def _get_staging(
+        self,
+        p: torch.Tensor,
+        compute_device: torch.device,
+        factored: bool,
+        ams_bound: bool,
+        nfc: bool,
+    ) -> dict:
+        r"""Get or create staging buffers for a parameter, validating device and shape."""
+        pid = id(p)
+        buf = self._staging_bufs.get(pid)
+        p_shape = tuple(p.shape)
+        if buf is not None and buf['_device'] == compute_device and buf['_shape'] == p_shape:
+            return buf
+        # Stale or missing — (re-)create
+        return self._create_staging(p, compute_device, factored, ams_bound, nfc)
+
+    def _get_srng_buf(self, like_tensor: torch.Tensor) -> torch.Tensor:
+        r"""Get or create a cached int32 scratch buffer for stochastic rounding.
+
+        The buffer matches the shape and device of *like_tensor* and is reused across
+        sequential ``copy_stochastic_`` calls within the same step to avoid per-call
+        ``torch.randint_like`` allocations.
+        """
+        key = (like_tensor.device, tuple(like_tensor.shape))
+        buf = self._srng_bufs.get(key)
+        if buf is None:
+            buf = torch.empty_like(like_tensor, dtype=torch.int32)
+            self._srng_bufs[key] = buf
+        return buf
+
     # --- Foreach Support (Unfactored params only) ---
 
     @torch.no_grad()
@@ -627,6 +583,8 @@ class CAME(BaseOptimizer):
 
         Batches operations using ``torch._foreach_*`` for better GPU utilization.
         Handles AMSBound, update strategy, weight decay, and non-factored confidence.
+        Uses pre-allocated staging buffers when ``_use_staging`` is True to avoid
+        per-step tensor allocations through the CUDA caching allocator.
         """
         use_amsbound = group['ams_bound']
         update_strategy = group['update_strategy']
@@ -645,6 +603,7 @@ class CAME(BaseOptimizer):
         exp_avg_sq_hat_list = [] if use_amsbound else None
         exp_avg_res_list = [] if nfc else None
         state_list = []
+        srng_bufs = []  # stochastic rounding scratch per parameter
 
         for p in active_params:
             if p.grad is None:
@@ -653,24 +612,48 @@ class CAME(BaseOptimizer):
             state = self.state[p]
             state_list.append(state)
 
-            # Transfer to compute device
-            p_fp32 = p.to(compute_device, dtype=torch.float32, non_blocking=True)
-            grad = p.grad.data.to(torch.float32).to(compute_device, non_blocking=True)
-            exp_avg = state["exp_avg"].to(compute_device, non_blocking=True, dtype=torch.float32)
-            exp_avg_sq = state["exp_avg_sq"].to(compute_device, non_blocking=True, dtype=torch.float32)
+            if self._use_staging:
+                staging = self._get_staging(p, compute_device, factored=False,
+                                            ams_bound=use_amsbound, nfc=nfc)
+                # Copy data into pre-allocated staging buffers (avoids .to() allocation)
+                staging['p_fp32'].copy_(p, non_blocking=True)
+                staging['grad'].copy_(p.grad.data, non_blocking=True)  # single .to(), no intermediate
+                staging['exp_avg'].copy_(state["exp_avg"], non_blocking=True)
+                staging['exp_avg_sq'].copy_(state["exp_avg_sq"], non_blocking=True)
 
-            p_fp32_list.append(p_fp32)
-            grad_list.append(grad)
-            exp_avg_list.append(exp_avg)
-            exp_avg_sq_list.append(exp_avg_sq)
+                p_fp32_list.append(staging['p_fp32'])
+                grad_list.append(staging['grad'])
+                exp_avg_list.append(staging['exp_avg'])
+                exp_avg_sq_list.append(staging['exp_avg_sq'])
 
-            if use_amsbound:
-                eash = state["exp_avg_sq_hat"].to(compute_device, non_blocking=True, dtype=torch.float32)
-                exp_avg_sq_hat_list.append(eash)
+                if use_amsbound:
+                    staging['exp_avg_sq_hat'].copy_(state["exp_avg_sq_hat"], non_blocking=True)
+                    exp_avg_sq_hat_list.append(staging['exp_avg_sq_hat'])
 
-            if nfc:
-                ear = state['exp_avg_res'].to(compute_device, non_blocking=True, dtype=torch.float32)
-                exp_avg_res_list.append(ear)
+                if nfc:
+                    staging['exp_avg_res'].copy_(state['exp_avg_res'], non_blocking=True)
+                    exp_avg_res_list.append(staging['exp_avg_res'])
+
+                # Pre-allocate stochastic rounding scratch (shared across write-backs for this param)
+                srng_bufs.append(self._get_srng_buf(staging['exp_avg']))
+            else:
+                # Fallback: .to() path (no-op when already on compute device in float32)
+                p_fp32_list.append(p.to(compute_device, dtype=torch.float32, non_blocking=True))
+                grad_list.append(p.grad.data.to(compute_device, dtype=torch.float32, non_blocking=True))
+                exp_avg_list.append(state["exp_avg"].to(compute_device, non_blocking=True, dtype=torch.float32))
+                exp_avg_sq_list.append(state["exp_avg_sq"].to(compute_device, non_blocking=True, dtype=torch.float32))
+
+                if use_amsbound:
+                    exp_avg_sq_hat_list.append(
+                        state["exp_avg_sq_hat"].to(compute_device, non_blocking=True, dtype=torch.float32)
+                    )
+
+                if nfc:
+                    exp_avg_res_list.append(
+                        state['exp_avg_res'].to(compute_device, non_blocking=True, dtype=torch.float32)
+                    )
+
+                srng_bufs.append(None)
 
         if not p_fp32_list:
             return
@@ -707,15 +690,29 @@ class CAME(BaseOptimizer):
             clip_factor = max(rms / group['clip_threshold'], 1.0)
             upd.div_(clip_factor)
 
-        # Save pre-momentum update values for optional confidence computation
+        # Save pre-momentum update values for optional confidence computation.
+        # When nfc=True, use pre-allocated staging scratch to avoid N clone allocations.
         if nfc:
-            pre_momentum_updates = [d.clone() for d in denom_list]
+            if self._use_staging:
+                # Reuse exp_avg_res staging buffers as pre-momentum scratch
+                # (exp_avg_res is only read later, after pre_momentum is consumed)
+                pre_momentum_updates = []
+                for i, p in enumerate(active_params):
+                    if p.grad is None:
+                        continue
+                    staging = self._get_staging(p, compute_device, factored=False,
+                                                ams_bound=use_amsbound, nfc=nfc)
+                    scratch = staging['exp_avg_res']  # same shape as exp_avg_sq
+                    scratch.copy_(denom_list[i])
+                    pre_momentum_updates.append(scratch)
+            else:
+                pre_momentum_updates = [d.clone() for d in denom_list]
 
         # 4. Momentum: exp_avg = beta1 * exp_avg + (1-beta1) * update
         torch._foreach_mul_(exp_avg_list, beta1)
         torch._foreach_add_(exp_avg_list, denom_list, alpha=1.0 - beta1)
 
-        # 5. Confidence residual modulation (non-factored) — batched via foreach, zero intermediate allocations
+        # 5. Confidence residual modulation (non-factored) — batched via foreach
         if nfc:
             # Reuse pre_momentum_updates as scratch buffer (clones of denom_list, no longer needed)
             # Compute residual in-place: res = (pre_momentum_update - exp_avg)^2 + eps2
@@ -769,10 +766,18 @@ class CAME(BaseOptimizer):
             torch._foreach_mul_(final_update_list, mask_list)
         if update_strategy in ('grams', 'both'):
             # Grams: update = sign(grad) * |update|
-            final_update_list = torch._foreach_mul(
-                torch._foreach_sign(grad_list),
-                torch._foreach_abs(final_update_list),
-            )
+            # In-place variant: 1N allocations (sign) instead of 3N when nfc=True,
+            # or 2N instead of 3N when nfc=False (abs list + in-place mul).
+            sign_list = torch._foreach_sign(grad_list)  # N allocs (unavoidable — can't in-place on grad_list)
+            if nfc:
+                # Safe to mutate in-place: final_update_list points to pre_momentum scratch buffers
+                torch._foreach_abs_(final_update_list)
+                torch._foreach_mul_(final_update_list, sign_list)
+            else:
+                # Can't mutate in-place: final_update_list aliases exp_avg_list (optimizer state)
+                abs_list = torch._foreach_abs(final_update_list)  # N allocs
+                torch._foreach_mul_(abs_list, sign_list)  # in-place on abs_list
+                final_update_list = abs_list
 
         # 9. Apply: p -= update
         torch._foreach_add_(p_fp32_list, final_update_list, alpha=-1.0)
@@ -782,16 +787,17 @@ class CAME(BaseOptimizer):
             p = active_params[i]
             p_fp32 = p_fp32_list[i]
             device = p.device
+            srng = srng_bufs[i] if i < len(srng_bufs) else None
 
             # Parameter write-back
             if device.type == "cpu":
                 if p.dtype == torch.bfloat16:
-                    copy_stochastic_(p.data, p_fp32)
+                    copy_stochastic_(p.data, p_fp32, scratch=srng)
                 else:
                     p.data.copy_(p_fp32)
             else:
                 if p.dtype == torch.bfloat16:
-                    copy_stochastic_(p, p_fp32)
+                    copy_stochastic_(p, p_fp32, scratch=srng)
                 else:
                     p.data.copy_(p_fp32, non_blocking=True)
 
@@ -800,10 +806,10 @@ class CAME(BaseOptimizer):
             exp_avg_sq = exp_avg_sq_list[i]
 
             if self.state_storage_dtype == torch.bfloat16:
-                copy_stochastic_(state["exp_avg"], exp_avg)
-                copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
+                copy_stochastic_(state["exp_avg"], exp_avg, scratch=srng)
+                copy_stochastic_(state["exp_avg_sq"], exp_avg_sq, scratch=srng)
                 if use_amsbound:
-                    copy_stochastic_(state["exp_avg_sq_hat"], exp_avg_sq_hat_list[i])
+                    copy_stochastic_(state["exp_avg_sq_hat"], exp_avg_sq_hat_list[i], scratch=srng)
             else:
                 state["exp_avg"].copy_(exp_avg, non_blocking=True)
                 state["exp_avg_sq"].copy_(exp_avg_sq, non_blocking=True)
@@ -813,7 +819,7 @@ class CAME(BaseOptimizer):
             if nfc:
                 ear = exp_avg_res_list[i]
                 if self.state_storage_dtype == torch.bfloat16:
-                    copy_stochastic_(state['exp_avg_res'], ear)
+                    copy_stochastic_(state['exp_avg_res'], ear, scratch=srng)
                 else:
                     state['exp_avg_res'].copy_(ear, non_blocking=True)
 
@@ -846,6 +852,9 @@ class CAME(BaseOptimizer):
             # Select compiled or uncompiled callables
             core_unfactored_fn = self._compiled_unfactored
             core_factored_fn = self._compiled_factored
+
+            # Pre-compute group_idx once (avoids O(n) list.index() per parameter)
+            group_idx = self.param_groups.index(group)
 
             # Bucket params for foreach (unfactored only)
             unfactored_foreach_params = []
@@ -953,54 +962,71 @@ class CAME(BaseOptimizer):
                 else:
                     compute_device = device
 
-                # ========= Asynchronously queue state to compute device =========
-                exp_avg = state["exp_avg"].to(
-                    compute_device,
-                    non_blocking=True,
-                    dtype=torch.float32
-                )
-                if factored:
-                    exp_avg_sq_row = state["exp_avg_sq_row"].to(
-                        compute_device,
-                        non_blocking=True,
-                        dtype=torch.float32
-                    )
-                    exp_avg_sq_col = state["exp_avg_sq_col"].to(
-                        compute_device,
-                        non_blocking=True,
-                        dtype=torch.float32
-                    )
-                    exp_avg_res_row = state["exp_avg_res_row"].to(
-                        compute_device,
-                        non_blocking=True,
-                        dtype=torch.float32
-                    )
-                    exp_avg_res_col = state["exp_avg_res_col"].to(
-                        compute_device,
-                        non_blocking=True,
-                        dtype=torch.float32
-                    )
+                # ========= Transfer state to compute device (staging or .to()) =========
+                if self._use_staging:
+                    staging = self._get_staging(p, compute_device, factored,
+                                                group['ams_bound'], nfc)
+                    staging['exp_avg'].copy_(state["exp_avg"], non_blocking=True)
+                    exp_avg = staging['exp_avg']
+
+                    if factored:
+                        staging['exp_avg_sq_row'].copy_(state["exp_avg_sq_row"], non_blocking=True)
+                        staging['exp_avg_sq_col'].copy_(state["exp_avg_sq_col"], non_blocking=True)
+                        staging['exp_avg_res_row'].copy_(state["exp_avg_res_row"], non_blocking=True)
+                        staging['exp_avg_res_col'].copy_(state["exp_avg_res_col"], non_blocking=True)
+                        exp_avg_sq_row = staging['exp_avg_sq_row']
+                        exp_avg_sq_col = staging['exp_avg_sq_col']
+                        exp_avg_res_row = staging['exp_avg_res_row']
+                        exp_avg_res_col = staging['exp_avg_res_col']
+                    else:
+                        staging['exp_avg_sq'].copy_(state["exp_avg_sq"], non_blocking=True)
+                        exp_avg_sq = staging['exp_avg_sq']
+
+                    if group['ams_bound']:
+                        staging['exp_avg_sq_hat'].copy_(state["exp_avg_sq_hat"], non_blocking=True)
+                        exp_avg_sq_hat = staging['exp_avg_sq_hat']
+
+                    staging['grad'].copy_(grad, non_blocking=True)  # single .to(), no intermediate
+                    grad = staging['grad']
+                    staging['p_fp32'].copy_(p, non_blocking=True)
+                    p_fp32 = staging['p_fp32']
+
+                    # Stochastic rounding scratch for this parameter
+                    srng = self._get_srng_buf(exp_avg)
                 else:
-                    exp_avg_sq = state["exp_avg_sq"].to(
-                        compute_device,
-                        non_blocking=True,
-                        dtype=torch.float32
+                    # Fallback: .to() path (no-op when already on compute device in float32)
+                    exp_avg = state["exp_avg"].to(
+                        compute_device, non_blocking=True, dtype=torch.float32
                     )
+                    if factored:
+                        exp_avg_sq_row = state["exp_avg_sq_row"].to(
+                            compute_device, non_blocking=True, dtype=torch.float32
+                        )
+                        exp_avg_sq_col = state["exp_avg_sq_col"].to(
+                            compute_device, non_blocking=True, dtype=torch.float32
+                        )
+                        exp_avg_res_row = state["exp_avg_res_row"].to(
+                            compute_device, non_blocking=True, dtype=torch.float32
+                        )
+                        exp_avg_res_col = state["exp_avg_res_col"].to(
+                            compute_device, non_blocking=True, dtype=torch.float32
+                        )
+                    else:
+                        exp_avg_sq = state["exp_avg_sq"].to(
+                            compute_device, non_blocking=True, dtype=torch.float32
+                        )
 
-                if group['ams_bound']:
-                    exp_avg_sq_hat = state["exp_avg_sq_hat"].to(
-                        compute_device,
-                        non_blocking=True,
-                        dtype=torch.float32
-                    )
+                    if group['ams_bound']:
+                        exp_avg_sq_hat = state["exp_avg_sq_hat"].to(
+                            compute_device, non_blocking=True, dtype=torch.float32
+                        )
 
-                grad = grad.to(torch.float32).to(compute_device, non_blocking=True)
-                p_fp32 = p.to(compute_device, dtype=torch.float32, non_blocking=True)
+                    grad = grad.to(compute_device, dtype=torch.float32, non_blocking=True)  # single .to()
+                    p_fp32 = p.to(compute_device, dtype=torch.float32, non_blocking=True)
+                    srng = None
 
                 # ========= Core computation (compiled or uncompiled) =========
                 if factored:
-                    # Get cached scalar tensors (avoids per-parameter allocation)
-                    group_idx = self.param_groups.index(group)
                     scalars = self._get_scalar_tensors(compute_device, group_idx, group)
 
                     ams_hat = exp_avg_sq_hat if group['ams_bound'] else self._get_empty_tensor(compute_device)
@@ -1023,7 +1049,6 @@ class CAME(BaseOptimizer):
                     )
                 else:
                     # Unfactored path (not handled by foreach) -- use full compiled step
-                    group_idx = self.param_groups.index(group)
                     scalars = self._get_scalar_tensors(compute_device, group_idx, group)
 
                     ams_hat = exp_avg_sq_hat if group['ams_bound'] else self._get_empty_tensor(compute_device)
@@ -1036,9 +1061,15 @@ class CAME(BaseOptimizer):
                             )
                             if self.state_storage_device == "cpu":
                                 state['exp_avg_res'] = state['exp_avg_res'].pin_memory()
-                        exp_avg_res_nonfac = state['exp_avg_res'].to(
-                            compute_device, non_blocking=True, dtype=torch.float32
-                        )
+                        if self._use_staging:
+                            staging_buf = self._get_staging(p, compute_device, factored=False,
+                                                            ams_bound=group['ams_bound'], nfc=True)
+                            staging_buf['exp_avg_res'].copy_(state['exp_avg_res'], non_blocking=True)
+                            exp_avg_res_nonfac = staging_buf['exp_avg_res']
+                        else:
+                            exp_avg_res_nonfac = state['exp_avg_res'].to(
+                                compute_device, non_blocking=True, dtype=torch.float32
+                            )
                     else:
                         exp_avg_res_nonfac = self._get_empty_tensor(compute_device)
 
@@ -1062,21 +1093,21 @@ class CAME(BaseOptimizer):
                 # ========= Write-back =========
                 if device.type == "cpu":
                     if p.dtype == torch.bfloat16:
-                        copy_stochastic_(p.data, p_fp32)
+                        copy_stochastic_(p.data, p_fp32, scratch=srng)
                     else:
                         p.data.copy_(p_fp32)
                 else:
                     if p.dtype == torch.bfloat16:
-                        copy_stochastic_(p, p_fp32)
+                        copy_stochastic_(p, p_fp32, scratch=srng)
                     else:
                         p.data.copy_(p_fp32, non_blocking=True)
 
                 if self.state_storage_dtype == torch.bfloat16:
-                    copy_stochastic_(state["exp_avg"], exp_avg)
+                    copy_stochastic_(state["exp_avg"], exp_avg, scratch=srng)
                     if not factored:
-                        copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
+                        copy_stochastic_(state["exp_avg_sq"], exp_avg_sq, scratch=srng)
                     if group['ams_bound']:
-                        copy_stochastic_(state["exp_avg_sq_hat"], exp_avg_sq_hat)
+                        copy_stochastic_(state["exp_avg_sq_hat"], exp_avg_sq_hat, scratch=srng)
                 else:
                     state["exp_avg"].copy_(exp_avg, non_blocking=True)
                     if not factored:
@@ -1093,7 +1124,7 @@ class CAME(BaseOptimizer):
                 # Non-factored confidence write-back
                 if not factored and nfc and 'exp_avg_res' in state:
                     if self.state_storage_dtype == torch.bfloat16:
-                        copy_stochastic_(state['exp_avg_res'], exp_avg_res_nonfac)
+                        copy_stochastic_(state['exp_avg_res'], exp_avg_res_nonfac, scratch=srng)
                     else:
                         state['exp_avg_res'].copy_(exp_avg_res_nonfac, non_blocking=True)
 

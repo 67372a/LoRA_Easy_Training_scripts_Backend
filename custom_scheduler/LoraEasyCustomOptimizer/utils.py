@@ -53,7 +53,16 @@ def unit_norm_logging(x: torch.Tensor, norm: float = 2.0):
     logging.info(f"unit_norm norms={str(torch.norm(x, p=norm, dim=dim, keepdim=keep_dim))}")
 
 @torch.no_grad()
-def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
+def copy_stochastic_(target: torch.Tensor, source: torch.Tensor, scratch: Optional[torch.Tensor] = None):
+    r"""Copy source to target with stochastic rounding for reduced-precision targets.
+
+    :param target: torch.Tensor. destination tensor (e.g. bfloat16 on CPU).
+    :param source: torch.Tensor. source tensor (float32 on compute device).
+    :param scratch: Optional[torch.Tensor]. pre-allocated int32 scratch buffer matching source shape/device.
+        When provided, avoids a per-call ``torch.randint_like`` allocation.  Pass ``None`` to fall back
+        to the default allocation path.  The scratch buffer is modified in-place and must have the same
+        shape and device as ``source``.
+    """
     # Determine the intermediate FP32 tensor
     if source.dtype == torch.float64:
         src_fp32 = source.to(dtype=torch.float32)
@@ -65,13 +74,17 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
 
     # thanks to Nerogar for fast stochastic pytorch implementation
     # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
-    # create a random 16 bit integer
-    result = torch.randint_like(
-        src_fp32,
-        dtype=torch.int32,
-        low=0,
-        high=(1 << 16),
-    )
+    # create a random 16 bit integer (reuse pre-allocated scratch when available)
+    if scratch is not None:
+        result = scratch
+        result.random_(0, 1 << 16)
+    else:
+        result = torch.randint_like(
+            src_fp32,
+            dtype=torch.int32,
+            low=0,
+            high=(1 << 16),
+        )
 
     # add the random number to the lower 16 bit of the mantissa
     result.add_(src_fp32.view(dtype=torch.int32))
