@@ -856,7 +856,9 @@ class CAME(BaseOptimizer):
             # Pre-compute group_idx once (avoids O(n) list.index() per parameter)
             group_idx = self.param_groups.index(group)
 
-            # Bucket params for foreach (unfactored only)
+            # Bucket params for foreach (unfactored only, numel >= 32)
+            # Bypass foreach for 0D and very small tensors (numel < 32) where
+            # kernel launch overhead dominates and per-param compiled path is faster.
             unfactored_foreach_params = []
             if use_foreach:
                 compute_device_for_foreach = None
@@ -864,7 +866,7 @@ class CAME(BaseOptimizer):
                     if p.grad is None:
                         continue
                     grad_shape = p.grad.shape
-                    if not self.get_options(grad_shape):
+                    if not self.get_options(grad_shape) and p.numel() >= 32:
                         unfactored_foreach_params.append(p)
                         if compute_device_for_foreach is None:
                             first_device = p.device
@@ -887,7 +889,8 @@ class CAME(BaseOptimizer):
                     raise NoSparseGradientError(str(self))
 
                 # Skip unfactored params that were already handled by foreach
-                if use_foreach and not self.get_options(grad.shape):
+                # (only those with numel >= 32; small/0D params fall through to per-param path)
+                if use_foreach and not self.get_options(grad.shape) and p.numel() >= 32:
                     continue
 
                 state = self.state[p]
