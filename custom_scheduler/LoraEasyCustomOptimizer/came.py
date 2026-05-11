@@ -34,7 +34,7 @@ class CAME(BaseOptimizer):
     :param update_strategy: str: (NOTE: for backwards compatibility, cautious parameter being set to true will override to cautious)
         Determine the update strategy to use, valid values are 'unmodified', 'cautious' (https://arxiv.org/abs/2411.16085),
         'grams' (https://arxiv.org/abs/2412.17107), and 'both' (cautious then grams sequentially) (default: unmodified)
-    :param sync_chunk_size: int: Size of chunks to sync between devices (default: 128)
+    :param sync_chunk_size: int: Size of chunks to sync between devices (default: 256)
     :param state_storage_dtype: str|torch.dtype: Data type for storing optimizer state (default: bfloat16)
     :param state_storage_device: str|torch.device: Device for storing optimizer state (default: cpu)
     :param cautious_weight_decay: bool: Applies weight decay only to parameter coordinates whose signs align with the optimizer update. (default: False)
@@ -61,7 +61,7 @@ class CAME(BaseOptimizer):
         eps2: float = 1e-16,
         cautious: bool = False,
         update_strategy: UPDATE_STRATEGY = 'unmodified',
-        sync_chunk_size: int = 128,
+        sync_chunk_size: int = 256,
         state_storage_dtype: str|torch.dtype = torch.bfloat16,
         state_storage_device: str|torch.device = "cpu",
         cautious_weight_decay: bool = False,
@@ -109,9 +109,9 @@ class CAME(BaseOptimizer):
         # Maps id(p) -> dict of GPU FP32 tensors keyed by buffer name ('p_fp32', 'exp_avg', 'grad', etc.)
         self._staging_bufs: dict = {}
 
-        # Pre-allocated int32 scratch buffers for stochastic rounding, indexed by (device, shape_tuple).
-        # Eliminates the per-call torch.randint_like allocation in copy_stochastic_.
-        self._srng_bufs: dict = {}
+        # Single shared int32 scratch buffer for stochastic rounding.
+        # Grows to the largest parameter size encountered; reused across all params each step.
+        self._srng_buf: torch.Tensor | None = None
 
         # Staging is beneficial when state transfer requires work (device or dtype change).
         # When storage is already on GPU in float32, .to() is a no-op and staging would waste memory.
@@ -574,18 +574,17 @@ class CAME(BaseOptimizer):
         return self._create_staging(p, compute_device, factored, ams_bound, nfc, kahan=kahan)
 
     def _get_srng_buf(self, like_tensor: torch.Tensor) -> torch.Tensor:
-        r"""Get or create a cached int32 scratch buffer for stochastic rounding.
+        r"""Get a reusable int32 scratch buffer for stochastic rounding noise.
 
-        The buffer matches the shape and device of *like_tensor* and is reused across
-        sequential ``copy_stochastic_`` calls within the same step to avoid per-call
-        ``torch.randint_like`` allocations.
+        Returns a view of a single shared buffer sized to the largest parameter
+        encountered. The buffer is reused across all parameters within a step,
+        eliminating per-parameter int32 allocations. Content is NOT preserved
+        across calls — callers must refill before each use.
         """
-        key = (like_tensor.device, tuple(like_tensor.shape))
-        buf = self._srng_bufs.get(key)
-        if buf is None:
-            buf = torch.empty_like(like_tensor, dtype=torch.int32)
-            self._srng_bufs[key] = buf
-        return buf
+        n = like_tensor.numel()
+        if self._srng_buf is None or self._srng_buf.device != like_tensor.device or self._srng_buf.numel() < n:
+            self._srng_buf = torch.empty(n, dtype=torch.int32, device=like_tensor.device)
+        return self._srng_buf[:n].view(like_tensor.shape)
 
     # --- Foreach Support (Unfactored params only) ---
 
@@ -909,7 +908,7 @@ class CAME(BaseOptimizer):
                     state['exp_avg_res'].copy_(ear, non_blocking=True)
 
             # Sync chunking
-            if (i + 1) % group.get('sync_chunk_size', 128) == 0:
+            if (i + 1) % group.get('sync_chunk_size', 256) == 0:
                 torch.cuda.synchronize()
 
     @torch.no_grad()
