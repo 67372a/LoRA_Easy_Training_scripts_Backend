@@ -359,12 +359,16 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         adaptive_clip_eps: float = 1e-3,
         adaptive_clip_type: NORM_TYPE = 'layer',
         update_strategy: UPDATE_STRATEGY = 'unmodified',
-        bias_correction1: bool = False, 
+        bias_correction1: bool = False,
         bias_correction2: bool = True,
         use_stable_spam_clipping:bool = False,
         use_adopt: bool = False,
         torch_compile: bool = False,
-        sync_chunk_size: int = 128,
+        cautious_weight_decay: bool = False,
+        compile_step: bool = False,
+        foreach: bool = False,
+        kahan_sum: bool = False,
+        sync_chunk_size: int = 256,
         state_storage_dtype: str|torch.dtype = torch.bfloat16,
         state_storage_device: str|torch.device = "cpu",
         **kwargs,
@@ -399,6 +403,14 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         self.state_storage_dtype = final_dtype
         self.state_storage_device = state_storage_device
 
+        # Cache for placeholder tensors (device -> empty(0) tensor)
+        self._empty_tensor_cache: dict = {}
+        self._compiled_step = None            # lazy-initialized compiled callable
+
+        # Single shared int32 scratch buffer for stochastic rounding.
+        # Grows to the largest parameter size encountered; reused across all params each step.
+        self._srng_buf: torch.Tensor | None = None
+
         # Override zero to tiny
         if eps_floor is not None and eps_floor < eps and eps_floor <= 0:
             eps_floor = torch.finfo(torch.float32).tiny
@@ -428,6 +440,10 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             'use_stable_spam_clipping':use_stable_spam_clipping,
             'use_adopt':use_adopt,
             'torch_compile': torch_compile,
+            'cautious_weight_decay': cautious_weight_decay,
+            'compile_step': compile_step,
+            'foreach': foreach,
+            'kahan_sum': kahan_sum,
             'sync_chunk_size': sync_chunk_size,
             'state_storage_dtype': final_dtype,
             'state_storage_device': state_storage_device,
@@ -460,6 +476,368 @@ class SimplifiedAdEMAMix(BaseOptimizer):
 
         return beta_end
 
+    def _get_srng_buf(self, like_tensor: torch.Tensor) -> torch.Tensor:
+        r"""Get a reusable int32 scratch buffer for stochastic rounding noise.
+
+        Returns a view of a single shared buffer sized to the largest parameter
+        encountered. The buffer is reused across all parameters within a step,
+        eliminating per-parameter int32 allocations. Content is NOT preserved
+        across calls — callers must refill before each use.
+        """
+        n = like_tensor.numel()
+        if self._srng_buf is None or self._srng_buf.device != like_tensor.device or self._srng_buf.numel() < n:
+            self._srng_buf = torch.empty(n, dtype=torch.int32, device=like_tensor.device)
+        return self._srng_buf[:n].view(like_tensor.shape)
+
+    def _get_empty_tensor(self, device: torch.device) -> torch.Tensor:
+        r"""Get or create cached empty tensor for optional state placeholder."""
+        if device not in self._empty_tensor_cache:
+            self._empty_tensor_cache[device] = torch.empty(0, device=device)
+        return self._empty_tensor_cache[device]
+
+    @staticmethod
+    @torch.no_grad()
+    def _core_step_fp32(
+        grad: torch.Tensor,
+        exp_avg: torch.Tensor,
+        exp_avg_sq: torch.Tensor,
+        p_fp32: torch.Tensor,
+        num_sum: torch.Tensor,
+        den_sum: torch.Tensor,
+        beta1_t: float,
+        beta2_t: float,
+        alpha_t: float,
+        lr_t: float,
+        wd_t: float,
+        curr_eps_t: float,
+        adopt_clip_t: float,
+        use_adopt: bool,
+        is_step_one_and_adopt: bool,
+        bias_correction1: bool,
+        bias_correction2: bool,
+        weight_decouple: bool,
+        fixed_decay: bool,
+        cautious_weight_decay: bool,
+        use_cautious: bool,
+        use_grams: bool,
+    ) -> None:
+        r"""Core per-parameter step INCLUDING weight decay, LR scale, update strategy, and param update.
+
+        All inputs are FP32 tensors on the compute device.
+        Modifies all tensor arguments in-place.
+        Branch booleans are compile-time constants resolved during tracing.
+        """
+        if is_step_one_and_adopt:
+            # Step 1 adopt: just initialize exp_avg_sq with grad^2
+            exp_avg_sq.addcmul_(grad, grad)
+            return
+
+        # 1. Update exp_avg (momentum)
+        exp_avg.mul_(beta1_t).add_(grad, alpha=1.0 - beta1_t)
+
+        # 2. Update bias correction accumulators
+        num_sum.mul_(beta1_t).add_(1.0)
+        den_sum.mul_(beta2_t).add_(1.0 - beta2_t)
+
+        # 3. Denominator computation
+        if use_adopt:
+            de_nom = exp_avg_sq.sqrt().add_(den_sum.sqrt() * curr_eps_t)
+            exp_avg_sq.mul_(beta2_t).addcmul_(grad, grad, value=1.0 - beta2_t)
+        else:
+            exp_avg_sq.mul_(beta2_t).addcmul_(grad, grad, value=1.0 - beta2_t)
+            de_nom = exp_avg_sq.sqrt().add_(den_sum.sqrt() * curr_eps_t)
+
+        # 4. Update = alpha * grad + exp_avg
+        update = grad.mul(alpha_t).add_(exp_avg)
+
+        # 5. Update strategies
+        if use_cautious:
+            mask = (update * grad > 0).to(grad.dtype)
+            mask.div_(mask.mean().clamp_(min=1e-3))
+            update.mul_(mask)
+        if use_grams:
+            update.copy_(torch.sign(grad) * update.abs())
+
+        # 6. Divide by denominator
+        update.div_(de_nom)
+
+        # 7. Bias correction
+        if bias_correction1:
+            update.div_(num_sum)
+        if bias_correction2:
+            update.mul_(den_sum.sqrt())
+
+        # 8. ADOPT clamping
+        if use_adopt:
+            update.clamp_(-adopt_clip_t, adopt_clip_t)
+
+        # 9. Weight decay (inlined for compilation; branch resolved at trace time)
+        if cautious_weight_decay:
+            # Apply weight decay only where gradient and parameter agree in sign
+            cwd_mask = (grad * p_fp32 >= 0).to(p_fp32.dtype)
+            p_fp32.mul_(1.0 - lr_t * wd_t * cwd_mask)
+        elif weight_decouple:
+            wd_factor = 1.0 if fixed_decay else lr_t
+            p_fp32.mul_(1.0 - wd_t * wd_factor)
+        elif wd_t > 0.0:
+            grad.add_(p_fp32, alpha=wd_t)
+
+        # 10. Parameter update
+        p_fp32.add_(update, alpha=-lr_t)
+
+    def _compile_core_fns(self) -> None:
+        r"""Lazily compile the core step function with torch.compile."""
+        if self.defaults.get('compile_step', False):
+            try:
+                torch._dynamo.config.recompile_limit = max(
+                    torch._dynamo.config.recompile_limit, 64
+                )
+                with torch._dynamo.utils.disable_cache_limit():
+                    self._compiled_step = torch.compile(
+                        self._core_step_fp32, fullgraph=True, dynamic=False
+                    )
+                logger.info("SimplifiedAdEMAMix core function compiled with torch.compile(fullgraph=True, dynamic=False).")
+            except Exception as e:
+                logger.warning(f"torch.compile(fullgraph=True, dynamic=False) failed: {e}. Falling back to uncompiled step.")
+                self._compiled_step = self._core_step_fp32
+        else:
+            self._compiled_step = self._core_step_fp32
+
+    @torch.no_grad()
+    def _foreach_step(
+        self,
+        group,
+        active_params: list,
+        beta1: float,
+        beta2: float,
+        compute_device: torch.device,
+    ) -> None:
+        r"""Foreach step for 1D parameters (ndim == 1, numel >= 16).
+
+        Batches operations using ``torch._foreach_*`` for better GPU utilization.
+        Handles the full SimplifiedAdEMAMix pipeline: momentum, denominator,
+        update strategy, bias correction, weight decay, parameter update with
+        optional Kahan summation and stochastic rounding.
+        """
+        use_adopt = group['use_adopt']
+        update_strategy = group['update_strategy']
+        lr = group['lr']
+        wd = group['weight_decay']
+        wd_decouple = group['weight_decouple']
+        fixed_decay = group['fixed_decay']
+        cwd = group.get('cautious_weight_decay', False)
+        bc1 = group['bias_correction1']
+        bc2 = group['bias_correction2']
+        alpha = group['alpha']
+        use_kahan = group.get('kahan_sum', False)
+        step = group['step']
+        adopt_clip = (step - 1) ** 0.25
+
+        n = len(active_params)
+
+        # ========= Collect phase: build FP32 tensor lists on compute device =========
+        p_fp32_list = [None] * n
+        grad_list = [None] * n
+        exp_avg_list = [None] * n
+        exp_avg_sq_list = [None] * n
+        num_sum_list = [None] * n
+        den_sum_list = [None] * n
+        kahan_comp_list = [None] * n if use_kahan else None
+        kahan_sim_list = [None] * n if use_kahan else None
+        state_list = [None] * n
+        param_kahan_flags = [False] * n
+        param_list = [None] * n
+
+        for idx, p in enumerate(active_params):
+            state = self.state[p]
+            state_list[idx] = state
+            param_list[idx] = p
+
+            exp_avg_list[idx] = state["exp_avg"].to(
+                compute_device, non_blocking=True, dtype=torch.float32
+            )
+            exp_avg_sq_list[idx] = state["exp_avg_sq"].to(
+                compute_device, non_blocking=True, dtype=torch.float32
+            )
+            grad_list[idx] = p.grad.data.to(
+                compute_device, dtype=torch.float32, non_blocking=True
+            )
+            p_fp32_list[idx] = p.to(
+                compute_device, dtype=torch.float32, non_blocking=True
+            )
+
+            # Scalar state as tensors
+            num_sum_list[idx] = torch.tensor(
+                float(state.get('num_sum', 0.0)), device=compute_device, dtype=torch.float32
+            )
+            den_sum_list[idx] = torch.tensor(
+                float(state.get('den_sum', 0.0)), device=compute_device, dtype=torch.float32
+            )
+
+            param_kahan = use_kahan and p.dtype in {torch.float16, torch.bfloat16}
+            param_kahan_flags[idx] = param_kahan
+            if param_kahan:
+                kahan_comp_list[idx] = state['kahan_comp'].to(
+                    compute_device, non_blocking=True, dtype=torch.float32
+                )
+                kahan_sim_list[idx] = torch.empty_like(p_fp32_list[idx])
+
+        # ========= Kahan pre-compensation =========
+        if use_kahan:
+            for idx in range(n):
+                if param_kahan_flags[idx]:
+                    p_fp32_list[idx].add_(kahan_comp_list[idx])
+
+        # ========= BATCH: momentum update =========
+        # exp_avg = beta1 * exp_avg + (1-beta1) * grad
+        torch._foreach_mul_(exp_avg_list, beta1)
+        torch._foreach_add_(exp_avg_list, grad_list, alpha=1.0 - beta1)
+
+        # ========= BATCH: bias correction accumulators =========
+        for idx in range(n):
+            num_sum_list[idx].mul_(beta1).add_(1.0)
+            den_sum_list[idx].mul_(beta2).add_(1.0 - beta2)
+
+        # ========= BATCH: denominator =========
+        # Save current exp_avg_sq for adopt path before update
+        if use_adopt:
+            old_exp_avg_sq_list = [sq.clone() for sq in exp_avg_sq_list]
+
+        torch._foreach_mul_(exp_avg_sq_list, beta2)
+        torch._foreach_addcmul_(exp_avg_sq_list, grad_list, grad_list, value=1.0 - beta2)
+
+        if use_adopt:
+            de_nom_list = []
+            for idx in range(n):
+                dn = old_exp_avg_sq_list[idx].sqrt_().add_(
+                    den_sum_list[idx].sqrt() * group.get('_compiled_eps', group['eps'])
+                )
+                de_nom_list.append(dn)
+        else:
+            de_nom_list = []
+            for idx in range(n):
+                dn = exp_avg_sq_list[idx].sqrt().add_(
+                    den_sum_list[idx].sqrt() * group.get('_compiled_eps', group['eps'])
+                )
+                de_nom_list.append(dn)
+
+        # ========= PER-TENSOR: update = alpha * grad + exp_avg =========
+        update_list = []
+        for idx in range(n):
+            upd = grad_list[idx].mul(alpha).add_(exp_avg_list[idx])
+            update_list.append(upd)
+
+        # ========= BATCH: update strategies =========
+        if update_strategy in ('cautious', 'both'):
+            mask_list = []
+            for idx in range(n):
+                mask = (update_list[idx] * grad_list[idx] > 0).to(grad_list[idx].dtype)
+                mask.div_(mask.mean().clamp_(min=1e-3))
+                mask_list.append(mask)
+            torch._foreach_mul_(update_list, mask_list)
+        if update_strategy in ('grams', 'both'):
+            # In-place: sign(grad) * |update|
+            sign_list = torch._foreach_sign(grad_list)
+            torch._foreach_abs_(update_list)
+            torch._foreach_mul_(update_list, sign_list)
+
+        # ========= BATCH: divide by denominator =========
+        torch._foreach_div_(update_list, de_nom_list)
+
+        # ========= PER-TENSOR: bias correction =========
+        if bc1:
+            for idx in range(n):
+                update_list[idx].div_(num_sum_list[idx])
+        if bc2:
+            for idx in range(n):
+                update_list[idx].mul_(den_sum_list[idx].sqrt())
+
+        # ========= BATCH: ADOPT clamping =========
+        if use_adopt:
+            torch._foreach_clamp_(update_list, -adopt_clip, adopt_clip)
+
+        # ========= BATCH: weight decay =========
+        if wd != 0:
+            if cwd:
+                for idx in range(n):
+                    cwd_mask = (grad_list[idx] * p_fp32_list[idx] >= 0).to(p_fp32_list[idx].dtype)
+                    p_fp32_list[idx].mul_(1.0 - lr * wd * cwd_mask)
+            elif wd_decouple:
+                wd_factor = 1.0 if fixed_decay else lr
+                torch._foreach_mul_(p_fp32_list, 1.0 - wd * wd_factor)
+            else:
+                torch._foreach_add_(grad_list, p_fp32_list, alpha=wd)
+
+        # ========= BATCH: LR scale and parameter update =========
+        torch._foreach_mul_(update_list, -lr)
+        torch._foreach_add_(p_fp32_list, update_list)
+
+        # ========= Write-back phase =========
+        for idx in range(n):
+            p = param_list[idx]
+            state = state_list[idx]
+            p_fp32 = p_fp32_list[idx]
+            device = p.device
+            srng = self._get_srng_buf(exp_avg_list[idx])
+
+            # Kahan write-back
+            if param_kahan_flags[idx]:
+                kahan_sim = kahan_sim_list[idx]
+                kahan_comp = kahan_comp_list[idx]
+
+                kahan_sim.copy_(p_fp32)
+                if p.dtype == torch.bfloat16:
+                    sim_int = kahan_sim.view(dtype=torch.int32)
+                    if srng is not None:
+                        srng.random_(0, 1 << 16)
+                        sim_int.add_(srng)
+                    else:
+                        sim_int.add_(torch.randint_like(sim_int, 0, 1 << 16))
+                    sim_int.bitwise_and_(-65536)
+                else:
+                    kahan_sim.copy_(p_fp32.to(p.dtype).to(torch.float32))
+
+                if device.type == "cpu":
+                    p.data.copy_(kahan_sim)
+                else:
+                    p.data.copy_(kahan_sim, non_blocking=True)
+
+                kahan_sim.sub_(p_fp32)
+
+                if self.state_storage_dtype == torch.bfloat16:
+                    copy_stochastic_(state['kahan_comp'], kahan_sim, scratch=srng)
+                else:
+                    state['kahan_comp'].copy_(kahan_sim, non_blocking=True)
+            else:
+                if device.type == "cpu":
+                    if p.dtype == torch.bfloat16:
+                        copy_stochastic_(p.data, p_fp32, scratch=srng)
+                    else:
+                        p.data.copy_(p_fp32)
+                else:
+                    if p.dtype == torch.bfloat16:
+                        copy_stochastic_(p, p_fp32, scratch=srng)
+                    else:
+                        p.data.copy_(p_fp32, non_blocking=True)
+
+            # State write-back
+            exp_avg = exp_avg_list[idx]
+            exp_avg_sq = exp_avg_sq_list[idx]
+            if self.state_storage_dtype == torch.bfloat16:
+                copy_stochastic_(state["exp_avg"], exp_avg, scratch=srng)
+                copy_stochastic_(state["exp_avg_sq"], exp_avg_sq, scratch=srng)
+            else:
+                state["exp_avg"].copy_(exp_avg, non_blocking=True)
+                state["exp_avg_sq"].copy_(exp_avg_sq, non_blocking=True)
+
+            # Store scalar state back
+            state['num_sum'] = num_sum_list[idx]
+            state['den_sum'] = den_sum_list[idx]
+
+            # Sync chunking
+            if (idx + 1) % group.get('sync_chunk_size', 256) == 0:
+                torch.cuda.synchronize()
+
     @torch.no_grad()
     def step(self, closure: Closure = None) -> Loss:
         loss: Loss = None
@@ -473,7 +851,8 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             else:
                 group['step'] = 1
 
-            adopt_clip: float = (group['step']-1)**0.25
+            step = group['step']
+            adopt_clip: float = (step - 1) ** 0.25
 
             beta1, beta2 = group['betas']
 
@@ -481,20 +860,70 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             adaptive_clip = group['adaptive_clip']
             adaptive_clip_eps = group['adaptive_clip_eps']
             adaptive_clip_type = group['adaptive_clip_type']
-            update_strategy  = group['update_strategy']
-            use_adopt  = group['use_adopt']
-
+            update_strategy = group['update_strategy']
+            use_adopt = group['use_adopt']
             use_stable_spam_clipping = group["use_stable_spam_clipping"]
-            apply_ortho_to_group = group.get('is_ortho_group', False) # Default to False if key missing
+            apply_ortho_to_group = group.get('is_ortho_group', False)
+            compile_step = group.get('compile_step', False)
+            cwd = group.get('cautious_weight_decay', False)
+            use_kahan = group.get('kahan_sum', False)
 
             if group['beta1_warmup']:
                 beta1 = self.linear_hl_warmup_scheduler(
-                    group['step'], beta_end=beta1, beta_start=group['min_beta1'], warmup=group['beta1_warmup']
+                    step, beta_end=beta1, beta_start=group['min_beta1'], warmup=group['beta1_warmup']
                 )
+
+            # Store compiled beta1 and adopt_clip in group for scalar tensor caching
+            group['_compiled_beta1'] = beta1
+            group['_compiled_adopt_clip'] = adopt_clip
+
+            # ========= Foreach bucketing: collect 1D params for batched processing =========
+            use_foreach = group.get('foreach', False)
+            foreach_params = []
+            if use_foreach:
+                # Skip foreach on step 1 + adopt (simple init path, handled per-param)
+                skip_foreach = use_adopt and step == 1
+                if not skip_foreach:
+                    # Params needing per-tensor preprocessing cannot be batched in foreach
+                    needs_preprocessing = (
+                        (apply_ortho_to_group and use_orthograd) or
+                        (adaptive_clip is not None and adaptive_clip > 0) or
+                        use_stable_spam_clipping
+                    )
+                    for p in group['params']:
+                        if p.grad is None:
+                            continue
+                        if p.grad.ndim == 1 and p.numel() >= 16:
+                            if needs_preprocessing:
+                                continue  # Skip foreach — falls through to per-param path
+                            # Lazy-init state if needed
+                            state = self.state[p]
+                            if len(state) == 0:
+                                self._init_param_state(p, state, group, use_kahan)
+                            foreach_params.append(p)
+
+                if foreach_params:
+                    first_device = foreach_params[0].device
+                    foreach_compute_device = (
+                        torch.cuda.current_device() if first_device.type == "cpu" else first_device
+                    )
+                    self._foreach_step(
+                        group, foreach_params, beta1, beta2, foreach_compute_device
+                    )
+                    torch.cuda.synchronize()
+
+            # ========= Lazily compile core function on first step =========
+            if self._compiled_step is None:
+                self._compile_core_fns()
 
             for i, p in enumerate(group["params"]):
                 if p.grad is None:
                     continue
+
+                # Skip 1D params already handled by foreach
+                if use_foreach and p.grad.ndim == 1 and p.numel() >= 16:
+                    if not (use_adopt and step == 1):
+                        continue
 
                 p_fp32 = p
                 grad = p.grad
@@ -505,145 +934,205 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                 device = p.device
 
                 if len(state) == 0:
-                    state["exp_avg"] = torch.zeros_like(
-                        p.data, 
-                        dtype=self.state_storage_dtype, 
-                        device=self.state_storage_device
-                    )
-                    state["exp_avg_sq"] = torch.zeros_like(
-                        p.data, 
-                        dtype=self.state_storage_dtype, 
-                        device=self.state_storage_device
-                    )
+                    self._init_param_state(p, state, group, use_kahan)
 
-                    if self.state_storage_device == "cpu":
-                        state["exp_avg"] = state["exp_avg"].pin_memory()
-                        state["exp_avg_sq"] = state["exp_avg_sq"].pin_memory()
-
-                    state['num_sum'] = 0.0
-                    state['den_sum'] = 0.0
-
-                # ========= Asynchronously queue all operations for this parameter =========
                 # Determine target GPU device for computation
                 if device.type == "cpu":
-                    # If param is on CPU, use default GPU for computation
                     compute_device = torch.cuda.current_device()
                 else:
-                    # If param is on GPU, use its device
                     compute_device = device
 
+                # Transfer state to compute device
                 exp_avg = state["exp_avg"].to(
-                    compute_device, 
-                    non_blocking=True, 
-                    dtype=torch.float32
+                    compute_device, non_blocking=True, dtype=torch.float32
                 )
                 exp_avg_sq = state["exp_avg_sq"].to(
-                    compute_device, 
-                    non_blocking=True, 
-                    dtype=torch.float32
+                    compute_device, non_blocking=True, dtype=torch.float32
                 )
                 grad = grad.to(torch.float32).to(compute_device, non_blocking=True)
-                p_fp32 = (
-                    p.to(compute_device, dtype=torch.float32, non_blocking=True)
-                )
+                p_fp32 = p.to(compute_device, dtype=torch.float32, non_blocking=True)
 
+                param_kahan = use_kahan and p.dtype in {torch.float16, torch.bfloat16}
+                srng = self._get_srng_buf(exp_avg)
+
+                if param_kahan:
+                    kahan_comp = state['kahan_comp'].to(
+                        compute_device, non_blocking=True, dtype=torch.float32
+                    )
+                    p_fp32.add_(kahan_comp)
+
+                # ========= Preprocessing (outside compiled step) =========
                 if apply_ortho_to_group and use_orthograd:
                     _paper_orthograd(param=p_fp32, grad=grad)
 
                 if adaptive_clip is not None and adaptive_clip > 0:
-                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip, agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
+                    grad = agc(p=p_fp32, grad=grad, agc_clip_val=adaptive_clip,
+                               agc_eps=adaptive_clip_eps, norm_type=adaptive_clip_type)
 
                 if use_stable_spam_clipping:
                     if group['torch_compile']:
-                        grad = _get_compiled_stable_spam_clipping()(state,
-                                            grad,
-                                            step=group['step'])
+                        grad = _get_compiled_stable_spam_clipping()(state, grad, step=step)
                     else:
-                        grad = _stable_spam_clipping_impl(state, 
-                                            grad, 
-                                            step=group['step'])
-
+                        grad = _stable_spam_clipping_impl(state, grad, step=step)
 
                 curr_eps = adaptive_eps(grad, group)
+                group['_compiled_eps'] = curr_eps
 
-                if use_adopt and group['step'] == 1:
-                    exp_avg_sq.addcmul_(grad, grad)
-                else:
-                    exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
-
-                    state['num_sum'] = beta1 * state['num_sum'] + 1.0
-                    state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
-
-                    if use_adopt:
-                        de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
-                        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-                    else:   
-                        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-                        de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
-
-                    update = (group['alpha'] * grad + exp_avg)
-
-                    if update_strategy in {'cautious','grams','both'}:
-                        if update_strategy in {'cautious','both'}:
-                            mask = (update * grad > 0).to(grad.dtype)
-                            mask.div_(mask.mean().clamp_(min=1e-3))
-                            update = update * mask
-                        if update_strategy in {'grams','both'}:
-                            update.copy_(torch.sign(grad) * update.abs())
-
-                    update.div_(de_nom)
-
-                    if group['bias_correction1']:
-                        update.div_(state['num_sum'])
-                    if group['bias_correction2']:
-                        update.mul_(math.sqrt(state['den_sum']))
-
-                    if use_adopt:
-                        update.clamp_(-adopt_clip, adopt_clip)
-
-                    apply_weight_decay(
-                        p=p_fp32,
-                        grad=grad,
-                        lr=group['lr'],
-                        weight_decay=group['weight_decay'],
-                        weight_decouple=group['weight_decouple'],
-                        fixed_decay=group['fixed_decay'],
-                        torch_compile=group.get('torch_compile', False),
+                # ========= Core computation =========
+                if compile_step:
+                    # Compiled path — pass Python floats to avoid Tensor.fill_() CUDA kernel launches
+                    num_sum_t = torch.tensor(
+                        float(state.get('num_sum', 0.0)), device=compute_device, dtype=torch.float32
+                    )
+                    den_sum_t = torch.tensor(
+                        float(state.get('den_sum', 0.0)), device=compute_device, dtype=torch.float32
                     )
 
-                    p_fp32.add_(update, alpha=-group['lr'])
+                    is_step_one_and_adopt = use_adopt and step == 1
 
-                    # 3. Queue Device-to-Host copy
-                    # only use stochastic rounding if using bf16
+                    self._compiled_step(
+                        grad, exp_avg, exp_avg_sq, p_fp32,
+                        num_sum_t, den_sum_t,
+                        beta1, beta2, group['alpha'],
+                        group['lr'], group['weight_decay'], curr_eps,
+                        adopt_clip,
+                        use_adopt, is_step_one_and_adopt,
+                        group['bias_correction1'], group['bias_correction2'],
+                        group['weight_decouple'], group['fixed_decay'],
+                        cwd,
+                        update_strategy in {'cautious', 'both'},
+                        update_strategy in {'grams', 'both'},
+                    )
+
+                    # Store scalar state back
+                    state['num_sum'] = num_sum_t
+                    state['den_sum'] = den_sum_t
+                else:
+                    # Uncompiled path
+                    if use_adopt and step == 1:
+                        exp_avg_sq.addcmul_(grad, grad)
+                    else:
+                        exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+
+                        state['num_sum'] = beta1 * state['num_sum'] + 1.0
+                        state['den_sum'] = beta2 * state['den_sum'] + (1.0 - beta2)
+
+                        if use_adopt:
+                            de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
+                            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                        else:
+                            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                            de_nom = exp_avg_sq.sqrt().add_(math.sqrt(state['den_sum']) * curr_eps)
+
+                        update = (group['alpha'] * grad + exp_avg)
+
+                        if update_strategy in {'cautious', 'grams', 'both'}:
+                            if update_strategy in {'cautious', 'both'}:
+                                mask = (update * grad > 0).to(grad.dtype)
+                                mask.div_(mask.mean().clamp_(min=1e-3))
+                                update = update * mask
+                            if update_strategy in {'grams', 'both'}:
+                                update.copy_(torch.sign(grad) * update.abs())
+
+                        update.div_(de_nom)
+
+                        if group['bias_correction1']:
+                            update.div_(state['num_sum'])
+                        if group['bias_correction2']:
+                            update.mul_(math.sqrt(state['den_sum']))
+
+                        if use_adopt:
+                            update.clamp_(-adopt_clip, adopt_clip)
+
+                        apply_weight_decay(
+                            p=p_fp32,
+                            grad=grad,
+                            lr=group['lr'],
+                            weight_decay=group['weight_decay'],
+                            weight_decouple=group['weight_decouple'],
+                            fixed_decay=group['fixed_decay'],
+                            cautious_weight_decay=cwd,
+                            torch_compile=group.get('torch_compile', False),
+                        )
+
+                        p_fp32.add_(update, alpha=-group['lr'])
+
+                # ========= Write-back =========
+                if param_kahan:
+                    kahan_sim = torch.empty_like(p_fp32)
+                    kahan_sim.copy_(p_fp32)
+                    if p.dtype == torch.bfloat16:
+                        sim_int = kahan_sim.view(dtype=torch.int32)
+                        if srng is not None:
+                            srng.random_(0, 1 << 16)
+                            sim_int.add_(srng)
+                        else:
+                            sim_int.add_(torch.randint_like(sim_int, 0, 1 << 16))
+                        sim_int.bitwise_and_(-65536)
+                    else:
+                        kahan_sim.copy_(p_fp32.to(p.dtype).to(torch.float32))
+
+                    if device.type == "cpu":
+                        p.data.copy_(kahan_sim)
+                    else:
+                        p.data.copy_(kahan_sim, non_blocking=True)
+
+                    kahan_sim.sub_(p_fp32)
+
+                    if self.state_storage_dtype == torch.bfloat16:
+                        copy_stochastic_(state['kahan_comp'], kahan_sim, scratch=srng)
+                    else:
+                        state['kahan_comp'].copy_(kahan_sim, non_blocking=True)
+                else:
                     if device.type == "cpu":
                         if p.dtype == torch.bfloat16:
-                            copy_stochastic_(p.data, p_fp32)
+                            copy_stochastic_(p.data, p_fp32, scratch=srng)
                         else:
                             p.data.copy_(p_fp32)
                     else:
-                        # Original GPU path
                         if p.dtype == torch.bfloat16:
-                            copy_stochastic_(p, p_fp32)
+                            copy_stochastic_(p, p_fp32, scratch=srng)
                         else:
                             p.data.copy_(p_fp32, non_blocking=True)
-                    if self.state_storage_dtype == torch.bfloat16:
-                        copy_stochastic_(state["exp_avg"], exp_avg)
-                        copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
-                    else:
-                        state["exp_avg"].copy_(exp_avg, non_blocking=True)
-                        state["exp_avg_sq"].copy_(exp_avg_sq, non_blocking=True)
 
-                # ========= Check if we need to synchronize =========
-                # We synchronize after processing a chunk of parameters.
-                # The (i + 1) ensures we sync after the 1st, 2nd, ... chunk.
+                if self.state_storage_dtype == torch.bfloat16:
+                    copy_stochastic_(state["exp_avg"], exp_avg, scratch=srng)
+                    copy_stochastic_(state["exp_avg_sq"], exp_avg_sq, scratch=srng)
+                else:
+                    state["exp_avg"].copy_(exp_avg, non_blocking=True)
+                    state["exp_avg_sq"].copy_(exp_avg_sq, non_blocking=True)
+
+                # Sync chunking
                 if (i + 1) % self.sync_chunk_size == 0:
                     torch.cuda.synchronize()
 
-            # Final synchronization to handle the last partial chunk
-            # This ensures all operations for the group are complete before exiting.
+            # Final synchronization
             torch.cuda.synchronize()
 
         return loss
+
+    def _init_param_state(self, p, state, group, use_kahan: bool) -> None:
+        r"""Initialize optimizer state for a parameter (shared by foreach and per-param paths)."""
+        state["exp_avg"] = torch.zeros_like(
+            p.data, dtype=self.state_storage_dtype, device=self.state_storage_device
+        )
+        state["exp_avg_sq"] = torch.zeros_like(
+            p.data, dtype=self.state_storage_dtype, device=self.state_storage_device
+        )
+
+        if self.state_storage_device == "cpu":
+            state["exp_avg"] = state["exp_avg"].pin_memory()
+            state["exp_avg_sq"] = state["exp_avg_sq"].pin_memory()
+
+        state['num_sum'] = 0.0
+        state['den_sum'] = 0.0
+
+        if use_kahan and p.dtype in {torch.float16, torch.bfloat16}:
+            state["kahan_comp"] = torch.zeros(
+                p.shape, dtype=torch.float32, device=self.state_storage_device
+            )
+            if self.state_storage_device == "cpu":
+                state["kahan_comp"] = state["kahan_comp"].pin_memory()
     
 class SimplifiedAdEMAMixExM(BaseOptimizer):
     r"""Connections between Schedule-Free Optimizers, AdEMAMix, and Accelerated SGD Variants.
@@ -681,7 +1170,7 @@ class SimplifiedAdEMAMixExM(BaseOptimizer):
         amsgrad_min_decay_rate: float = 0.98,
         amsgrad_max_decay_rate: float = 0.98,
         torch_compile: bool = True,
-        sync_chunk_size: int = 128,
+        sync_chunk_size: int = 256,
         state_storage_dtype: str|torch.dtype = torch.bfloat16,
         state_storage_device: str|torch.device = "cpu",
         **kwargs,
