@@ -163,87 +163,103 @@ class CAME(BaseOptimizer):
     def init_group(self, group, **kwargs) -> None:
         pass
 
+    def _init_param_state(self, p: torch.Tensor, group: dict, grad_shape: Tuple[int, ...], factored: bool) -> None:
+        r"""Initialize optimizer state tensors for a parameter on first encounter.
+
+        :param p: torch.Tensor. the parameter.
+        :param group: dict. the parameter group.
+        :param grad_shape: Tuple[int, ...]. shape of the gradient.
+        :param factored: bool. whether to use factored second-moment estimator.
+        """
+        state = self.state[p]
+        nfc = group.get('non_factored_confidence', False)
+
+        state["exp_avg"] = torch.zeros_like(p,
+                                        dtype=self.state_storage_dtype,
+                                        device=self.state_storage_device)
+        if factored:
+            state['exp_avg_sq_row'] = torch.zeros(
+                grad_shape[:-1],
+                dtype=torch.float32,
+                device=self.state_storage_device
+            )
+            state['exp_avg_sq_col'] = torch.zeros(
+                grad_shape[:-2] + grad_shape[-1:],
+                dtype=torch.float32,
+                device=self.state_storage_device
+            )
+            state['exp_avg_res_row'] = torch.zeros(
+                grad_shape[:-1],
+                dtype=torch.float32,
+                device=self.state_storage_device
+            )
+            state['exp_avg_res_col'] = torch.zeros(
+                grad_shape[:-2] + grad_shape[-1:],
+                dtype=torch.float32,
+                device=self.state_storage_device
+            )
+        else:
+            state['exp_avg_sq'] = torch.zeros(
+                grad_shape,
+                dtype=self.state_storage_dtype,
+                device=self.state_storage_device
+            )
+
+        if group['ams_bound']:
+            state['exp_avg_sq_hat'] = torch.zeros(
+                grad_shape,
+                dtype=self.state_storage_dtype,
+                device=self.state_storage_device
+            )
+
+        # Non-factored confidence residual state
+        if not factored and nfc:
+            state['exp_avg_res'] = torch.zeros(
+                grad_shape,
+                dtype=torch.float32,
+                device=self.state_storage_device
+            )
+
+        # Kahan compensation state for parameter (bf16/fp16 only)
+        if group.get('kahan_sum', False) and p.dtype in {torch.float16, torch.bfloat16}:
+            state['kahan_comp'] = torch.zeros(
+                p.shape,
+                dtype=torch.float32,
+                device=self.state_storage_device
+            )
+
+        # Pin memory for CPU storage (enables async GPU transfers)
+        if self.state_storage_device == "cpu":
+            state["exp_avg"] = state["exp_avg"].pin_memory()
+
+            if factored:
+                state['exp_avg_sq_row'] = state["exp_avg_sq_row"].pin_memory()
+                state['exp_avg_sq_col'] = state["exp_avg_sq_col"].pin_memory()
+                state['exp_avg_res_row'] = state["exp_avg_res_row"].pin_memory()
+                state['exp_avg_res_col'] = state["exp_avg_res_col"].pin_memory()
+            else:
+                state['exp_avg_sq'] = state['exp_avg_sq'].pin_memory()
+
+            if group['ams_bound']:
+                state['exp_avg_sq_hat'] = state['exp_avg_sq_hat'].pin_memory()
+
+            if not factored and nfc:
+                state['exp_avg_res'] = state['exp_avg_res'].pin_memory()
+
+            if 'kahan_comp' in state:
+                state['kahan_comp'] = state['kahan_comp'].pin_memory()
+
     @torch.no_grad()
     def reset(self):
         for group in self.param_groups:
             group['step'] = 0
             for p in group['params']:
-                state = self.state[p]
+                if p.grad is None:
+                    continue
 
-                grad = p.grad
-
-                grad_shape: Tuple[int, ...] = grad.shape
+                grad_shape: Tuple[int, ...] = p.grad.shape
                 factored: bool = self.get_options(grad_shape)
-
-                state["exp_avg"] = torch.zeros_like(p,
-                                                dtype=self.state_storage_dtype,
-                                                device=self.state_storage_device)
-                if factored:
-                    state['exp_avg_sq_row'] = torch.zeros(
-                        grad_shape[:-1],
-                        dtype=torch.float32,
-                        device=self.state_storage_device
-                    )
-                    state['exp_avg_sq_col'] = torch.zeros(
-                        grad_shape[:-2] + grad_shape[-1:],
-                        dtype=torch.float32,
-                        device=self.state_storage_device
-                    )
-                    state['exp_avg_res_row'] = torch.zeros(
-                        grad_shape[:-1],
-                        dtype=torch.float32,
-                        device=self.state_storage_device
-                    )
-                    state['exp_avg_res_col'] = torch.zeros(
-                        grad_shape[:-2] + grad_shape[-1:],
-                        dtype=torch.float32,
-                        device=self.state_storage_device
-                    )
-                else:
-                    state['exp_avg_sq'] = torch.zeros_like(grad,
-                                                dtype=self.state_storage_dtype,
-                                                device=self.state_storage_device)
-
-                if group['ams_bound']:
-                    state['exp_avg_sq_hat'] = torch.zeros_like(grad,
-                                                dtype=self.state_storage_dtype,
-                                                device=self.state_storage_device)
-
-                # Non-factored confidence residual state
-                if not factored and group['non_factored_confidence']:
-                    state['exp_avg_res'] = torch.zeros_like(
-                        grad,
-                        dtype=torch.float32,
-                        device=self.state_storage_device
-                    )
-
-                # Kahan compensation state for parameter (bf16/fp16 only)
-                if group['kahan_sum'] and p.dtype in {torch.float16, torch.bfloat16}:
-                    state['kahan_comp'] = torch.zeros(
-                        p.shape,
-                        dtype=torch.float32,
-                        device=self.state_storage_device
-                    )
-
-                if self.state_storage_device == "cpu":
-                    state["exp_avg"] = state["exp_avg"].pin_memory()
-
-                    if factored:
-                        state['exp_avg_sq_row'] = state["exp_avg_sq_row"].pin_memory()
-                        state['exp_avg_sq_col'] = state["exp_avg_sq_col"].pin_memory()
-                        state['exp_avg_res_row'] = state["exp_avg_res_row"].pin_memory()
-                        state['exp_avg_res_col'] = state["exp_avg_res_col"].pin_memory()
-                    else:
-                        state['exp_avg_sq'] = state['exp_avg_sq'].pin_memory()
-
-                    if group['ams_bound']:
-                        state['exp_avg_sq_hat'] = state['exp_avg_sq_hat'].pin_memory()
-
-                    if not factored and group['non_factored_confidence']:
-                        state['exp_avg_res'] = state['exp_avg_res'].pin_memory()
-
-                    if 'kahan_comp' in state:
-                        state['kahan_comp'] = state['kahan_comp'].pin_memory()
+                self._init_param_state(p, group, grad_shape, factored)
 
     @staticmethod
     def get_options(shape: Tuple[int, ...]) -> bool:
@@ -544,6 +560,8 @@ class CAME(BaseOptimizer):
 
         if not factored and nfc:
             buf['exp_avg_res'] = torch.empty(grad_shape, dtype=torch.float32, device=compute_device)
+            # Dedicated scratch buffer for pre-momentum values (separate from exp_avg_res to avoid aliasing)
+            buf['pre_mom_scratch'] = torch.empty(grad_shape, dtype=torch.float32, device=compute_device)
 
         if kahan:
             buf['kahan_comp'] = torch.empty(grad_shape, dtype=torch.float32, device=compute_device)
@@ -569,6 +587,9 @@ class CAME(BaseOptimizer):
             # Check if kahan buffers are present when needed (handles stale cache from non-kahan creation)
             if kahan and 'kahan_comp' not in buf:
                 return self._create_staging(p, compute_device, factored, ams_bound, nfc, kahan=True)
+            # Check if pre_mom_scratch is present when needed (handles stale cache from non-nfc creation)
+            if nfc and not factored and 'pre_mom_scratch' not in buf:
+                return self._create_staging(p, compute_device, factored, ams_bound, nfc, kahan=kahan)
             return buf
         # Stale or missing — (re-)create
         return self._create_staging(p, compute_device, factored, ams_bound, nfc, kahan=kahan)
@@ -706,31 +727,34 @@ class CAME(BaseOptimizer):
 
         # ---- Batch compute phase ----
 
-        # 1. Denominator: update = grad^2 + eps1, then EMA, then rsqrt
-        #    We reuse exp_avg_sq_list as 'update' after setting it to grad^2 + eps1
+        # 1. EMA of squared gradient: exp_avg_sq = beta2 * exp_avg_sq + (1-beta2) * (grad^2 + eps1)
         update_list = torch._foreach_mul(grad_list, grad_list)  # grad^2 — batched
-        torch._foreach_add_(update_list, group['eps1'])  # + eps1 — batched
+        torch._foreach_add_(update_list, group['eps1'])  # grad^2 + eps1
 
-        # EMA of squared gradient: exp_avg_sq = beta2 * exp_avg_sq + (1-beta2) * update
         torch._foreach_mul_(exp_avg_sq_list, beta2)
         torch._foreach_add_(exp_avg_sq_list, update_list, alpha=1.0 - beta2)
+        # exp_avg_sq_list now holds correct EMA — preserved for write-back
 
-        # rsqrt: denom = 1/sqrt(exp_avg_sq)
-        torch._foreach_rsqrt_(exp_avg_sq_list)
+        # 2. Compute denom = rsqrt(EMA) into update_list (reuse allocation, avoids new allocs)
+        for _i in range(len(update_list)):
+            update_list[_i].copy_(exp_avg_sq_list[_i])
+        torch._foreach_rsqrt_(update_list)
 
-        # AMSBound
+        # AMSBound — update hat state, then compute denom from hat
         if use_amsbound:
-            torch._foreach_max_(exp_avg_sq_hat_list, [1.0 / d for d in exp_avg_sq_list])
-            torch._foreach_div_(exp_avg_sq_hat_list, beta2)
-            torch._foreach_rsqrt_(exp_avg_sq_hat_list)
-            denom_list = exp_avg_sq_hat_list
-        else:
-            denom_list = exp_avg_sq_list
+            # hat = max(hat, 1/denom) = max(hat, sqrt(EMA))
+            torch._foreach_max_(exp_avg_sq_hat_list, [1.0 / d for d in update_list])
+            # Compute denom = rsqrt(hat / beta2) into update_list (reuse allocation)
+            for _i in range(len(update_list)):
+                update_list[_i].copy_(exp_avg_sq_hat_list[_i])
+            torch._foreach_div_(update_list, beta2)
+            torch._foreach_rsqrt_(update_list)
+        denom_list = update_list
 
-        # 2. Precondition: update = denom * grad
+        # 3. Precondition: denom *= grad
         torch._foreach_mul_(denom_list, grad_list)
 
-        # 3. RMS clip (per-tensor since norm/numel differ)
+        # 4. RMS clip (per-tensor since norm/numel differ)
         for upd in denom_list:
             rms = upd.norm(2) / math.sqrt(upd.numel())
             clip_factor = max(rms / group['clip_threshold'], 1.0)
@@ -740,16 +764,15 @@ class CAME(BaseOptimizer):
         # When nfc=True, use pre-allocated staging scratch to avoid N clone allocations.
         if nfc:
             if self._use_staging:
-                # Reuse exp_avg_res staging buffers as pre-momentum scratch
-                # (exp_avg_res is only read later, after pre_momentum is consumed)
+                # Use dedicated pre_mom_scratch buffer (separate from exp_avg_res to avoid aliasing)
                 pre_momentum_updates = []
-                for i, p in enumerate(active_params):
+                for _i, p in enumerate(active_params):
                     if p.grad is None:
                         continue
                     staging = self._get_staging(p, compute_device, factored=False,
                                                 ams_bound=use_amsbound, nfc=nfc)
-                    scratch = staging['exp_avg_res']  # same shape as exp_avg_sq
-                    scratch.copy_(denom_list[i])
+                    scratch = staging['pre_mom_scratch']
+                    scratch.copy_(denom_list[_i])
                     pre_momentum_updates.append(scratch)
             else:
                 pre_momentum_updates = [d.clone() for d in denom_list]
@@ -965,6 +988,7 @@ class CAME(BaseOptimizer):
                     )
 
             # Per-parameter loop for factored params or when foreach is disabled
+            processed = 0
             for i, p in enumerate(group["params"]):
                 if p.grad is None:
                     continue
@@ -985,75 +1009,7 @@ class CAME(BaseOptimizer):
                 factored: bool = self.get_options(grad_shape)
 
                 if len(state) == 0:
-                    state["exp_avg"] = torch.zeros_like(p,
-                                                    dtype=self.state_storage_dtype,
-                                                    device=self.state_storage_device)
-                    if factored:
-                        state['exp_avg_sq_row'] = torch.zeros(
-                            grad_shape[:-1],
-                            dtype=torch.float32,
-                            device=self.state_storage_device
-                        )
-                        state['exp_avg_sq_col'] = torch.zeros(
-                            grad_shape[:-2] + grad_shape[-1:],
-                            dtype=torch.float32,
-                            device=self.state_storage_device
-                        )
-                        state['exp_avg_res_row'] = torch.zeros(
-                            grad_shape[:-1],
-                            dtype=torch.float32,
-                            device=self.state_storage_device
-                        )
-                        state['exp_avg_res_col'] = torch.zeros(
-                            grad_shape[:-2] + grad_shape[-1:],
-                            dtype=torch.float32,
-                            device=self.state_storage_device
-                        )
-                    else:
-                        state['exp_avg_sq'] = torch.zeros_like(grad,
-                                                    dtype=self.state_storage_dtype,
-                                                    device=self.state_storage_device)
-
-                    if group['ams_bound']:
-                        state['exp_avg_sq_hat'] = torch.zeros_like(grad,
-                                                    dtype=self.state_storage_dtype,
-                                                    device=self.state_storage_device)
-
-                    # Non-factored confidence residual state
-                    if not factored and nfc:
-                        state['exp_avg_res'] = torch.zeros_like(
-                            grad,
-                            dtype=torch.float32,
-                            device=self.state_storage_device
-                        )
-
-                    # Kahan compensation state for parameter (bf16/fp16 only)
-                    if use_kahan and p.dtype in {torch.float16, torch.bfloat16}:
-                        state['kahan_comp'] = torch.zeros(
-                            p.shape,
-                            dtype=torch.float32,
-                            device=self.state_storage_device
-                        )
-
-                    if self.state_storage_device == "cpu":
-                        state["exp_avg"] = state["exp_avg"].pin_memory()
-
-                        if factored:
-                            state['exp_avg_sq_row'] = state["exp_avg_sq_row"].pin_memory()
-                            state['exp_avg_sq_col'] = state["exp_avg_sq_col"].pin_memory()
-                            state['exp_avg_res_row'] = state["exp_avg_res_row"].pin_memory()
-                            state['exp_avg_res_col'] = state["exp_avg_res_col"].pin_memory()
-                        else:
-                            state['exp_avg_sq'] = state['exp_avg_sq'].pin_memory()
-
-                        if group['ams_bound']:
-                            state['exp_avg_sq_hat'] = state['exp_avg_sq_hat'].pin_memory()
-
-                        if not factored and nfc:
-                            state['exp_avg_res'] = state['exp_avg_res'].pin_memory()
-
-                        if 'kahan_comp' in state:
-                            state['kahan_comp'] = state['kahan_comp'].pin_memory()
+                    self._init_param_state(p, group, grad_shape, factored)
 
                 # ========= Determine compute device =========
                 if device.type == "cpu":
@@ -1277,8 +1233,9 @@ class CAME(BaseOptimizer):
                     else:
                         state['exp_avg_res'].copy_(exp_avg_res_nonfac, non_blocking=True)
 
-                # ========= Sync chunking =========
-                if (i + 1) % self.sync_chunk_size == 0:
+                # ========= Sync chunking (use processed count, not raw loop index) =========
+                processed += 1
+                if processed % self.sync_chunk_size == 0:
                     torch.cuda.synchronize()
 
             # Final synchronization
