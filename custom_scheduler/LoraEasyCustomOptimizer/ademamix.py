@@ -363,9 +363,9 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         bias_correction2: bool = True,
         use_stable_spam_clipping:bool = False,
         use_adopt: bool = False,
-        torch_compile: bool = False,
+        torch_compile: bool = False,          # Compile helper functions (apply_weight_decay, stable_spam_clipping)
         cautious_weight_decay: bool = False,
-        compile_step: bool = False,
+        compile_step: bool = False,            # Compile the core _core_step_fp32 function via torch.compile
         foreach: bool = False,
         kahan_sum: bool = False,
         sync_chunk_size: int = 256,
@@ -532,6 +532,13 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             exp_avg_sq.addcmul_(grad, grad)
             return
 
+        # 0. Apply L2 weight decay to grad BEFORE EMA updates (correct L2 behavior).
+        #    This ensures the weight decay term is incorporated into momentum and
+        #    second moment estimates, matching standard Adam L2 regularization.
+        #    Cautious and decoupled WD modify p_fp32 directly and are handled in step 9.
+        if not cautious_weight_decay and not weight_decouple and wd_t > 0.0:
+            grad.add_(p_fp32, alpha=wd_t)
+
         # 1. Update exp_avg (momentum)
         exp_avg.mul_(beta1_t).add_(grad, alpha=1.0 - beta1_t)
 
@@ -571,7 +578,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         if use_adopt:
             update.clamp_(-adopt_clip_t, adopt_clip_t)
 
-        # 9. Weight decay (inlined for compilation; branch resolved at trace time)
+        # 9. Weight decay (cautious and decoupled only; L2 already applied in step 0)
         if cautious_weight_decay:
             # Apply weight decay only where gradient and parameter agree in sign
             cwd_mask = (grad * p_fp32 >= 0).to(p_fp32.dtype)
@@ -579,8 +586,6 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         elif weight_decouple:
             wd_factor = 1.0 if fixed_decay else lr_t
             p_fp32.mul_(1.0 - wd_t * wd_factor)
-        elif wd_t > 0.0:
-            grad.add_(p_fp32, alpha=wd_t)
 
         # 10. Parameter update
         p_fp32.add_(update, alpha=-lr_t)
@@ -642,6 +647,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         exp_avg_sq_list = [None] * n
         num_sum_list = [None] * n
         den_sum_list = [None] * n
+        eps_list = [None] * n
         kahan_comp_list = [None] * n if use_kahan else None
         kahan_sim_list = [None] * n if use_kahan else None
         state_list = [None] * n
@@ -674,6 +680,9 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                 float(state.get('den_sum', 0.0)), device=compute_device, dtype=torch.float32
             )
 
+            # Compute adaptive eps per-parameter (BUG-2 fix: foreach now uses adaptive eps)
+            eps_list[idx] = adaptive_eps(grad_list[idx], group)
+
             param_kahan = use_kahan and p.dtype in {torch.float16, torch.bfloat16}
             param_kahan_flags[idx] = param_kahan
             if param_kahan:
@@ -687,6 +696,12 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             for idx in range(n):
                 if param_kahan_flags[idx]:
                     p_fp32_list[idx].add_(kahan_comp_list[idx])
+
+        # ========= L2 weight decay BEFORE EMA updates (BUG-1 fix) =========
+        # Ensures the weight decay term is incorporated into momentum and
+        # second moment estimates, matching standard Adam L2 regularization.
+        if wd != 0 and not cwd and not wd_decouple:
+            torch._foreach_add_(grad_list, p_fp32_list, alpha=wd)
 
         # ========= BATCH: momentum update =========
         # exp_avg = beta1 * exp_avg + (1-beta1) * grad
@@ -710,14 +725,14 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             de_nom_list = []
             for idx in range(n):
                 dn = old_exp_avg_sq_list[idx].sqrt_().add_(
-                    den_sum_list[idx].sqrt() * group.get('_compiled_eps', group['eps'])
+                    den_sum_list[idx].sqrt() * eps_list[idx]
                 )
                 de_nom_list.append(dn)
         else:
             de_nom_list = []
             for idx in range(n):
                 dn = exp_avg_sq_list[idx].sqrt().add_(
-                    den_sum_list[idx].sqrt() * group.get('_compiled_eps', group['eps'])
+                    den_sum_list[idx].sqrt() * eps_list[idx]
                 )
                 de_nom_list.append(dn)
 
@@ -756,7 +771,7 @@ class SimplifiedAdEMAMix(BaseOptimizer):
         if use_adopt:
             torch._foreach_clamp_(update_list, -adopt_clip, adopt_clip)
 
-        # ========= BATCH: weight decay =========
+        # ========= BATCH: weight decay (cautious and decoupled only; L2 already applied above) =========
         if wd != 0:
             if cwd:
                 for idx in range(n):
@@ -765,8 +780,6 @@ class SimplifiedAdEMAMix(BaseOptimizer):
             elif wd_decouple:
                 wd_factor = 1.0 if fixed_decay else lr
                 torch._foreach_mul_(p_fp32_list, 1.0 - wd * wd_factor)
-            else:
-                torch._foreach_add_(grad_list, p_fp32_list, alpha=wd)
 
         # ========= BATCH: LR scale and parameter update =========
         torch._foreach_mul_(update_list, -lr)
@@ -830,12 +843,12 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                 state["exp_avg"].copy_(exp_avg, non_blocking=True)
                 state["exp_avg_sq"].copy_(exp_avg_sq, non_blocking=True)
 
-            # Store scalar state back
-            state['num_sum'] = num_sum_list[idx]
-            state['den_sum'] = den_sum_list[idx]
+            # Store scalar state back as Python floats (CONSISTENCY-1 fix)
+            state['num_sum'] = num_sum_list[idx].item()
+            state['den_sum'] = den_sum_list[idx].item()
 
-            # Sync chunking
-            if (idx + 1) % group.get('sync_chunk_size', 256) == 0:
+            # Sync chunking (CONSISTENCY-2 fix: use self.sync_chunk_size)
+            if (idx + 1) % self.sync_chunk_size == 0:
                 torch.cuda.synchronize()
 
     @torch.no_grad()
@@ -980,13 +993,19 @@ class SimplifiedAdEMAMix(BaseOptimizer):
 
                 # ========= Core computation =========
                 if compile_step:
-                    # Compiled path — pass Python floats to avoid Tensor.fill_() CUDA kernel launches
-                    num_sum_t = torch.tensor(
-                        float(state.get('num_sum', 0.0)), device=compute_device, dtype=torch.float32
-                    )
-                    den_sum_t = torch.tensor(
-                        float(state.get('den_sum', 0.0)), device=compute_device, dtype=torch.float32
-                    )
+                    # Compiled path — pre-allocate and reuse scalar tensors (OPT-1 fix)
+                    if '_num_sum_t' not in state or state['_num_sum_t'].device != compute_device:
+                        state['_num_sum_t'] = torch.tensor(
+                            float(state.get('num_sum', 0.0)), device=compute_device, dtype=torch.float32
+                        )
+                        state['_den_sum_t'] = torch.tensor(
+                            float(state.get('den_sum', 0.0)), device=compute_device, dtype=torch.float32
+                        )
+                    else:
+                        state['_num_sum_t'].fill_(float(state.get('num_sum', 0.0)))
+                        state['_den_sum_t'].fill_(float(state.get('den_sum', 0.0)))
+                    num_sum_t = state['_num_sum_t']
+                    den_sum_t = state['_den_sum_t']
 
                     is_step_one_and_adopt = use_adopt and step == 1
 
@@ -1004,14 +1023,18 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                         update_strategy in {'grams', 'both'},
                     )
 
-                    # Store scalar state back
-                    state['num_sum'] = num_sum_t
-                    state['den_sum'] = den_sum_t
+                    # Store scalar state back as Python float (CONSISTENCY-1 fix)
+                    state['num_sum'] = num_sum_t.item()
+                    state['den_sum'] = den_sum_t.item()
                 else:
                     # Uncompiled path
                     if use_adopt and step == 1:
                         exp_avg_sq.addcmul_(grad, grad)
                     else:
+                        # BUG-1 fix: Apply L2 weight decay to grad BEFORE EMA updates
+                        if not group['weight_decouple'] and not cwd and group['weight_decay'] > 0:
+                            grad.add_(p_fp32, alpha=group['weight_decay'])
+
                         exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
 
                         state['num_sum'] = beta1 * state['num_sum'] + 1.0
@@ -1044,16 +1067,18 @@ class SimplifiedAdEMAMix(BaseOptimizer):
                         if use_adopt:
                             update.clamp_(-adopt_clip, adopt_clip)
 
-                        apply_weight_decay(
-                            p=p_fp32,
-                            grad=grad,
-                            lr=group['lr'],
-                            weight_decay=group['weight_decay'],
-                            weight_decouple=group['weight_decouple'],
-                            fixed_decay=group['fixed_decay'],
-                            cautious_weight_decay=cwd,
-                            torch_compile=group.get('torch_compile', False),
-                        )
+                        # Apply cautious/decoupled weight decay (L2 already applied above)
+                        if cwd or group['weight_decouple']:
+                            apply_weight_decay(
+                                p=p_fp32,
+                                grad=grad,
+                                lr=group['lr'],
+                                weight_decay=group['weight_decay'],
+                                weight_decouple=group['weight_decouple'],
+                                fixed_decay=group['fixed_decay'],
+                                cautious_weight_decay=cwd,
+                                torch_compile=group.get('torch_compile', False),
+                            )
 
                         p_fp32.add_(update, alpha=-group['lr'])
 
