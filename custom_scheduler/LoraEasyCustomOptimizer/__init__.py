@@ -58,6 +58,7 @@ from LoraEasyCustomOptimizer.wiwiopt import WiwiOpt
 from LoraEasyCustomOptimizer.adam import AdamW8bitKahan
 from LoraEasyCustomOptimizer.cascade import CASCADE
 from LoraEasyCustomOptimizer.radam_schedulefree import RAdamScheduleFree
+from LoraEasyCustomOptimizer.ocgoptv2 import OCGOptV2
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
@@ -118,6 +119,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     Mythical,
     OAGOpt,
     OCGOpt,
+    OCGOptV2,
     ProdigyPlusScheduleFree,
     ProjectiveAdam,
     RACS,
