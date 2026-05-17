@@ -13,8 +13,13 @@ from utils.tunnel_service import CloudflaredTunnel, create_tunnel
 import uvicorn
 import os
 from threading import Thread
+import warnings
+import logging
 
 from transformers import CLIPTokenizer
+
+warnings.filterwarnings("ignore", category=UserWarning, module="torchao")
+logging.getLogger("torch.distributed.elastic.multiprocessing.redirects").setLevel(logging.ERROR)
 
 tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
 
