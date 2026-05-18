@@ -50,7 +50,7 @@ def orthogonalize(M: torch.Tensor, num_ns_steps=len(NS_COEFFS), ortho_dtype=None
         M_orig = M.clone()
     transpose = M.shape[0] < M.shape[1]
     if transpose:
-        M = M.T
+        M = M.T.contiguous()
     M = M / (torch.linalg.norm(M) + 1e-20)
     # Pre-allocate identity matrix once — shape (M.shape[1], M.shape[1]) is constant across NS iterations
     n = M.shape[1]
@@ -59,7 +59,7 @@ def orthogonalize(M: torch.Tensor, num_ns_steps=len(NS_COEFFS), ortho_dtype=None
         A = M.T @ M
         M = M @ (a * I + b * A + c * A @ A)
     if transpose:
-        M = M.T
+        M = M.T.contiguous()
     if adaptive:
         M = torch.einsum('ij,ij,ab->ab', M_orig.type_as(M), M, M)
     if ortho_dtype is not None:
@@ -90,7 +90,7 @@ def spectral_clip_func(W: torch.Tensor, sigma_min: float=-1., sigma_max: float=1
     return  _spectral_clip(W, sigma_min=sigma_min, sigma_max=sigma_max, ortho_dtype=ortho_dtype, num_ns_steps=num_ns_steps, adaptive=adaptive)
 
 @torch._dynamo.utils.disable_cache_limit()
-@torch.compile(fullgraph=True, mode="reduce-overhead")
+@torch.compile(fullgraph=True, mode="default")
 def spectral_clip_compiled_func(W: torch.Tensor, sigma_min: float=-1., sigma_max: float=1., ortho_dtype=None, num_ns_steps=len(NS_COEFFS), adaptive=False):
     if ortho_dtype is None:
         ortho_dtype = torch.float32
@@ -378,14 +378,14 @@ class FFTDescent(Optimizer):
         if do_spectral_clip:
             # Reshape conv / high-dim tensors to 2-D for matrix operations
             if needs_reshape:
-                c_t_2d = c_t.reshape(c_t.shape[0], -1)
+                c_t_2d = c_t.reshape(c_t.shape[0], -1).contiguous()
             else:
                 c_t_2d = c_t
 
             # Transpose so the smaller dim is rows (Newton-Schulz prefers tall-skinny)
             flip = c_t_2d.shape[0] > c_t_2d.shape[1]
             if flip:
-                c_t_2d = c_t_2d.T
+                c_t_2d = c_t_2d.T.contiguous()
 
             # Call the uncompiled spectral clip (pure tensor math, inlined by the compiler)
             full_step = _spectral_clip(
@@ -398,10 +398,10 @@ class FFTDescent(Optimizer):
             )
 
             if flip:
-                full_step = full_step.T
+                full_step = full_step.T.contiguous()
 
             # Normalize via atan2 (bounded [-1, 1] × 4/π) using momentum as denominator
-            full_step = full_step.view_as(c_t).atan2(momentum.abs()).mul_(1.27323954474)
+            full_step = full_step.view_as(c_t).contiguous().atan2(momentum.abs()).mul_(1.27323954474)
         else:
             # No spectral clipping — direct atan2 normalization
             full_step = c_t.atan2(momentum.abs()).mul_(1.27323954474)
