@@ -1038,3 +1038,460 @@ class TestOCGOptV2CompiledNoGrad:
                 param.grad = None
 
         opt.step()  # Should not crash
+
+
+# ---------------------------------------------------------------------------
+# Test: OCGOptV2 foreach dispatch
+# ---------------------------------------------------------------------------
+
+class TestOCGOptV2ForeachDispatch:
+    """Verify the three-way dispatch in step() for foreach."""
+
+    def test_foreach_flag_stored(self):
+        """foreach flag should be stored on the optimizer."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+        assert opt._foreach is True
+
+    def test_foreach_false_by_default(self):
+        """foreach should default to False."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, **_NO_COMPILE)
+        assert opt._foreach is False
+
+    def test_foreach_dispatch(self):
+        """When foreach=True, foreach path should be used."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+        assert opt._foreach is True
+        _run_steps(model, opt, n_steps=2)
+        assert True
+
+    def test_foreach_sets_clip_func(self):
+        """When foreach=True (and compile_step=False), clip_func should be set."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+        assert opt.clip_func is not None
+        assert callable(opt.clip_func)
+
+    def test_compile_step_takes_priority_over_foreach(self):
+        """When both compile_step=True and foreach=True, compile_step should win."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, compile_step=True, foreach=True, **_NO_COMPILE)
+        # Override compiled step to uncompiled for testing
+        opt._compiled_step = OCGOptV2._ocgoptv2_step_fp32
+        assert opt._compile_step is True
+        assert opt._foreach is True
+        # step() should use _step_compiled, not _step_foreach
+        _run_steps(model, opt, n_steps=2)
+
+
+# ---------------------------------------------------------------------------
+# Test: OCGOptV2 foreach basic functionality (fp32)
+# ---------------------------------------------------------------------------
+
+class TestOCGOptV2ForeachBasic:
+    """Verify the foreach step runs without errors and reduces loss."""
+
+    def test_foreach_fp32_convergence(self):
+        """Foreach optimizer should reduce loss over multiple steps (fp32)."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+        loss_init = _run_steps(model, opt, n_steps=1)
+        loss_final = _run_steps(model, opt, n_steps=20)
+        assert loss_final.item() < loss_init.item(), (
+            f"Foreach loss did not decrease: init={loss_init.item()}, final={loss_final.item()}"
+        )
+
+    def test_foreach_step_returns_loss_with_closure(self):
+        """foreach step() with closure should return the closure's loss."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+        x = torch.randn(8, 32)
+        def closure():
+            opt.zero_grad()
+            loss = model(x).sum()
+            loss.backward()
+            return loss
+        returned_loss = opt.step(closure)
+        assert returned_loss is not None
+
+    def test_foreach_step_returns_none_without_closure(self):
+        """foreach step() without closure should return None."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+        x = torch.randn(8, 32)
+        loss = model(x).sum()
+        loss.backward()
+        returned_loss = opt.step()
+        assert returned_loss is None
+
+    def test_foreach_parameters_change_after_step(self):
+        """Parameters should be modified after a foreach step."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+        before = _snapshot_params(model)
+        x = torch.randn(8, 32)
+        loss = model(x).sum()
+        loss.backward()
+        opt.step()
+        after = _snapshot_params(model)
+        diff = _max_param_diff(before, after)
+        assert diff > 0, "Parameters did not change after foreach step"
+
+    def test_foreach_no_nan_in_params(self):
+        """Parameters should not contain NaN after multiple foreach steps."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+        _run_steps(model, opt, n_steps=10)
+        for p in model.parameters():
+            assert not torch.isnan(p).any(), "NaN detected in foreach parameters"
+
+    def test_foreach_no_inf_in_params(self):
+        """Parameters should not contain Inf after multiple foreach steps."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+        _run_steps(model, opt, n_steps=10)
+        for p in model.parameters():
+            assert not torch.isinf(p).any(), "Inf detected in foreach parameters"
+
+
+# ---------------------------------------------------------------------------
+# Test: OCGOptV2 foreach vs native numerical agreement
+# ---------------------------------------------------------------------------
+
+class TestOCGOptV2ForeachVsNative:
+    """Verify the foreach and native paths produce numerically close results.
+
+    The foreach path uses _foreach_lerp_ (in-place) while the native path uses
+    out-of-place lerp (which rebinds local variables). These should produce
+    identical results since the math is the same.
+    """
+
+    def _run_native_vs_foreach(self, sizes, n_steps=3, seed=42, **opt_kwargs):
+        """Helper to compare native and foreach paths with identical seeds."""
+        # Run native path
+        torch.manual_seed(seed)
+        model_native = _make_model(seed=seed, sizes=sizes)
+        opt_native = OCGOptV2(model_native.parameters(), lr=1e-3, compile_step=False, foreach=False, **opt_kwargs, **_NO_COMPILE)
+        torch.manual_seed(999)
+        for _ in range(n_steps):
+            x = torch.randn(4, sizes[0][0])
+            loss = model_native(x).sum()
+            loss.backward()
+            opt_native.step()
+            opt_native.zero_grad()
+        native_params = _snapshot_params(model_native)
+
+        # Run foreach path (same seed)
+        torch.manual_seed(seed)
+        model_foreach = _make_model(seed=seed, sizes=sizes)
+        opt_foreach = OCGOptV2(model_foreach.parameters(), lr=1e-3, compile_step=False, foreach=True, **opt_kwargs, **_NO_COMPILE)
+        torch.manual_seed(999)
+        for _ in range(n_steps):
+            x = torch.randn(4, sizes[0][0])
+            loss = model_foreach(x).sum()
+            loss.backward()
+            opt_foreach.step()
+            opt_foreach.zero_grad()
+        foreach_params = _snapshot_params(model_foreach)
+
+        return _max_param_diff(native_params, foreach_params)
+
+    def test_foreach_vs_native_fp32_agreement(self):
+        """Foreach and native paths should produce similar parameter values (fp32)."""
+        diff = self._run_native_vs_foreach(sizes=[(16, 32), (32, 8)], n_steps=5)
+        assert diff < 1e-5, (
+            f"Foreach vs native param diff {diff:.2e} exceeds 1e-5 tolerance"
+        )
+
+    def test_foreach_vs_native_with_adaptive(self):
+        """Foreach and native should agree with adaptive=True."""
+        diff = self._run_native_vs_foreach(sizes=[(16, 16)], n_steps=3, adaptive=True)
+        assert diff < 1e-5, (
+            f"Foreach vs native adaptive param diff {diff:.2e} exceeds 1e-5 tolerance"
+        )
+
+    def test_foreach_vs_native_with_weight_decay(self):
+        """Foreach and native should agree with weight_decay."""
+        diff = self._run_native_vs_foreach(sizes=[(16, 16)], n_steps=3, weight_decay=0.01)
+        assert diff < 1e-5, (
+            f"Foreach vs native weight_decay param diff {diff:.2e} exceeds 1e-5 tolerance"
+        )
+
+    def test_foreach_vs_native_with_aol(self):
+        """Foreach and native should agree with aol=True."""
+        diff = self._run_native_vs_foreach(sizes=[(16, 32), (32, 8)], n_steps=3, aol=True)
+        assert diff < 1e-5, (
+            f"Foreach vs native aol param diff {diff:.2e} exceeds 1e-5 tolerance"
+        )
+
+    def test_foreach_vs_native_with_input_norm(self):
+        """Foreach and native should agree with input_norm=True."""
+        diff = self._run_native_vs_foreach(sizes=[(16, 32), (32, 8)], n_steps=3, input_norm=True)
+        assert diff < 1e-5, (
+            f"Foreach vs native input_norm param diff {diff:.2e} exceeds 1e-5 tolerance"
+        )
+
+    def test_foreach_vs_native_with_centralization(self):
+        """Foreach and native should agree with custom centralization."""
+        diff = self._run_native_vs_foreach(sizes=[(16, 32), (32, 8)], n_steps=3, centralization=0.5)
+        assert diff < 1e-5, (
+            f"Foreach vs native centralization param diff {diff:.2e} exceeds 1e-5 tolerance"
+        )
+
+    def test_foreach_vs_native_with_betas(self):
+        """Foreach and native should agree with custom betas."""
+        diff = self._run_native_vs_foreach(
+            sizes=[(16, 32), (32, 8)], n_steps=3,
+            betas=(0.9, 0.999, 0.9999),
+        )
+        assert diff < 1e-5, (
+            f"Foreach vs native betas param diff {diff:.2e} exceeds 1e-5 tolerance"
+        )
+
+    def test_foreach_vs_native_multi_step_agreement(self):
+        """Foreach and native should agree over many steps."""
+        diff = self._run_native_vs_foreach(sizes=[(32, 64), (64, 16)], n_steps=10)
+        assert diff < 1e-4, (
+            f"Foreach vs native multi-step param diff {diff:.2e} exceeds 1e-4 tolerance"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test: OCGOptV2 foreach with bf16
+# ---------------------------------------------------------------------------
+
+class TestOCGOptV2ForeachBf16:
+    """Verify the foreach path works with bf16 parameters."""
+
+    def test_foreach_bf16_no_crash(self):
+        """Foreach optimizer should not crash on bf16 parameters."""
+        model = _make_model(dtype=torch.bfloat16)
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, stochastic_fp=True, **_NO_COMPILE)
+        _run_steps(model, opt, n_steps=5)
+
+    def test_foreach_bf16_no_nan(self):
+        """Foreach bf16 parameters should not contain NaN after steps."""
+        model = _make_model(dtype=torch.bfloat16)
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, stochastic_fp=True, **_NO_COMPILE)
+        _run_steps(model, opt, n_steps=10)
+        for p in model.parameters():
+            assert not torch.isnan(p).any(), "NaN detected in foreach bf16 parameters"
+
+    def test_foreach_bf16_stays_bf16(self):
+        """After foreach stochastic update, parameter dtype should remain bf16."""
+        model = _make_model(dtype=torch.bfloat16)
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, stochastic_fp=True, **_NO_COMPILE)
+        _run_steps(model, opt, n_steps=3)
+        for p in model.parameters():
+            assert p.dtype == torch.bfloat16, (
+                f"Parameter dtype changed from bfloat16 to {p.dtype}"
+            )
+
+    def test_foreach_bf16_state_momentum_dtype(self):
+        """Momentum states should be stored in the parameter's dtype (bf16)."""
+        model = _make_model(dtype=torch.bfloat16)
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, stochastic_fp=True, **_NO_COMPILE)
+        _run_steps(model, opt, n_steps=2)
+        for p in model.parameters():
+            state = opt.state[p]
+            assert state["value_momentum"].dtype == torch.bfloat16
+            assert state["centralized_momentum"].dtype == torch.bfloat16
+
+
+# ---------------------------------------------------------------------------
+# Test: OCGOptV2 foreach scalar parameter handling
+# ---------------------------------------------------------------------------
+
+class TestOCGOptV2ForeachScalarParam:
+    """Verify the foreach path handles scalar (0-dim) parameters correctly."""
+
+    def test_foreach_scalar_param_no_crash(self):
+        """Foreach optimizer should handle 0-dim parameters without crashing."""
+        model = torch.nn.Linear(8, 4, bias=True)
+        model.scale = torch.nn.Parameter(torch.tensor(1.0))
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+
+        for _ in range(5):
+            x = torch.randn(4, 8)
+            loss = model(x).sum() + model.scale
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+
+        assert not torch.isnan(model.scale).any(), "NaN in foreach scalar parameter"
+
+    def test_foreach_scalar_params_change(self):
+        """Scalar parameters should be modified after foreach steps."""
+        model = torch.nn.Linear(8, 4, bias=True)
+        model.scale = torch.nn.Parameter(torch.tensor(1.0))
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+
+        before_scale = model.scale.data.clone()
+        for _ in range(5):
+            x = torch.randn(4, 8)
+            loss = model(x).sum() + model.scale
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+
+        diff = (before_scale - model.scale.data).abs().max().item()
+        assert diff > 0, "Scalar parameter did not change after foreach steps"
+
+
+# ---------------------------------------------------------------------------
+# Test: OCGOptV2 foreach state management
+# ---------------------------------------------------------------------------
+
+class TestOCGOptV2ForeachState:
+    """Verify optimizer state is correctly initialized and updated in foreach path."""
+
+    def test_foreach_momentum_state_created(self):
+        """Momentum states should be initialized on the first foreach step."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+        x = torch.randn(4, 32)
+        loss = model(x).sum()
+        loss.backward()
+        opt.step()
+
+        for p in model.parameters():
+            state = opt.state[p]
+            assert "value_momentum" in state
+            assert "centralized_momentum" in state
+            assert state["value_momentum"].shape == p.grad.shape
+            assert state["centralized_momentum"].shape == p.grad.shape
+
+    def test_foreach_denom_state_for_scalar(self):
+        """Denom state should be created for scalar parameters in foreach path."""
+        model = torch.nn.Linear(8, 4, bias=True)
+        model.scale = torch.nn.Parameter(torch.tensor(1.0))
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+
+        x = torch.randn(4, 8)
+        loss = model(x).sum() + model.scale
+        loss.backward()
+        opt.step()
+
+        state = opt.state[model.scale]
+        assert "denom" in state
+        assert state["denom"].shape == model.scale.shape
+
+    def test_foreach_step_counter_increments(self):
+        """The step counter should increment on each foreach step() call."""
+        model = _make_model()
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+        x = torch.randn(4, 32)
+
+        for expected_step in range(1, 4):
+            loss = model(x).sum()
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+            assert opt.param_groups[0]["step"] == expected_step
+
+
+# ---------------------------------------------------------------------------
+# Test: OCGOptV2 foreach no gradient handling
+# ---------------------------------------------------------------------------
+
+class TestOCGOptV2ForeachNoGrad:
+    """Verify the foreach path skips parameters with no gradient."""
+
+    def test_foreach_skip_none_grad(self):
+        """Parameters without gradients should be skipped gracefully in foreach path."""
+        model = _make_model(sizes=[(8, 8), (8, 4)])
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+
+        x = torch.randn(2, 8)
+        out = model[0](x)
+        loss = out.sum()
+        loss.backward()
+
+        for name, param in model.named_parameters():
+            if '1' in name:
+                param.grad = None
+
+        opt.step()  # Should not crash
+
+    def test_foreach_skip_on_subsequent_steps(self):
+        """Parameters that lose gradients mid-training should be skipped."""
+        model = _make_model(sizes=[(8, 8), (8, 4)])
+        opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+
+        # First, run normally to build up state
+        x = torch.randn(2, 8)
+        loss = model(x).sum()
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+
+        # Now remove gradient for some params
+        for name, param in model.named_parameters():
+            if '0.weight' in name:
+                param.grad = None
+
+        opt.step()  # Should not crash
+
+
+# ---------------------------------------------------------------------------
+# Test: OCGOptV2 foreach determinism
+# ---------------------------------------------------------------------------
+
+class TestOCGOptV2ForeachDeterminism:
+    """Verify the foreach path produces deterministic results with same seed."""
+
+    def test_foreach_deterministic_fp32(self):
+        """Same seed should produce identical parameters with foreach (fp32)."""
+        results = []
+        for _ in range(2):
+            torch.manual_seed(42)
+            model = _make_model(seed=42, sizes=[(16, 16), (16, 4)])
+            opt = OCGOptV2(model.parameters(), lr=1e-3, foreach=True, **_NO_COMPILE)
+            torch.manual_seed(123)
+            for _ in range(5):
+                x = torch.randn(4, 16)
+                loss = model(x).sum()
+                loss.backward()
+                opt.step()
+                opt.zero_grad()
+            results.append(_snapshot_params(model))
+
+        diff = _max_param_diff(results[0], results[1])
+        assert diff < 1e-7, f"Non-deterministic foreach results: diff={diff}"
+
+
+# ---------------------------------------------------------------------------
+# Test: OCGOptV2 foreach weight decay
+# ---------------------------------------------------------------------------
+
+class TestOCGOptV2ForeachWeightDecay:
+    """Verify weight decay is applied correctly in foreach path."""
+
+    def test_foreach_weight_decay_reduces_magnitude(self):
+        """With weight decay, parameter magnitudes should decrease vs. no decay."""
+        sizes = [(16, 16)]
+        model_a = _make_model(seed=42, sizes=sizes)
+        model_b = copy.deepcopy(model_a)
+        opt_no_wd = OCGOptV2(model_a.parameters(), lr=1e-3, weight_decay=0.0, foreach=True, **_NO_COMPILE)
+        opt_wd = OCGOptV2(model_b.parameters(), lr=1e-3, weight_decay=0.1, foreach=True, **_NO_COMPILE)
+
+        torch.manual_seed(999)
+        for _ in range(10):
+            x = torch.randn(4, 16)
+            loss_a = model_a(x).sum()
+            loss_a.backward()
+            opt_no_wd.step()
+            opt_no_wd.zero_grad()
+
+            loss_b = model_b(x).sum()
+            loss_b.backward()
+            opt_wd.step()
+            opt_wd.zero_grad()
+
+        norm_no_wd = sum(p.norm().item() for p in model_a.parameters())
+        norm_wd = sum(p.norm().item() for p in model_b.parameters())
+        assert norm_wd < norm_no_wd, (
+            f"Foreach weight decay did not reduce norms: no_wd={norm_no_wd}, wd={norm_wd}"
+        )

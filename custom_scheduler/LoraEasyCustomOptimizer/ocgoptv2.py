@@ -219,6 +219,18 @@ class OCGOptV2(Optimizer):
             Compile the entire per-parameter step function with torch.compile(fullgraph=True, dynamic=False).
             When True, the full momentum+spectral_clip+update pipeline is fused into a single
             compiled graph, subsuming spectral_clip_compile.  Requires PyTorch 2.x with dynamo support.
+            Mutually exclusive with ``foreach`` (compile_step takes priority).
+            (default: False).
+        foreach (bool):
+            Use ``torch._foreach_*`` operations to batch element-wise tensor
+            operations (momentum update, weight decay, parameter update) across
+            all eligible parameters per group, reducing GPU kernel-launch
+            overhead.  Per-tensor operations (FFT low-pass filter, RMS
+            normalization / AOL preconditioning, spectral clipping, atan2
+            normalization, cautious stepping, adaptive scaling) remain
+            sequential.  Scalar (0-dim) parameters are processed per-tensor
+            via an inline native-like path.  Mutually exclusive with
+            ``compile_step`` (compile_step takes priority).
             (default: False).
     """
 
@@ -242,11 +254,21 @@ class OCGOptV2(Optimizer):
         cautious_min: float = 0.0,
         stochastic_fp: bool = True,
         compile_step: bool = False,
+        foreach: bool = False,
+        **kwargs,
     ):
+        
+        # Loop over the keys in the kwargs dictionary
+        for key in kwargs:
+            logging.warning(
+                f"Unrecognized optimizer argument '{key}'. It will be ignored."
+            )
 
         self._init_lr = lr
         self._compile_step = compile_step
+        self._foreach = foreach
         self._scalar_tensors = {}
+        self._srng_buf = None  # Reusable stochastic-rounding scratch buffer (lazy init)
 
         if compile_step:
             # Spectral clipping will be inlined into the compiled full-step graph;
@@ -281,6 +303,7 @@ class OCGOptV2(Optimizer):
             lowpass_grad = lowpass_grad,
             cautious_min = cautious_min,
             stochastic_fp = stochastic_fp,
+            foreach = foreach,
         )
 
         super(OCGOptV2, self).__init__(params, defaults)
@@ -333,6 +356,23 @@ class OCGOptV2(Optimizer):
                 'adaptive_max_t': torch.tensor(0.0, dtype=torch.float32, device=device),
             }
         return self._scalar_tensors[device]
+
+    def _get_srng_buf(self, like_tensor: torch.Tensor) -> torch.Tensor:
+        r"""Get a reusable int32 scratch buffer for stochastic rounding noise.
+
+        Returns a view of a single shared buffer sized to the largest parameter
+        encountered. The buffer is reused across all parameters within a step,
+        eliminating per-parameter int32 allocations. Content is NOT preserved
+        across calls — callers must refill before each use.
+        """
+        n = like_tensor.numel()
+        if (
+            self._srng_buf is None
+            or self._srng_buf.device != like_tensor.device
+            or self._srng_buf.numel() < n
+        ):
+            self._srng_buf = torch.empty(n, dtype=torch.int32, device=like_tensor.device)
+        return self._srng_buf[:n].view(like_tensor.shape)
 
     # ------------------------------------------------------------------
     # Compiled core step (static — no self / dict access)
@@ -638,6 +678,417 @@ class OCGOptV2(Optimizer):
                     p.copy_(p_work)
 
     # ------------------------------------------------------------------
+    # Foreach step path
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _step_foreach(self) -> None:
+        r"""Foreach step path.
+
+        Uses ``torch._foreach_*`` operations to batch element-wise tensor
+        operations across all eligible parameters per group, reducing GPU
+        kernel-launch overhead.  The following operations are batched:
+
+        * **FFT filter helpers**: ``_foreach_sign``, ``_foreach_abs_``,
+          ``_foreach_mul_`` for the sign-preservation and magnitude ops
+          surrounding the per-tensor FFT roundtrip.
+        * **Centralized gradient**: ``_foreach_sub``.
+        * **Momentum updates**: ``_foreach_lerp_``.
+        * **Exponential average**: ``_foreach_lerp``, ``_foreach_add``.
+        * **Weight decay / param update**: ``_foreach_add_``.
+        * **Non-stochastic write-back**: ``_foreach_copy_``.
+
+        Per-tensor operations that *cannot* be foreach'd (FFT roundtrip,
+        RMS normalization / AOL preconditioning, spectral clipping via
+        Newton-Schulz, atan2 normalization, cautious stepping, adaptive
+        scaling) remain sequential.
+
+        Scalar (0-dim) parameters are processed per-tensor via an inline
+        native-like path since they use atan2 normalization with a running
+        denominator instead of spectral clipping.
+        """
+        _FOUR_OVER_PI = 1.27323954474
+
+        for group in self.param_groups:
+            if 'step' in group:
+                group['step'] += 1
+            else:
+                group['step'] = 1
+
+            # ---- Hoist group-level scalars --------------------------------
+            lr = group["lr"]
+            beta1, beta2, beta3 = group["betas"][0], group["betas"][1], group["betas"][2]
+            weight_decay = group["weight_decay"]
+            weight_decay_rate = group["weight_decay_rate"]
+            centralization = group["centralization"]
+            stochastic_fp = group["stochastic_fp"]
+            lowpass_grad = group["lowpass_grad"]
+            spectral_adaptive = group["spectral_adaptive"]
+            spectral_clip_dtype = group["spectral_clip_dtype"]
+            adaptive = group["adaptive"]
+            adaptive_min = group["adaptive_min"]
+            adaptive_max = group["adaptive_max"]
+            input_norm = group["input_norm"]
+            aol = group["aol"]
+
+            step = group['step']
+
+            # Pre-compute slow betas (constant for all params in this group)
+            b1p = beta1 ** step
+            slow_beta1 = (b1p - beta1) / (b1p - 1.0)
+            b2p = beta2 ** step
+            slow_beta2 = (b2p - beta2) / (b2p - 1.0)
+            b3p = beta3 ** step
+            slow_beta3 = (b3p - beta3) / (b3p - 1.0)
+
+            # Pre-compute weight decay multiplier
+            wd_mul = weight_decay * weight_decay_rate ** step if weight_decay != 0 else 0.0
+
+            # Resolve ortho_dtype
+            ortho_dtype = spectral_clip_dtype if spectral_clip_dtype is not None else torch.float32
+
+            # ---- Collect eligible params, separating scalar from non-scalar
+            foreach_params: list = []
+            scalar_params: list = []
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                state = self.state[p]
+                if len(state) == 0:
+                    grad = p.grad.data
+                    dimcount = grad.ndim
+                    if dimcount < 1:
+                        state["denom"] = torch.ones_like(grad)
+                    state["value_momentum"] = torch.zeros_like(grad)
+                    state["centralized_momentum"] = torch.zeros_like(grad)
+                if p.grad.data.ndim < 1:
+                    scalar_params.append(p)
+                else:
+                    foreach_params.append(p)
+
+            # ==== Process scalar params per-tensor (native-like) ==========
+            for p in scalar_params:
+                state = self.state[p]
+                grad = p.grad.data
+
+                use_fp32 = p.dtype in {torch.bfloat16} and stochastic_fp
+                if use_fp32:
+                    grad = grad.to(torch.float32)
+                    p_fp32 = p.detach().to(torch.float32)
+                    denom = state["denom"].detach().to(torch.float32)
+                    value_momentum = state["value_momentum"].detach().to(torch.float32)
+                    centralized_momentum = state["centralized_momentum"].detach().to(torch.float32)
+                else:
+                    p_fp32 = p.detach().clone()
+                    denom = state["denom"].detach().clone()
+                    value_momentum = state["value_momentum"].detach().clone()
+                    centralized_momentum = state["centralized_momentum"].detach().clone()
+
+                # ADOPT-style clamping
+                grad = grad.clamp(-step, step)
+
+                # Global RMS normalization (scalar path — no AOL / input_norm)
+                rms = grad.pow(2).mean().sqrt_().clamp_min_(1e-16)
+                grad = grad.div(rms)
+
+                # Denom for scalar
+                current_denom = denom.sqrt()
+
+                # Centralized gradient
+                centralized_grad = grad.sub(value_momentum, alpha=centralization)
+
+                # Momentum updates
+                centralized_momentum = centralized_momentum.lerp(centralized_grad, weight=1. - slow_beta1)
+                value_momentum = value_momentum.lerp(grad, weight=1. - slow_beta2)
+
+                # Exponential average
+                exp_avg = centralized_grad.lerp(centralized_momentum, weight=slow_beta1).add_(
+                    grad.lerp(value_momentum, weight=slow_beta2), alpha=centralization
+                )
+
+                # Denom update
+                denom = denom.lerp(centralized_grad.pow(2), weight=1. - slow_beta3)
+
+                # atan2 normalization (scalar path)
+                full_step = exp_avg.atan2(current_denom).mul_(_FOUR_OVER_PI)
+
+                # Cautious update
+                mask = (grad * full_step > 0).to(full_step.dtype)
+                num_agree = mask.sum()
+                dim = full_step.numel()
+                alpha = dim / (num_agree + 1.)
+                full_step.mul_(mask).mul_(alpha)
+
+                # Adaptive scaling
+                if adaptive:
+                    scale_factor = (
+                        exp_avg.pow(2).mean().sqrt_() * full_step.pow(2).mean().sqrt_()
+                    ).mean().clamp(adaptive_min, adaptive_max)
+                    full_step = scale_factor * full_step
+
+                # Weight decay
+                if wd_mul != 0:
+                    full_step.add_(p_fp32.data, alpha=wd_mul)
+
+                # Parameter update
+                p_fp32.data.add_(full_step, alpha=-lr)
+
+                # Write-back
+                if use_fp32:
+                    copy_stochastic_(state["denom"], denom)
+                    copy_stochastic_(state["value_momentum"], value_momentum)
+                    copy_stochastic_(state["centralized_momentum"], centralized_momentum)
+                    copy_stochastic_(p, p_fp32)
+                else:
+                    state["denom"].copy_(denom)
+                    state["value_momentum"].copy_(value_momentum)
+                    state["centralized_momentum"].copy_(centralized_momentum)
+                    p.copy_(p_fp32)
+
+            # ==== Process non-scalar params via foreach ====================
+            if not foreach_params:
+                continue
+
+            # Determine compute device (GPU preferred for foreach throughput)
+            first_device = foreach_params[0].device
+            if first_device.type == "cpu" and torch.cuda.is_available():
+                compute_device = torch.cuda.current_device()
+            else:
+                compute_device = first_device
+
+            n = len(foreach_params)
+
+            # ==== Collect phase: build FP32 tensor lists on compute device
+            p_fp32_list = [None] * n
+            grad_list = [None] * n
+            value_momentum_list = [None] * n
+            centralized_momentum_list = [None] * n
+            filter_weights_list = [None] * n
+            use_fp32_list = [False] * n
+            state_list = [None] * n
+            param_list = [None] * n
+
+            for idx, p in enumerate(foreach_params):
+                state = self.state[p]
+                state_list[idx] = state
+                param_list[idx] = p
+
+                grad = p.grad.data
+
+                use_fp32 = p.dtype in {torch.bfloat16} and stochastic_fp
+                use_fp32_list[idx] = use_fp32
+
+                target_dtype = torch.float32 if use_fp32 else p.dtype
+
+                grad_list[idx] = grad.to(
+                    compute_device, dtype=target_dtype, non_blocking=True
+                )
+                p_fp32_list[idx] = p.detach().to(
+                    compute_device, dtype=target_dtype, non_blocking=True
+                )
+                value_momentum_list[idx] = state["value_momentum"].to(
+                    compute_device, dtype=target_dtype, non_blocking=True
+                )
+                centralized_momentum_list[idx] = state["centralized_momentum"].to(
+                    compute_device, dtype=target_dtype, non_blocking=True
+                )
+
+                # Pre-compute FFT filter weights (cached per shape/device/alpha)
+                dimcount = grad.ndim
+                do_lowpass = dimcount > 0 and lowpass_grad != 0.0
+                if do_lowpass:
+                    compute_device_str = (
+                        f"cuda:{compute_device}"
+                        if isinstance(compute_device, int)
+                        else str(compute_device)
+                    )
+                    filter_weights_list[idx] = _get_filter_weights(
+                        grad.shape, compute_device_str, lowpass_grad
+                    )
+
+            # ==== Per-tensor: ADOPT-style clamping ============================
+            for idx in range(n):
+                grad_list[idx] = grad_list[idx].clamp(-step, step)
+
+            # ==== Per-tensor: FFT low-pass filter ============================
+            # (with foreach sign/abs/mul batching around the per-tensor FFT)
+            filter_indices = [
+                idx for idx in range(n) if filter_weights_list[idx] is not None
+            ]
+            if filter_indices:
+                grads_to_filter = [grad_list[idx] for idx in filter_indices]
+                # BATCH: sign() across all filtered grads (saves N-1 kernel launches)
+                grad_signs = torch._foreach_sign(grads_to_filter)
+                # Per-tensor: FFT roundtrip (shape-dependent, cannot be foreach'd)
+                filtered_list = [None] * len(filter_indices)
+                for i, idx in enumerate(filter_indices):
+                    grad_freq = torch.fft.fftn(grads_to_filter[i], norm='ortho')
+                    filtered_list[i] = torch.fft.ifftn(
+                        grad_freq * filter_weights_list[idx], norm='ortho'
+                    ).real
+                # BATCH: abs() and mul_() across all filtered grads
+                torch._foreach_abs_(filtered_list)
+                torch._foreach_mul_(filtered_list, grad_signs)
+                for i, idx in enumerate(filter_indices):
+                    grad_list[idx] = filtered_list[i]
+
+            # ==== Per-tensor: RMS normalization / AOL preconditioning ========
+            # (shape-dependent, involves matrix ops for AOL; cannot be foreach'd)
+            for idx in range(n):
+                grad = grad_list[idx]
+
+                if aol:
+                    grad_2d = _reshape_to_2d(grad)
+                    # AOL-RMS: Compute Gram matrix and rescale rows
+                    A = grad_2d @ grad_2d.mT
+                    rescaling = A.abs().sum(dim=-1, keepdim=True).clamp_min_(1e-16)
+                    grad_2d = grad_2d * rescaling.rsqrt()
+                    grad = grad_2d.view_as(grad)
+
+                if input_norm:
+                    grad_2d = _reshape_to_2d(grad)
+                    rms = grad_2d.pow(2).mean(dim=1, keepdim=True).sqrt_().clamp_min_(1e-16)
+                    grad = grad_2d.div(rms).view_as(grad)
+                else:
+                    rms = grad.pow(2).mean().sqrt_().clamp_min_(1e-16)
+                    grad = grad.div(rms)
+
+                grad_list[idx] = grad
+
+            # ==== BATCH: Centralized gradient ================================
+            # centralized_grad = grad - value_momentum * centralization
+            centralized_grad_list = torch._foreach_sub(
+                grad_list, value_momentum_list, alpha=centralization
+            )
+
+            # ==== BATCH: Momentum updates (in-place) =========================
+            # centralized_momentum.lerp_(centralized_grad, weight=1-slow_beta1)
+            torch._foreach_lerp_(
+                centralized_momentum_list, centralized_grad_list,
+                weight=1.0 - slow_beta1,
+            )
+            # value_momentum.lerp_(grad, weight=1-slow_beta2)
+            torch._foreach_lerp_(
+                value_momentum_list, grad_list,
+                weight=1.0 - slow_beta2,
+            )
+
+            # ==== BATCH: Exponential average ================================
+            # exp_avg = centralized_grad.lerp(centralized_momentum, weight=slow_beta1)
+            #       + grad.lerp(value_momentum, weight=slow_beta2) * centralization
+            term1_list = torch._foreach_lerp(
+                centralized_grad_list, centralized_momentum_list,
+                weight=slow_beta1,
+            )
+            term2_list = torch._foreach_lerp(
+                grad_list, value_momentum_list,
+                weight=slow_beta2,
+            )
+            exp_avg_list = torch._foreach_add(
+                term1_list, term2_list, alpha=centralization
+            )
+
+            # ==== Per-tensor: Spectral clipping + RMS normalization ==========
+            # Newton-Schulz iterations involve per-tensor matrix products and
+            # cannot be foreach'd.  The final RMS normalization is also per-tensor.
+            full_step_list = [None] * n
+            for idx in range(n):
+                exp_avg = exp_avg_list[idx]
+
+                exp_avg_2d = _reshape_to_2d(exp_avg)
+                flip = exp_avg_2d.shape[0] > exp_avg_2d.shape[1]
+                if flip:
+                    exp_avg_2d = exp_avg_2d.T
+
+                exp_avg_2d_o = self.clip_func(exp_avg_2d, ortho_dtype=ortho_dtype)
+
+                if spectral_adaptive:
+                    scale_factor = (exp_avg_2d_o * exp_avg_2d).sum()
+                    exp_avg_2d_o = exp_avg_2d_o * scale_factor
+
+                if flip:
+                    exp_avg_2d_o = exp_avg_2d_o.T
+
+                full_step = exp_avg_2d_o.view_as(exp_avg)
+                full_step = full_step.div(full_step.pow(2).mean().sqrt_().clamp_min_(1))
+
+                full_step_list[idx] = full_step
+
+            # ==== Per-tensor: Cautious update ================================
+            # Mask where gradient disagrees with update direction.
+            # Involves per-tensor sum/numel for the normalization scalar.
+            for idx in range(n):
+                full_step = full_step_list[idx]
+                grad = grad_list[idx]
+
+                mask = (grad * full_step > 0).to(full_step.dtype)
+                num_agree = mask.sum()
+                dim = full_step.numel()
+                alpha = dim / (num_agree + 1.0)
+                full_step_list[idx] = full_step * mask * alpha
+
+            # ==== Per-tensor: Adaptive scaling ===============================
+            if adaptive:
+                for idx in range(n):
+                    exp_avg = exp_avg_list[idx]
+                    full_step = full_step_list[idx]
+                    scale_factor = (
+                        exp_avg.pow(2).mean().sqrt_() * full_step.pow(2).mean().sqrt_()
+                    ).mean().clamp(adaptive_min, adaptive_max)
+                    full_step_list[idx] = scale_factor * full_step
+
+            # ==== BATCH: Decoupled weight decay ==============================
+            if wd_mul != 0:
+                torch._foreach_add_(full_step_list, p_fp32_list, alpha=wd_mul)
+
+            # ==== BATCH: Parameter update ====================================
+            torch._foreach_add_(p_fp32_list, full_step_list, alpha=-lr)
+
+            # ==== Write-back phase ===========================================
+            # Split into stochastic (per-tensor, custom rounding) and
+            # non-stochastic (batched via foreach_copy_) paths to minimize
+            # kernel-launch overhead for the common fp32 case.
+            stoch_indices = [
+                idx for idx in range(n) if use_fp32_list[idx]
+            ]
+            non_stoch_indices = [
+                idx for idx in range(n) if not use_fp32_list[idx]
+            ]
+
+            # Stochastic rounding path (per-tensor, uses shared scratch buffer)
+            for idx in stoch_indices:
+                scratch = self._get_srng_buf(p_fp32_list[idx])
+                copy_stochastic_(
+                    state_list[idx]["value_momentum"], value_momentum_list[idx],
+                    scratch=scratch,
+                )
+                copy_stochastic_(
+                    state_list[idx]["centralized_momentum"],
+                    centralized_momentum_list[idx],
+                    scratch=scratch,
+                )
+                copy_stochastic_(param_list[idx], p_fp32_list[idx], scratch=scratch)
+
+            # Non-stochastic path — batched via torch._foreach_copy_
+            if non_stoch_indices:
+                ns_vm_dst = [
+                    state_list[idx]["value_momentum"] for idx in non_stoch_indices
+                ]
+                ns_vm_src = [value_momentum_list[idx] for idx in non_stoch_indices]
+                torch._foreach_copy_(ns_vm_dst, ns_vm_src)
+                ns_cm_dst = [
+                    state_list[idx]["centralized_momentum"]
+                    for idx in non_stoch_indices
+                ]
+                ns_cm_src = [
+                    centralized_momentum_list[idx] for idx in non_stoch_indices
+                ]
+                torch._foreach_copy_(ns_cm_dst, ns_cm_src)
+                ns_p_dst = [param_list[idx] for idx in non_stoch_indices]
+                ns_p_src = [p_fp32_list[idx] for idx in non_stoch_indices]
+                torch._foreach_copy_(ns_p_dst, ns_p_src)
+
+    # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------
 
@@ -658,6 +1109,8 @@ class OCGOptV2(Optimizer):
 
         if self._compile_step:
             self._step_compiled()
+        elif self._foreach:
+            self._step_foreach()
         else:
             self._step_native()
 
