@@ -185,7 +185,7 @@ class CASCADE(Optimizer):
 
         if muon:
             try:
-                self.ortho_func = torch.compile(gram_newton_schulz_2step, dynamic=True, mode="reduce-overhead")
+                self.ortho_func = torch.compile(gram_newton_schulz_2step, dynamic=True, mode="default")
             except:
                 self.ortho_func = gram_newton_schulz_2step
 

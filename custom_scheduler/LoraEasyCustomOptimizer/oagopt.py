@@ -54,14 +54,14 @@ def orthogonalize(M: torch.Tensor, num_ns_steps=len(NS_COEFFS), ortho_dtype=None
         M_orig = M.clone()
     transpose = M.shape[0] < M.shape[1]
     if transpose:
-        M = M.T
+        M = M.T.contiguous()
     for a, b, c in NS_COEFFS[:num_ns_steps]:
         M = M / (torch.linalg.norm(M).clamp_min_(1e-8))
         A = M.T @ M
         I = torch.eye(A.shape[0], dtype=M.dtype, device=M.device)
         M = M @ (a * I + b * A + c * A @ A)
     if transpose:
-        M = M.T
+        M = M.T.contiguous()
     if adaptive:
         M = torch.einsum('ij,ij,ab->ab', M_orig.type_as(M), M, M)
     if ortho_dtype is not None:
@@ -73,7 +73,7 @@ def orthogonalize_func(W: torch.Tensor, sigma_min: float=-1., sigma_max: float=1
     return orthogonalize(W, num_ns_steps=num_ns_steps, ortho_dtype=ortho_dtype, adaptive=adaptive)
 
 @torch._dynamo.utils.disable_cache_limit()
-@torch.compile(fullgraph=True, mode="reduce-overhead")
+@torch.compile(fullgraph=True, mode="default")
 def orthogonalize_compiled_func(W: torch.Tensor, sigma_min: float=-1., sigma_max: float=1., ortho_dtype=torch.float32, num_ns_steps=len(NS_COEFFS), adaptive=False):
     return orthogonalize(W, num_ns_steps=num_ns_steps, ortho_dtype=ortho_dtype, adaptive=adaptive)
 

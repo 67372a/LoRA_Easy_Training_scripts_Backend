@@ -275,7 +275,7 @@ class OCGOptV2(Optimizer):
             # no need for a separately compiled spectral_clip wrapper.
             self.clip_func = None
         elif spectral_clip_compile:
-            self.clip_func = torch.compile(gram_newton_schulz_2step, dynamic=True, mode="reduce-overhead")
+            self.clip_func = torch.compile(gram_newton_schulz_2step, dynamic=True, mode="default")
         else:
             self.clip_func = gram_newton_schulz_2step
 

@@ -39,7 +39,7 @@ def orthogonalize(M: torch.Tensor, num_ns_steps=len(NS_COEFFS), ortho_dtype=None
     
     transpose = M.shape[0] < M.shape[1]
     if transpose:
-        M = M.T
+        M = M.T.contiguous()
     
     # Pre-calculate Identity matrix for better performance
     I = torch.eye(M.shape[1], dtype=M.dtype, device=M.device)
@@ -52,7 +52,7 @@ def orthogonalize(M: torch.Tensor, num_ns_steps=len(NS_COEFFS), ortho_dtype=None
         M = M @ (a * I + b * A + c * A @ A)
     
     if transpose:
-        M = M.T
+        M = M.T.contiguous()
     
     if ortho_dtype is not None:
         M = M.to(orig_dtype)
@@ -163,7 +163,7 @@ class ProjectiveAdam(Optimizer):
             state_storage_dtype = final_dtype,
             state_storage_device = state_storage_device,
         )
-        self.ortho_func = torch.compile(orthogonalize, mode="reduce-overhead") if use_compile else orthogonalize
+        self.ortho_func = torch.compile(orthogonalize, mode="default") if use_compile else orthogonalize
         super(ProjectiveAdam, self).__init__(params, defaults)
 
     # =========================================================================

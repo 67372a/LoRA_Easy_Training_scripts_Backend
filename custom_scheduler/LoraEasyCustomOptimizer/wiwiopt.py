@@ -60,7 +60,7 @@ def PolarExpress(
     assert G.ndim >= 2
     X = G.to(ortho_dtype)  # for speed
     if G.size(-2) > G.size(-1):
-        X = X.mT  # this reduces FLOPs
+        X = X.mT.contiguous()  # this reduces FLOPs
 
     X = X / (X.norm(dim=(-2, -1), keepdim=True).clamp_min_(eps) * 1.02)
     hs = coeffs_list[:max_iterations] + list(repeat(coeffs_list[-1], max_iterations - len(coeffs_list)))
@@ -71,7 +71,7 @@ def PolarExpress(
         X = a * X + B @ X  # X <- aX + bX ˆ3 + cX ˆ5
 
     if G.size(-2) > G.size(-1):
-        X = X.mT
+        X = X.mT.contiguous()
 
     return X.to(G.dtype)
 
@@ -86,7 +86,7 @@ def orthogonalize(
 
     transpose = M.shape[0] < M.shape[1]
     if transpose:
-        M = M.T
+        M = M.T.contiguous()
 
     # Faster normalization
     M = M / (torch.linalg.norm(M).clamp_min_(eps) * 1.02)
@@ -100,7 +100,7 @@ def orthogonalize(
         M = M @ (a * I + b * A + c * A @ A)
 
     if transpose:
-        M = M.T
+        M = M.T.contiguous()
 
     if ortho_dtype is not None:
         M = M.to(orig_dtype)
@@ -1041,7 +1041,7 @@ class WiwiOpt(Optimizer):
         if use_compile:
             torch._dynamo.config.capture_scalar_outputs = True
 
-        self.ortho_func = torch.compile(gram_newton_schulz_5step, dynamic=True, mode="reduce-overhead") if use_compile else gram_newton_schulz_5step
+        self.ortho_func = torch.compile(gram_newton_schulz_5step, dynamic=True, mode="default") if use_compile else gram_newton_schulz_5step
         self.oja_func = None
         self.past_func = None
         self.fapi_func = None
@@ -1049,19 +1049,19 @@ class WiwiOpt(Optimizer):
         if egd:
             if egd_method == "oja" or (egd_method is None and egd_online):
                 self.oja_func = (
-                    torch.compile(sanger_update, dynamic=True, mode="reduce-overhead") if use_compile else sanger_update
+                    torch.compile(sanger_update, dynamic=True, mode="default") if use_compile else sanger_update
                 )
             elif egd_method == "past":
                 self.past_func = (
-                    torch.compile(past_update, dynamic=True, mode="reduce-overhead") if use_compile else past_update
+                    torch.compile(past_update, dynamic=True, mode="default") if use_compile else past_update
                 )
             elif egd_method == "fapi":
                 self.fapi_func = (
-                    torch.compile(fapi_update, dynamic=True, mode="reduce-overhead") if use_compile else fapi_update
+                    torch.compile(fapi_update, dynamic=True, mode="default") if use_compile else fapi_update
                 )
             elif egd_method == "svd" or (egd_method is None and not egd_online):
                 self.svd_func = (
-                    torch.compile(torch.svd_lowrank, dynamic=True, mode="reduce-overhead")
+                    torch.compile(torch.svd_lowrank, dynamic=True, mode="default")
                     if use_compile
                     else torch.svd_lowrank
                 )

@@ -62,7 +62,7 @@ def zero_power_via_newton_schulz_6(grad: torch.Tensor) -> torch.Tensor:
     return X.view(G_shape)
 
 @torch._dynamo.utils.disable_cache_limit()
-@torch.compile(fullgraph=True, mode="reduce-overhead")
+@torch.compile(fullgraph=True, mode="default")
 def zero_power_via_newton_schulz_6_compile(grad: torch.Tensor) -> torch.Tensor:
     return zero_power_via_newton_schulz_6(grad)
 
@@ -74,7 +74,7 @@ def bias_rms(grad: torch.Tensor) -> torch.Tensor:
     return grad
 
 @torch._dynamo.utils.disable_cache_limit()
-@torch.compile(fullgraph=True, mode="reduce-overhead")
+@torch.compile(fullgraph=True, mode="default")
 def bias_rms_compile(grad: torch.Tensor) -> torch.Tensor:
     return bias_rms(grad)
 

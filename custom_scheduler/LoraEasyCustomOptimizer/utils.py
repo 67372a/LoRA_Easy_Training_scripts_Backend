@@ -634,7 +634,7 @@ def newton_schulz_(grad, steps=6, eps=1e-12):
 
     X = grad.to(dtype=torch.bfloat16, copy=True)
     if grad.size(0) > grad.size(1):
-        X = X.T
+        X = X.T.contiguous()
 
     X /= X.norm().add(eps) # ensure top singular value <= 1
     for a,b,c in abc_list:
@@ -643,7 +643,7 @@ def newton_schulz_(grad, steps=6, eps=1e-12):
         X = a * X + B @ X
 
     if grad.size(0) > grad.size(1):
-        X = X.T
+        X = X.T.contiguous()
 
     # Gradient scaling adaptation from: https://github.com/leloykun/adaptive-muon
     X = torch.einsum('ij,ij->', grad.type_as(X), X).clamp(-1.0, 1.0) * X
@@ -837,7 +837,7 @@ def _get_compiled_apply_cautious():
     if 'apply_cautious' not in _compiled_fns:
         with torch._dynamo.utils.disable_cache_limit():
             _compiled_fns['apply_cautious'] = torch.compile(
-                _apply_cautious_compile, fullgraph=True, mode="reduce-overhead"
+                _apply_cautious_compile, fullgraph=True, mode="default"
             )
     return _compiled_fns['apply_cautious']
 
