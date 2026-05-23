@@ -90,7 +90,7 @@ def spectral_clip_func(W: torch.Tensor, sigma_min: float=-1., sigma_max: float=1
     return  _spectral_clip(W, sigma_min=sigma_min, sigma_max=sigma_max, ortho_dtype=ortho_dtype, num_ns_steps=num_ns_steps, adaptive=adaptive)
 
 @torch._dynamo.utils.disable_cache_limit()
-@torch.compile(fullgraph=True, mode="default")
+@torch.compile(fullgraph=True, mode="default", dynamic=True)
 def spectral_clip_compiled_func(W: torch.Tensor, sigma_min: float=-1., sigma_max: float=1., ortho_dtype=None, num_ns_steps=len(NS_COEFFS), adaptive=False):
     if ortho_dtype is None:
         ortho_dtype = torch.float32
@@ -152,7 +152,7 @@ class FFTDescent(Optimizer):
         stochastic_fp (bool):
             Utilize stochastic rounding for bf16 and fp16 tensors. (default: True).
         compile_step (bool):
-            Compile the entire per-parameter step function with torch.compile(fullgraph=True, dynamic=False).
+            Compile the entire per-parameter step function with torch.compile(fullgraph=True, dynamic=True).
             When True, the full FFT+momentum+spectral_clip+update pipeline is fused into a single
             compiled graph, subsuming spectral_clip_compile.  Requires PyTorch 2.x with dynamo support.
             Mutually exclusive with ``foreach`` (compile_step takes priority).
@@ -247,14 +247,14 @@ class FFTDescent(Optimizer):
             )
             with torch._dynamo.utils.disable_cache_limit():
                 self._compiled_step = torch.compile(
-                    self._fftdescent_step_fp32, fullgraph=True, dynamic=False
+                    self._fftdescent_step_fp32, fullgraph=True, dynamic=True
                 )
             logging.info(
-                "FFTDescent full step compiled with torch.compile(fullgraph=True, dynamic=False)."
+                "FFTDescent full step compiled with torch.compile(fullgraph=True, dynamic=True)."
             )
         except Exception as e:
             logging.warning(
-                f"torch.compile(fullgraph=True, dynamic=False) failed: {e}. "
+                f"torch.compile(fullgraph=True, dynamic=True) failed: {e}. "
                 f"Falling back to uncompiled step."
             )
             self._compiled_step = self._fftdescent_step_fp32
@@ -335,6 +335,17 @@ class FFTDescent(Optimizer):
         ``orthogonalize`` directly (the uncompiled pure-tensor-math versions)
         which the compiler traces through and inlines into a single fused graph.
         """
+
+        # Ensure contiguous memory layout for all tensor inputs.
+        # Parameters in channels_last (or other non-standard) memory formats
+        # would cause inductor stride assertion failures otherwise.
+        p_data = p_data.contiguous()
+        grad = grad.contiguous()
+        momentum = momentum.contiguous()
+        if sign_momentum.numel() > 0:
+            sign_momentum = sign_momentum.contiguous()
+        if filter_weights.numel() > 0:
+            filter_weights = filter_weights.contiguous()
 
         # ---- 1. Low-pass filter via FFT --------------------------------
         # When do_lowpass is True, filter the gradient magnitude through a
@@ -500,20 +511,20 @@ class FFTDescent(Optimizer):
                 # ---- Prepare FP32 working copies -------------------------
                 use_fp32 = p.dtype in {torch.float16, torch.bfloat16} and stochastic_fp
                 if use_fp32:
-                    grad_work = grad.to(torch.float32)
-                    p_work = p.detach().clone().to(torch.float32)
-                    momentum_work = state["momentum"].detach().clone().to(torch.float32)
+                    grad_work = grad.to(torch.float32).contiguous()
+                    p_work = p.detach().to(dtype=torch.float32, copy=True).contiguous()
+                    momentum_work = state["momentum"].detach().to(dtype=torch.float32, copy=True).contiguous()
                     sign_momentum_work = (
-                        state["sign_momentum"].detach().clone().to(torch.float32)
+                        state["sign_momentum"].detach().to(torch.float32, copy=True).contiguous()
                         if use_sign_momentum
                         else torch.empty(0, dtype=torch.float32, device=p.device)
                     )
                 else:
-                    grad_work = grad
-                    p_work = p.detach().clone()
-                    momentum_work = state["momentum"].detach().clone()
+                    grad_work = grad.contiguous()
+                    p_work = p.detach().to(dtype=torch.float32, copy=True).contiguous()
+                    momentum_work = state["momentum"].detach().to(dtype=torch.float32, copy=True).contiguous()
                     sign_momentum_work = (
-                        state["sign_momentum"].detach().clone()
+                        state["sign_momentum"].detach().to(dtype=torch.float32, copy=True).contiguous()
                         if use_sign_momentum
                         else torch.empty(0, dtype=p.dtype, device=p.device)
                     )
@@ -931,21 +942,19 @@ class FFTDescent(Optimizer):
                     if sign_mom_coeff != 0:
                         state["sign_momentum"] = torch.zeros_like(grad)
 
-                # Detach and clone once at the correct dtype — avoids redundant allocation
-                # when stochastic_fp is enabled for half-precision parameters (previously
-                # cloned at original dtype then immediately re-cloned at float32)
+                # Detach and copy once at the correct dtype — avoids redundant allocation
                 use_fp32 = p.dtype in {torch.float16, torch.bfloat16} and stochastic_fp
                 if use_fp32:
                     grad = grad.to(torch.float32)
-                    p_fp32 = p.detach().clone().to(torch.float32)
-                    momentum = state["momentum"].detach().clone().to(torch.float32)
+                    p_fp32 = p.detach().to(dtype=torch.float32, copy=True)
+                    momentum = state["momentum"].detach().to(dtype=torch.float32, copy=True)
                     if sign_mom_coeff != 0:
-                        sign_momentum = state["sign_momentum"].detach().clone().to(torch.float32)
+                        sign_momentum = state["sign_momentum"].detach().to(dtype=torch.float32, copy=True)
                 else:
-                    p_fp32 = p.detach().clone()
-                    momentum = state["momentum"].detach().clone()
+                    p_fp32 = p.detach().to(dtype=torch.float32, copy=True)
+                    momentum = state["momentum"].detach().to(dtype=torch.float32, copy=True)
                     if sign_mom_coeff != 0:
-                        sign_momentum = state["sign_momentum"].detach().clone()
+                        sign_momentum = state["sign_momentum"].detach().to(dtype=torch.float32, copy=True)
 
                 # Low-pass filter via FFT
                 if dimcount > 0:
