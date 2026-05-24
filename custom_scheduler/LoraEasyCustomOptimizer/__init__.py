@@ -59,10 +59,12 @@ from LoraEasyCustomOptimizer.adam import AdamW8bitKahan
 from LoraEasyCustomOptimizer.cascade import CASCADE
 from LoraEasyCustomOptimizer.radam_schedulefree import RAdamScheduleFree
 from LoraEasyCustomOptimizer.ocgoptv2 import OCGOptV2
+from LoraEasyCustomOptimizer.adamw_schedulefree_plus import AdamWScheduleFreePlus
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
     AdamW8bitKahan,
+    AdamWScheduleFreePlus,
     ADOPT,
     ADOPTAOScheduleFree,
     ADOPTEMAMixScheduleFree,
