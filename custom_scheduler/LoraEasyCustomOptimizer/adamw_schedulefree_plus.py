@@ -13,6 +13,7 @@ except ImportError:
     ParamsT : TypeAlias = Union[Iterable[torch.Tensor], Iterable[Dict[str, Any]]]
 import math
 import logging
+from .utils import copy_stochastic_
 
 
 class AdamWScheduleFreePlus(torch.optim.Optimizer):
@@ -319,34 +320,50 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
                     state['exp_avg_sq'] = torch.zeros_like(p, memory_format=torch.preserve_format)
                     state['exp_avg'] = torch.zeros_like(p, memory_format=torch.preserve_format)
 
-                z = state['z']
-                exp_avg = state['exp_avg']
-                exp_avg_sq = state['exp_avg_sq']
+                # Cast to fp32 for numerically stable computation
+                # (same pattern as came.py: compute in fp32, write back with stochastic rounding)
+                p_fp32 = p.to(dtype=torch.float32)
+                grad_fp32 = grad.to(dtype=torch.float32)
+                z_fp32 = state['z'].to(dtype=torch.float32)
+                exp_avg_fp32 = state['exp_avg'].to(dtype=torch.float32)
+                exp_avg_sq_fp32 = state['exp_avg_sq'].to(dtype=torch.float32)
 
                 # Update first moment (Adam inner momentum)
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-                exp_avg_corr = exp_avg.div(bias_correction1)
+                exp_avg_fp32.mul_(beta1).add_(grad_fp32, alpha=1 - beta1)
+                exp_avg_corr = exp_avg_fp32.div(bias_correction1)
 
                 # Update second moment
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-                denom = exp_avg_sq.div(bias_correction2).sqrt_().add_(eps)
+                exp_avg_sq_fp32.mul_(beta2).addcmul_(grad_fp32, grad_fp32, value=1 - beta2)
+                denom = exp_avg_sq_fp32.div(bias_correction2).sqrt_().add_(eps)
 
                 # Combined gradient: Adam step + AdamC weight decay
                 # g_combined = exp_avg_corr / denom + alpha * decay * y
                 grad_normalized = exp_avg_corr.div(denom)
                 if decay != 0:
-                    grad_normalized.add_(p,
+                    grad_normalized.add_(p_fp32,
                                          alpha=alpha * decay)  # p = y in train mode
 
                 # Schedule-Free: update y (p) in-place without explicit x
                 # y_new = (1-ckp1)*y + ckp1*z - A*alpha*g_combined
                 A = 1 - sf_beta1_k * (1 - ckp1)
-                p.lerp_(end=z, weight=ckp1)  # p = (1-ckp1)*y + ckp1*z
-                p.add_(grad_normalized, alpha=-A * alpha)
+                p_fp32.lerp_(end=z_fp32, weight=ckp1)  # p = (1-ckp1)*y + ckp1*z
+                p_fp32.add_(grad_normalized, alpha=-A * alpha)
 
                 # Update z:  z_new = z - alpha * g_combined
                 # (includes both the Adam step and AdamC weight decay)
-                z.sub_(grad_normalized, alpha=alpha)
+                z_fp32.sub_(grad_normalized, alpha=alpha)
+
+                # Write back parameter and state with stochastic rounding for bf16
+                if p.dtype == torch.bfloat16:
+                    copy_stochastic_(p.data, p_fp32)
+                    copy_stochastic_(state['z'], z_fp32)
+                    copy_stochastic_(state['exp_avg'], exp_avg_fp32)
+                    copy_stochastic_(state['exp_avg_sq'], exp_avg_sq_fp32)
+                else:
+                    p.data.copy_(p_fp32)
+                    state['z'].copy_(z_fp32)
+                    state['exp_avg'].copy_(exp_avg_fp32)
+                    state['exp_avg_sq'].copy_(exp_avg_sq_fp32)
                
 
             group['k'] = k + 1
