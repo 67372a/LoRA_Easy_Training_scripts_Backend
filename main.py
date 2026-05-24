@@ -21,7 +21,16 @@ from transformers import CLIPTokenizer
 warnings.filterwarnings("ignore", category=UserWarning, module="torchao")
 logging.getLogger("torch.distributed.elastic.multiprocessing.redirects").setLevel(logging.ERROR)
 
-tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
+try:
+    tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
+except Exception:
+    try:
+        tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32", local_files_only=True)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Could not load CLIP tokenizer - offline and not cached. Continuing without it."
+        )
+        tokenizer = None
 
 
 if len(sys.argv) > 1:
@@ -113,6 +122,11 @@ async def is_training(_: Request) -> JSONResponse:
 
 
 async def tokenize_text(request: Request) -> JSONResponse:
+    if tokenizer is None:
+        return JSONResponse(
+            {"detail": "CLIP tokenizer is not available (offline and not cached)"},
+            status_code=503,
+        )
     text = request.query_params.get("text")
     tokens = tokenizer.tokenize(text)
     token_ids = tokenizer.convert_tokens_to_ids(tokens)
