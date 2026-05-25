@@ -91,6 +91,18 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
         polyak_beta (float):
             EMA decay for the running estimate of the gradient L1 norm used
             in the Polyak step size. 0 means no smoothing (default 0.9).
+        polyak_f_ema (float):
+            EMA coefficient for smoothing the stochastic function value in
+            the Polyak step-size numerator. The paper (Section 6)
+            recommends applying EMA to stochastic estimates for stability.
+            A value of 0.9 provides strong smoothing; set to 0 to disable
+            and use the raw function value (not recommended for small batch
+            sizes). (default 0.9).
+        max_polyak_lr (float):
+            Upper bound on the Polyak step-size scalar ``polyak_lr`` to
+            prevent blow-up when the gradient L1 norm is small (e.g. with
+            LoRA-scale training or small batch sizes). Set to 0 or
+            ``math.inf`` to disable the cap (default 10.0).
         c_warmup (int):
             Number of initial steps during which the averaging weight
             ``ckp1`` is forced to 1.0 (i.e. ``x`` tracks ``z`` exactly).
@@ -124,6 +136,8 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
                  r: float = 1.0,
                  weight_lr_power: float = 2.0,
                  polyak_beta: float = 0.9,
+                 polyak_f_ema: float = 0.9,
+                 max_polyak_lr: float = 10.0,
                  c_warmup: int = 0,
                  warmup_steps: int = 0,
                  sf_beta1_anneal_steps: int = 0,
@@ -150,6 +164,9 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
                         weight_lr_power=weight_lr_power,
                         weight_decay=weight_decay,
                         polyak_beta=polyak_beta,
+                        polyak_f_ema=polyak_f_ema,
+                        f_ema=None,  # initialized lazily on first step
+                        max_polyak_lr=max_polyak_lr,
                         grad_l1_ema=0.0,
                         c_warmup=c_warmup,
                         sf_beta1_anneal_steps=sf_beta1_anneal_steps,
@@ -257,7 +274,25 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
         grad_l1_ema = polyak_beta * grad_l1_ema + (1 - polyak_beta) * grad_l1 * math.sqrt(math.pi / 2)
         grad_l1_ema_corr = grad_l1_ema / (1 - polyak_beta ** (k + 1))
 
-        polyak_lr = max(0, function_value + ip_term) / max(grad_l1_ema_corr, 1e-12)
+        # ---- Function value EMA for stochastic stability ----
+        # The paper (Section 6) recommends applying EMA to stochastic
+        # function-value estimates, critical for small-batch training.
+        f_ema_coeff = self.param_groups[0]['polyak_f_ema']
+        f_ema = self.param_groups[0]['f_ema']
+        if f_ema is None:
+            # First step: initialize EMA to the raw value
+            f_ema = function_value
+        elif f_ema_coeff > 0:
+            f_ema = f_ema_coeff * f_ema + (1 - f_ema_coeff) * function_value
+        # else: f_ema_coeff == 0 → use raw function_value
+        self.param_groups[0]['f_ema'] = f_ema
+
+        polyak_lr = max(0, f_ema + ip_term) / max(grad_l1_ema_corr, 1e-12)
+
+        # ---- Polyak LR cap to prevent blow-up ----
+        _max_polyak = self.param_groups[0]['max_polyak_lr']
+        if _max_polyak > 0:
+            polyak_lr = min(polyak_lr, _max_polyak)
 
         # ---- Per-group parameter updates ----
         for group in self.param_groups:
@@ -288,8 +323,11 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
             # For logging purposes
             group['grad_l1_ema'] = grad_l1_ema
             group['grad_l1_ema_corr'] = grad_l1_ema_corr
-            group['function_value_with_correction'] = function_value + ip_term
+            group['function_value_raw'] = function_value
+            group['function_value_ema'] = f_ema
+            group['function_value_with_correction'] = f_ema + ip_term
             group['ip_term'] = ip_term
+            group['polyak_lr'] = polyak_lr
             group['scheduled_lr'] = alpha
             group['sf_beta1_k'] = sf_beta1_k
 

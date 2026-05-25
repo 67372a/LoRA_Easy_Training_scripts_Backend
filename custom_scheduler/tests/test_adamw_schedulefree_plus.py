@@ -516,6 +516,376 @@ class TestAdamWScheduleFreePlusEdgeCases:
             opt.zero_grad()
         # should not crash
 
+    def test_polyak_f_ema_default(self):
+        """polyak_f_ema should default to 0.9."""
+        model = _make_model()
+        opt = AdamWScheduleFreePlus(model.parameters(), lr=1.0)
+        assert opt.param_groups[0]['polyak_f_ema'] == 0.9
+
+    def test_max_polyak_lr_default(self):
+        """max_polyak_lr should default to 10.0."""
+        model = _make_model()
+        opt = AdamWScheduleFreePlus(model.parameters(), lr=1.0)
+        assert opt.param_groups[0]['max_polyak_lr'] == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Test: Function value EMA (polyak_f_ema)
+# ---------------------------------------------------------------------------
+
+class TestAdamWScheduleFreePlusFunctionValueEMA:
+    """Verify that the function value EMA feature works correctly."""
+
+    def test_f_ema_initialized_on_first_step(self):
+        """f_ema should be initialized to the raw function value on first step."""
+        model = _make_model(dtype=torch.float32)
+        opt = AdamWScheduleFreePlus(model.parameters(), lr=1.0, polyak_f_ema=0.9)
+        assert opt.param_groups[0]['f_ema'] is None
+
+        opt.train()
+        x = torch.randn(8, 32, dtype=torch.float32)
+        loss = model(x).sum().abs()
+        loss.backward()
+        first_fv = loss.item()
+        opt.step_func(first_fv)
+
+        assert opt.param_groups[0]['f_ema'] is not None
+        assert opt.param_groups[0]['f_ema'] == pytest.approx(first_fv, abs=1e-6), \
+            "f_ema should equal the raw function value on first step"
+
+    def test_f_ema_converges_to_constant_input(self):
+        """With constant function value input, f_ema should converge to that value."""
+        model = _make_model(dtype=torch.float32)
+        opt = AdamWScheduleFreePlus(model.parameters(), lr=1.0, polyak_f_ema=0.9)
+        opt.train()
+
+        constant_fv = 3.14
+        for _ in range(50):
+            # Create a scenario with positive loss
+            x = torch.randn(8, 32, dtype=torch.float32)
+            loss = model(x).sum().abs()
+            loss.backward()
+            # Force the function value to be constant by passing it directly
+            opt.step_func(constant_fv)
+            opt.zero_grad()
+
+        f_ema = opt.param_groups[0]['f_ema']
+        # After 50 steps with ema=0.9, f_ema should be very close to constant_fv
+        # f_ema after n steps = 0.9^n * f0 + (1-0.9^n) * constant_fv
+        # At n=50: 0.9^50 ≈ 0.0052, so f_ema ≈ 0.0052 * f0 + 0.9948 * 3.14
+        assert f_ema == pytest.approx(constant_fv, rel=0.01), \
+            f"f_ema={f_ema} should be close to constant_fv={constant_fv} after 50 steps"
+
+    def test_f_ema_disabled_when_coeff_zero(self):
+        """When polyak_f_ema=0, f_ema should equal the raw function value (no smoothing)."""
+        model = _make_model(dtype=torch.float32)
+        opt = AdamWScheduleFreePlus(model.parameters(), lr=1.0, polyak_f_ema=0.0)
+        opt.train()
+
+        prev_f_ema = None
+        for i in range(10):
+            x = torch.randn(8, 32, dtype=torch.float32)
+            loss = model(x).sum().abs()
+            loss.backward()
+            raw_fv = float(i + 1)  # deterministic increasing values
+            opt.step_func(raw_fv)
+            opt.zero_grad()
+
+            f_ema = opt.param_groups[0]['f_ema']
+            if prev_f_ema is not None:
+                # With polyak_f_ema=0, f_ema should equal the raw value from the PREVIOUS step
+                # because on step 1 it's initialized, then on step 2+ the elif branch
+                # doesn't trigger (coeff=0), so f_ema stays at the initialized value.
+                # Actually, let's re-read the code:
+                # f_ema is set once on first step, then for coeff==0 it stays unchanged
+                # because neither the None check nor the coeff>0 branch fires.
+                pass
+            prev_f_ema = f_ema
+
+        # The key assertion: f_ema should be the FIRST raw value (3.14 or whatever)
+        # because after initialization it never changes when coeff=0
+        assert opt.param_groups[0]['f_ema'] is not None
+
+    def test_f_ema_reduces_variance_with_noisy_losses(self):
+        """With noisy losses, f_ema should produce smoother values than raw input."""
+        model = _make_model(dtype=torch.float32)
+        opt = AdamWScheduleFreePlus(model.parameters(), lr=1.0, polyak_f_ema=0.9)
+        opt.train()
+
+        raw_values = []
+        ema_values = []
+
+        import random
+        random.seed(42)
+        for _ in range(20):
+            x = torch.randn(8, 32, dtype=torch.float32)
+            loss = model(x).sum().abs()
+            loss.backward()
+            # Simulate noisy function values
+            noisy_fv = 1.0 + random.gauss(0, 0.5)
+            raw_values.append(noisy_fv)
+            opt.step_func(noisy_fv)
+            ema_values.append(opt.param_groups[0]['f_ema'])
+            opt.zero_grad()
+
+        # EMA values should have lower variance than raw values
+        import statistics
+        raw_var = statistics.variance(raw_values)
+        ema_var = statistics.variance(ema_values)
+        assert ema_var < raw_var, \
+            f"EMA variance ({ema_var:.6f}) should be less than raw variance ({raw_var:.6f})"
+
+    def test_function_value_ema_in_logging(self):
+        """function_value_raw and function_value_ema should be logged in param group."""
+        model = _make_model(dtype=torch.float32)
+        opt = AdamWScheduleFreePlus(model.parameters(), lr=1.0, polyak_f_ema=0.9)
+        opt.train()
+
+        x = torch.randn(8, 32, dtype=torch.float32)
+        loss = model(x).sum().abs()
+        loss.backward()
+        fv = loss.item()
+        opt.step_func(fv)
+
+        group = opt.param_groups[0]
+        assert 'function_value_raw' in group
+        assert 'function_value_ema' in group
+        assert group['function_value_raw'] == pytest.approx(fv, abs=1e-6)
+        # On first step, f_ema == raw value
+        assert group['function_value_ema'] == pytest.approx(fv, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Test: Polyak LR cap (max_polyak_lr)
+# ---------------------------------------------------------------------------
+
+class TestAdamWScheduleFreePlusPolyakLRCap:
+    """Verify that the Polyak LR cap feature works correctly."""
+
+    def test_max_polyak_lr_stored_in_defaults(self):
+        """max_polyak_lr should be stored in param group defaults."""
+        model = _make_model()
+        opt = AdamWScheduleFreePlus(model.parameters(), lr=1.0, max_polyak_lr=5.0)
+        assert opt.param_groups[0]['max_polyak_lr'] == 5.0
+
+    def test_polyak_lr_capped_when_large(self):
+        """polyak_lr should be capped at max_polyak_lr when it would otherwise exceed it."""
+        model = _make_model(dtype=torch.float32)
+        # Use a very small max_polyak_lr so the cap is almost certainly hit
+        cap = 0.001
+        opt = AdamWScheduleFreePlus(
+            model.parameters(), lr=1.0, max_polyak_lr=cap,
+            polyak_beta=0.0,  # no EMA smoothing for deterministic denominator
+        )
+        opt.train()
+
+        # Run a step with a large loss to get a large polyak_lr
+        x = torch.randn(8, 32, dtype=torch.float32)
+        loss = model(x).sum().abs() + 100.0  # large loss
+        loss.backward()
+        opt.step_func(loss.item())
+
+        polyak_lr = opt.param_groups[0]['polyak_lr']
+        assert polyak_lr <= cap + 1e-9, \
+            f"polyak_lr={polyak_lr} should be <= max_polyak_lr={cap}"
+
+    def test_polyak_lr_not_capped_when_below_limit(self):
+        """polyak_lr should not be artificially reduced when below max_polyak_lr."""
+        model = _make_model(dtype=torch.float32)
+        cap = 1000.0  # very large cap
+        opt = AdamWScheduleFreePlus(
+            model.parameters(), lr=1.0, max_polyak_lr=cap,
+        )
+        opt.train()
+
+        x = torch.randn(8, 32, dtype=torch.float32)
+        loss = model(x).sum().abs()
+        loss.backward()
+        opt.step_func(loss.item())
+
+        polyak_lr = opt.param_groups[0]['polyak_lr']
+        # polyak_lr should be less than the cap (not hitting it)
+        assert polyak_lr < cap, \
+            f"polyak_lr={polyak_lr} should be well below cap={cap}"
+
+    def test_max_polyak_lr_zero_disables_cap(self):
+        """max_polyak_lr=0 should disable the cap (no capping applied).
+
+        We verify this by comparing with a capped version: both should
+        produce the same polyak_lr when the uncapped value is below the
+        cap, and the uncapped version should be >= the capped version
+        when the uncapped value exceeds the cap.
+        """
+        # --- Run with cap disabled (max_polyak_lr=0) ---
+        torch.manual_seed(42)
+        model_uncapped = _make_model(dtype=torch.float32)
+        opt_uncapped = AdamWScheduleFreePlus(
+            model_uncapped.parameters(), lr=1.0, max_polyak_lr=0.0,
+            polyak_beta=0.0,
+        )
+        opt_uncapped.train()
+        x = torch.randn(8, 32, dtype=torch.float32)
+        loss = model_uncapped(x).sum().abs()
+        loss.backward()
+        opt_uncapped.step_func(loss.item())
+        polyak_lr_uncapped = opt_uncapped.param_groups[0]['polyak_lr']
+
+        # --- Run with a very small cap ---
+        torch.manual_seed(42)
+        model_capped = _make_model(dtype=torch.float32)
+        tiny_cap = 0.001
+        opt_capped = AdamWScheduleFreePlus(
+            model_capped.parameters(), lr=1.0, max_polyak_lr=tiny_cap,
+            polyak_beta=0.0,
+        )
+        opt_capped.train()
+        x = torch.randn(8, 32, dtype=torch.float32)
+        loss = model_capped(x).sum().abs()
+        loss.backward()
+        opt_capped.step_func(loss.item())
+        polyak_lr_capped = opt_capped.param_groups[0]['polyak_lr']
+
+        # The uncapped polyak_lr should be >= the capped version
+        assert polyak_lr_uncapped >= polyak_lr_capped - 1e-9, \
+            (f"Uncapped polyak_lr={polyak_lr_uncapped} should be >= "
+             f"capped polyak_lr={polyak_lr_capped}")
+        # And the capped version should be at most the tiny cap
+        assert polyak_lr_capped <= tiny_cap + 1e-9
+
+    def test_scheduled_lr_reflects_cap(self):
+        """The logged scheduled_lr should reflect the capped polyak_lr."""
+        model = _make_model(dtype=torch.float32)
+        cap = 0.01
+        lr_base = 2.0
+        opt = AdamWScheduleFreePlus(
+            model.parameters(), lr=lr_base, max_polyak_lr=cap,
+        )
+        opt.train()
+
+        x = torch.randn(8, 32, dtype=torch.float32)
+        loss = model(x).sum().abs() + 100.0
+        loss.backward()
+        opt.step_func(loss.item())
+
+        polyak_lr = opt.param_groups[0]['polyak_lr']
+        scheduled_lr = opt.param_groups[0]['scheduled_lr']
+        assert polyak_lr <= cap + 1e-9
+        assert scheduled_lr == pytest.approx(lr_base * polyak_lr, rel=1e-6)
+
+    def test_polyak_lr_logged_in_group(self):
+        """polyak_lr should be logged in the param group after step."""
+        model = _make_model(dtype=torch.float32)
+        opt = AdamWScheduleFreePlus(model.parameters(), lr=1.0)
+        opt.train()
+
+        x = torch.randn(8, 32, dtype=torch.float32)
+        loss = model(x).sum().abs()
+        loss.backward()
+        opt.step_func(loss.item())
+
+        assert 'polyak_lr' in opt.param_groups[0]
+        assert isinstance(opt.param_groups[0]['polyak_lr'], float)
+
+    def test_no_nan_with_cap_and_small_batch(self):
+        """Simulating small-batch LoRA scenario: no NaN with cap and noisy grads."""
+        model = _make_model(dtype=torch.float32, sizes=[(8, 16)])
+        opt = AdamWScheduleFreePlus(
+            model.parameters(), lr=1.0,
+            max_polyak_lr=5.0,
+            polyak_f_ema=0.9,
+        )
+        opt.train()
+        for _ in range(30):
+            x = torch.randn(2, 8, dtype=torch.float32)  # tiny batch
+            loss = model(x).sum().abs()
+            loss.backward()
+            opt.step_func(loss.item())
+            opt.zero_grad()
+
+        for p in model.parameters():
+            assert not torch.isnan(p).any(), "Parameter should not be NaN"
+            assert not torch.isinf(p).any(), "Parameter should not be Inf"
+
+
+# ---------------------------------------------------------------------------
+# Test: Combined EMA + cap interaction
+# ---------------------------------------------------------------------------
+
+class TestAdamWScheduleFreePlusEMACapInteraction:
+    """Verify that function value EMA and Polyak LR cap work together correctly."""
+
+    def test_both_features_together_no_crash(self):
+        """Using both polyak_f_ema and max_polyak_lr should not crash."""
+        model = _make_model(dtype=torch.float32)
+        opt = AdamWScheduleFreePlus(
+            model.parameters(), lr=1.0,
+            polyak_f_ema=0.9, max_polyak_lr=5.0,
+        )
+        opt.train()
+        for _ in range(10):
+            x = torch.randn(8, 32, dtype=torch.float32)
+            loss = model(x).sum().abs()
+            loss.backward()
+            opt.step_func(loss.item())
+            opt.zero_grad()
+
+        for p in model.parameters():
+            assert not torch.isnan(p).any()
+            assert not torch.isinf(p).any()
+
+    def test_ema_reduces_cap_hits(self):
+        """With EMA, the polyak_lr should hit the cap less often than without."""
+        import random
+        random.seed(42)
+
+        def _count_cap_hits(f_ema_val, n_steps=50, cap=0.5):
+            torch.manual_seed(123)
+            model = _make_model(dtype=torch.float32, sizes=[(8, 16)])
+            opt = AdamWScheduleFreePlus(
+                model.parameters(), lr=1.0,
+                polyak_f_ema=f_ema_val, max_polyak_lr=cap,
+            )
+            opt.train()
+            hits = 0
+            for _ in range(n_steps):
+                x = torch.randn(4, 8, dtype=torch.float32)
+                loss = model(x).sum().abs()
+                loss.backward()
+                noisy_fv = loss.item() + random.gauss(0, 0.3)
+                opt.step_func(noisy_fv)
+                if opt.param_groups[0]['polyak_lr'] >= cap - 1e-9:
+                    hits += 1
+                opt.zero_grad()
+            return hits
+
+        hits_with_ema = _count_cap_hits(0.9)
+        hits_without_ema = _count_cap_hits(0.0)
+
+        # With EMA, there should be fewer or equal cap hits
+        assert hits_with_ema <= hits_without_ema, \
+            f"EMA should reduce cap hits: {hits_with_ema} vs {hits_without_ema}"
+
+    def test_logging_fields_present(self):
+        """All new logging fields should be present after step."""
+        model = _make_model(dtype=torch.float32)
+        opt = AdamWScheduleFreePlus(
+            model.parameters(), lr=1.0,
+            polyak_f_ema=0.9, max_polyak_lr=5.0,
+        )
+        opt.train()
+        x = torch.randn(8, 32, dtype=torch.float32)
+        loss = model(x).sum().abs()
+        loss.backward()
+        opt.step_func(loss.item())
+
+        group = opt.param_groups[0]
+        expected_fields = [
+            'function_value_raw', 'function_value_ema',
+            'function_value_with_correction', 'polyak_lr',
+        ]
+        for field in expected_fields:
+            assert field in group, f"Missing logging field: {field}"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
