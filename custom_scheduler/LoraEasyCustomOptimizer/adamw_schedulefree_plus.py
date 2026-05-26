@@ -95,9 +95,9 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
             EMA coefficient for smoothing the stochastic function value in
             the Polyak step-size numerator. The paper (Section 6)
             recommends applying EMA to stochastic estimates for stability.
-            A value of 0.9 provides strong smoothing; set to 0 to disable
+            A value of 0.95 provides strong smoothing; set to 0 to disable
             and use the raw function value (not recommended for small batch
-            sizes). (default 0.9).
+            sizes). (default 0.95).
         max_polyak_lr (float):
             Upper bound on the Polyak step-size scalar ``polyak_lr`` to
             prevent blow-up when the gradient L1 norm is small (e.g. with
@@ -136,7 +136,7 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
                  r: float = 1.0,
                  weight_lr_power: float = 2.0,
                  polyak_beta: float = 0.9,
-                 polyak_f_ema: float = 0.9,
+                 polyak_f_ema: float = 0.95,
                  max_polyak_lr: float = 10.0,
                  c_warmup: int = 0,
                  warmup_steps: int = 0,
