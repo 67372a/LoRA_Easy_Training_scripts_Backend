@@ -58,6 +58,7 @@ from LoraEasyCustomOptimizer.wiwiopt import WiwiOpt
 from LoraEasyCustomOptimizer.adam import AdamW8bitKahan
 from LoraEasyCustomOptimizer.cascade import CASCADE
 from LoraEasyCustomOptimizer.radam_schedulefree import RAdamScheduleFree
+from LoraEasyCustomOptimizer.nor_muon_schedulefree import NorMuonScheduleFree
 from LoraEasyCustomOptimizer.ocgoptv2 import OCGOptV2
 from LoraEasyCustomOptimizer.adamw_schedulefree_plus import AdamWScheduleFreePlus
 
@@ -120,6 +121,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     MomentusCaution,
     Mythical,
     OAGOpt,
+    NorMuonScheduleFree,
     OCGOpt,
     OCGOptV2,
     ProdigyPlusScheduleFree,
