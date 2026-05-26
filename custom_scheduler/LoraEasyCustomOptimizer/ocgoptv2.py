@@ -198,7 +198,7 @@ class OCGOptV2(Optimizer):
         spectral_clip_dtype (torch.dtype in string format):
             Sets the dtype of spectral clipping calculation. Recommended to use torch.float32 (or leave at default of None) (default: None, which results in torch.float32).
         adaptive (bool):
-            Scale the full step to the momentumized average gradient, always utilizes RMS normalization on the gradient if True, otherwise caps RMS at 1.0 (default: True).
+            Scale the full step to the momentumized average gradient, always utilizes RMS normalization on the gradient if True, otherwise caps RMS at 1.0 (default: False).
         adaptive_min (float):
             Minimum multiplier for the adaptive scale (default: -1.0).
         adaptive_max (float):
