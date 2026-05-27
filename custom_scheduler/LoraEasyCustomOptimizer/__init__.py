@@ -61,11 +61,13 @@ from LoraEasyCustomOptimizer.radam_schedulefree import RAdamScheduleFree
 from LoraEasyCustomOptimizer.nor_muon_schedulefree import NorMuonScheduleFree
 from LoraEasyCustomOptimizer.ocgoptv2 import OCGOptV2
 from LoraEasyCustomOptimizer.adamw_schedulefree_plus import AdamWScheduleFreePlus
+from LoraEasyCustomOptimizer.amuse import AMUSE
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
     AdamW8bitKahan,
     AdamWScheduleFreePlus,
+    AMUSE,
     ADOPT,
     ADOPTAOScheduleFree,
     ADOPTEMAMixScheduleFree,
