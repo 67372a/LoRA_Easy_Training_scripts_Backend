@@ -115,7 +115,6 @@ class AMUSE(torch.optim.Optimizer):
       Higher rho pushes beta1 toward 1 faster, so y moves closer to x
       faster. Lower rho keeps y farther from x for longer.
     - r: polynomial power for the z/x averaging weights.
-    - weight_decay_at_y: optional decay applied while p is still y.
 
     Parameter groups:
     - When heuristic_muon=True (recommended), AMUSE automatically applies
@@ -135,7 +134,6 @@ class AMUSE(torch.optim.Optimizer):
         lr: float = None,
         weight_decay: float = 0.0,
         heuristic_muon: bool = True,
-        weight_decay_at_y: float = 0.0,
         beta1: float = 0.9,
         weight_lr_power: float = 2.0,
         warmup_steps: int = 0,
@@ -177,7 +175,6 @@ class AMUSE(torch.optim.Optimizer):
                     "dicts; using explicit group assignments."
                 )
 
-        self.weight_decay_at_y = weight_decay_at_y
         self.beta1_init = float(beta1)
         self.weight_lr_power = weight_lr_power
         self.warmup_steps = int(warmup_steps)
@@ -259,12 +256,6 @@ class AMUSE(torch.optim.Optimizer):
         if z is None:
             z = state["z"] = torch.clone(p, memory_format=torch.preserve_format)
         return z
-
-    def _apply_weight_decay_at_y(self, p, z, lr, beta1):
-        if self.weight_decay_at_y == 0.0:
-            return
-        z.sub_(p, alpha=lr * self.weight_decay_at_y)
-        p.sub_(p, alpha=lr * self.weight_decay_at_y * (1.0 - beta1))
 
     def _lerp_to_z(self, p, z, weight, state):
         """Lerp p toward z with stochastic rounding for reduced-precision params.
@@ -446,7 +437,6 @@ class AMUSE(torch.optim.Optimizer):
                     state = self.state[p]
 
                     z = self._get_z(p)
-                    self._apply_weight_decay_at_y(p, z, lr, beta1)
 
                     if p.dtype in (torch.bfloat16, torch.float16):
                         srng = self._get_srng_buf(p)
@@ -518,7 +508,6 @@ class AMUSE(torch.optim.Optimizer):
                     state = self.state[p]
 
                     z = self._get_z(p)
-                    self._apply_weight_decay_at_y(p, z, lr, beta1)
 
                     if p.dtype in (torch.bfloat16, torch.float16):
                         srng = self._get_srng_buf(p)
