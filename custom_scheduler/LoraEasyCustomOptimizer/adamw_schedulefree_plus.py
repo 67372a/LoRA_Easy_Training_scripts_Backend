@@ -37,11 +37,13 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
        the learning rate. The Polyak step also automatically scales with
        batch size.
 
-    3. **AdamC Fully-Decoupled Weight Decay**: Weight decay is scaled by
-       ``lr_effective²`` instead of ``lr_effective``, so that the effective
-       decay strength is independent of the adaptive learning rate. This
-       requires larger weight_decay values (typically 5-50) compared to
-       standard AdamW (0.01-0.1).
+    3. **AdamC Fully-Decoupled Weight Decay**: Weight decay is applied at
+       the fast iterate z by default (decay_at_z), which is provably stable
+       for all training horizons (Lemma 3.1, Apte et al. 2026). Set
+       ``weight_decay_at_y=True`` to use the original decay-at-y behavior.
+       Decay is scaled by ``lr_effective`` (AdamC style) so that the
+       effective decay strength is independent of the adaptive learning rate.
+       Typical values are 5-50 for Polyak-based training (default 0).
 
     This optimizer requires that ``.train()`` and ``.eval()`` be called before
     training and evaluation respectively. The optimizer should also be placed
@@ -76,10 +78,17 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
             Term added to the denominator outside of the root operation to
             improve numerical stability (default 1e-8).
         weight_decay (float):
-            Decoupled weight decay coefficient. Applied with ``lr²`` scaling
-            (AdamC style) so that the effective decay is independent of the
-            adaptive learning rate. Typical values are 5-50 for Polyak-based
-            training (default 0).
+            Decoupled weight decay coefficient. Applied at the fast iterate z
+            by default (``weight_decay_at_y=False``), scaled by the effective
+            learning rate (AdamC style). Typical values are 5-50 for
+            Polyak-based training (default 0).
+        weight_decay_at_y (bool):
+            If True, applies weight decay at y (the gradient evaluation
+            point) — the original behavior from Defazio et al. (2024).
+            If False (default), applies weight decay at z (the fast iterate),
+            which is provably stable for all training horizons (Lemma 3.1,
+            Apte et al. 2026). Decay at y can lead to divergence for
+            long-horizon training with β > 0.
         r (float):
             Polynomial weighting power for the Schedule-Free average.
             ``r=1`` is recommended for long-duration training runs
@@ -133,6 +142,7 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
                  sf_beta1: float = 0.9,
                  eps: float = 1e-8,
                  weight_decay: float = 0,
+                 weight_decay_at_y: bool = False,
                  r: float = 1.0,
                  weight_lr_power: float = 2.0,
                  polyak_beta: float = 0.9,
@@ -163,6 +173,7 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
                         scheduled_lr=0.0,
                         weight_lr_power=weight_lr_power,
                         weight_decay=weight_decay,
+                        weight_decay_at_y=weight_decay_at_y,
                         polyak_beta=polyak_beta,
                         polyak_f_ema=polyak_f_ema,
                         f_ema=None,  # initialized lazily on first step
@@ -212,7 +223,7 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
 
         This method takes the current loss function value (required for the
         Polyak step-size rule) and performs the full ScheduleFree+ update:
-        Polyak-based adaptive learning rate, AdamC weight decay, inner
+        Polyak-based adaptive learning rate, AdamC weight decay (at z or y), inner
         momentum, Schedule-Free averaging with optional β annealing, and
         c_warmup.
 
@@ -374,22 +385,37 @@ class AdamWScheduleFreePlus(torch.optim.Optimizer):
                 exp_avg_sq_fp32.mul_(beta2).addcmul_(grad_fp32, grad_fp32, value=1 - beta2)
                 denom = exp_avg_sq_fp32.div(bias_correction2).sqrt_().add_(eps)
 
-                # Combined gradient: Adam step + AdamC weight decay
-                # g_combined = exp_avg_corr / denom + alpha * decay * y
+                # Adam-preconditioned gradient
                 grad_normalized = exp_avg_corr.div(denom)
-                if decay != 0:
-                    grad_normalized.add_(p_fp32,
-                                         alpha=alpha * decay)  # p = y in train mode
 
-                # Schedule-Free: update y (p) in-place without explicit x
-                # y_new = (1-ckp1)*y + ckp1*z - A*alpha*g_combined
+                # Schedule-Free interpolation weight
                 A = 1 - sf_beta1_k * (1 - ckp1)
-                p_fp32.lerp_(end=z_fp32, weight=ckp1)  # p = (1-ckp1)*y + ckp1*z
-                p_fp32.add_(grad_normalized, alpha=-A * alpha)
 
-                # Update z:  z_new = z - alpha * g_combined
-                # (includes both the Adam step and AdamC weight decay)
-                z_fp32.sub_(grad_normalized, alpha=alpha)
+                if group.get('weight_decay_at_y', False):
+                    # ---- Original behavior: decay at y ----
+                    # Adds AdamC weight decay using the gradient-evaluation
+                    # point y (p = y in train mode).  Both y and z receive
+                    # the decay-modified combined gradient.
+                    # g_combined = g + alpha * decay * y
+                    if decay != 0:
+                        grad_normalized.add_(p_fp32,
+                                             alpha=alpha * decay)  # p = y in train mode
+                    p_fp32.lerp_(end=z_fp32, weight=ckp1)
+                    p_fp32.add_(grad_normalized, alpha=-A * alpha)
+                    z_fp32.sub_(grad_normalized, alpha=alpha)
+                else:
+                    # ---- New behavior (default): decay at z ----
+                    # Weight decay is applied directly to the fast iterate z
+                    # BEFORE the gradient step, yielding a geometric
+                    # contraction that provably bounds all iterates
+                    # (Lemma 3.1, Apte et al. 2026).
+                    # z_new = (1 - alpha*lambda) * z  -  alpha * g
+                    # y_new = (1-c)*y + c*z  -  A*alpha*g   (pure gradient, no decay)
+                    p_fp32.lerp_(end=z_fp32, weight=ckp1)
+                    p_fp32.add_(grad_normalized, alpha=-A * alpha)
+                    if decay != 0:
+                        z_fp32.mul_(1.0 - alpha * decay)
+                    z_fp32.sub_(grad_normalized, alpha=alpha)
 
                 # Write back parameter and state with stochastic rounding for bf16
                 if p.dtype == torch.bfloat16:
