@@ -63,23 +63,26 @@ AMUSE = _amuse.AMUSE
 zeropower_via_newtonschulz5 = _amuse.zeropower_via_newtonschulz5
 muon_update = _amuse.muon_update
 
+# Use CUDA when available for torch.compile (Inductor requires GPU or a C++ compiler)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_model_2d_only(seed=42, dtype=torch.float32):
+def _make_model_2d_only(seed=42, dtype=torch.float32, device=DEVICE):
     """Create a model with only 2D (matrix) layers, no bias (Muon requires ndim>=2)."""
     torch.manual_seed(seed)
     layers = [
-        torch.nn.Linear(32, 64, bias=False, dtype=dtype),
+        torch.nn.Linear(32, 64, bias=False, dtype=dtype, device=device),
         torch.nn.ReLU(),
-        torch.nn.Linear(64, 16, bias=False, dtype=dtype),
+        torch.nn.Linear(64, 16, bias=False, dtype=dtype, device=device),
     ]
     return torch.nn.Sequential(*layers)
 
 
-def _make_model_mixed(seed=42, dtype=torch.float32):
+def _make_model_mixed(seed=42, dtype=torch.float32, device=DEVICE):
     """Create a model with 2D layers (Muon) and 1D bias params (AdamW fallback).
 
     Uses bias=True so there are both 2D weights and 1D biases for testing
@@ -87,9 +90,9 @@ def _make_model_mixed(seed=42, dtype=torch.float32):
     """
     torch.manual_seed(seed)
     model = torch.nn.Sequential(
-        torch.nn.Linear(32, 64, bias=True, dtype=dtype),
+        torch.nn.Linear(32, 64, bias=True, dtype=dtype, device=device),
         torch.nn.ReLU(),
-        torch.nn.Linear(64, 16, bias=True, dtype=dtype),
+        torch.nn.Linear(64, 16, bias=True, dtype=dtype, device=device),
     )
     return model
 
@@ -120,13 +123,13 @@ def _make_amuse_mixed(model, warmup_steps=5, **kwargs):
     return AMUSE(groups, warmup_steps=warmup_steps, **kwargs)
 
 
-def _run_steps(model, opt, n_steps=5, input_size=32, seed=999):
+def _run_steps(model, opt, n_steps=5, input_size=32, seed=999, device=DEVICE):
     """Run n_steps optimizer.step() calls and return the losses."""
     torch.manual_seed(seed)
     losses = []
     opt.train()
     for _ in range(n_steps):
-        x = torch.randn(4, input_size, dtype=model[0].weight.dtype)
+        x = torch.randn(4, input_size, dtype=model[0].weight.dtype, device=device)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -143,27 +146,27 @@ class TestNewtonSchulz:
     """Tests for the Newton-Schulz polar decomposition helper."""
 
     def test_output_shape_matches_input(self):
-        G = torch.randn(16, 32)
+        G = torch.randn(16, 32, device=DEVICE)
         P = zeropower_via_newtonschulz5(G)
         assert P.shape == G.shape
 
     def test_near_orthogonal_output(self):
         """For a tall matrix, P^T @ P should be near identity."""
-        G = torch.randn(64, 16, dtype=torch.float32)
+        G = torch.randn(64, 16, dtype=torch.float32, device=DEVICE)
         P = zeropower_via_newtonschulz5(G, steps=5)
         PtP = P.T @ P
-        I = torch.eye(16, dtype=torch.float32)
+        I = torch.eye(16, dtype=torch.float32, device=DEVICE)
         max_diff = (PtP - I).abs().max().item()
         assert max_diff < 0.55, f"P^T @ P deviation too large: {max_diff:.4f}"
 
     def test_wide_matrix_transpose_handling(self):
         """Wide matrix (more columns than rows) should be handled via transpose."""
-        G = torch.randn(8, 64, dtype=torch.float32)
+        G = torch.randn(8, 64, dtype=torch.float32, device=DEVICE)
         P = zeropower_via_newtonschulz5(G)
         assert P.shape == G.shape
 
     def test_square_matrix(self):
-        G = torch.randn(16, 16, dtype=torch.float32)
+        G = torch.randn(16, 16, dtype=torch.float32, device=DEVICE)
         P = zeropower_via_newtonschulz5(G)
         assert P.shape == G.shape
 
@@ -222,10 +225,247 @@ class TestInstantiation:
                 assert "exp_avg_sq" in opt.state[p]
                 assert torch.all(opt.state[p]["exp_avg_sq"] == 0)
 
+# ---------------------------------------------------------------------------
+# Tests: Top-level lr, weight_decay, and heuristic_muon
+# ---------------------------------------------------------------------------
+
+class TestTopLevelParams:
+    """Tests for the new lr, weight_decay, and heuristic_muon init params."""
+
+    def test_top_level_lr_applied_to_muon_group(self):
+        """lr passed at init should override the Muon default (0.02)."""
+        model = _make_model_2d_only()
+        opt = AMUSE(
+            [{"params": list(model.parameters()), "use_muon": True}],
+            lr=0.05,
+            warmup_steps=3,
+        )
+        assert opt.param_groups[0]["lr"] == 0.05
+        assert opt.param_groups[0]["base_lr"] == 0.05
+
+    def test_top_level_lr_applied_to_adamw_group(self):
+        """lr passed at init should override the AdamW default (3e-4)."""
+        model = _make_model_2d_only()
+        opt = AMUSE(
+            [{"params": list(model.parameters()), "use_muon": False}],
+            lr=0.01,
+            warmup_steps=3,
+        )
+        assert opt.param_groups[0]["lr"] == 0.01
+        assert opt.param_groups[0]["base_lr"] == 0.01
+
+    def test_top_level_lr_not_set_uses_defaults(self):
+        """When lr=None, per-type defaults should be used."""
+        model = _make_model_2d_only()
+        muon_opt = AMUSE(
+            [{"params": list(model.parameters()), "use_muon": True}],
+            warmup_steps=3,
+        )
+        assert muon_opt.param_groups[0]["lr"] == 0.02
+
+        adamw_opt = AMUSE(
+            [{"params": list(model.parameters()), "use_muon": False}],
+            warmup_steps=3,
+        )
+        assert adamw_opt.param_groups[0]["lr"] == 3e-4
+
+    def test_top_level_weight_decay_applied(self):
+        """weight_decay passed at init should be applied to all groups."""
+        model = _make_model_mixed()
+        muon_params = [p for p in model.parameters() if p.ndim >= 2]
+        adamw_params = [p for p in model.parameters() if p.ndim < 2]
+        groups = [
+            {"params": muon_params, "use_muon": True},
+            {"params": adamw_params, "use_muon": False},
+        ]
+        opt = AMUSE(groups, weight_decay=0.1, warmup_steps=3)
+        for group in opt.param_groups:
+            assert group["weight_decay"] == 0.1
+
+    def test_per_group_lr_overrides_top_level(self):
+        """Per-group lr should take priority over top-level lr."""
+        model = _make_model_2d_only()
+        opt = AMUSE(
+            [{"params": list(model.parameters()), "use_muon": True, "lr": 0.03}],
+            lr=0.05,
+            warmup_steps=3,
+        )
+        assert opt.param_groups[0]["lr"] == 0.03
+        assert opt.param_groups[0]["base_lr"] == 0.03
+
+    def test_per_group_weight_decay_overrides_top_level(self):
+        """Per-group weight_decay should take priority over top-level."""
+        model = _make_model_2d_only()
+        opt = AMUSE(
+            [{"params": list(model.parameters()), "use_muon": True,
+              "weight_decay": 0.02}],
+            weight_decay=0.1,
+            warmup_steps=3,
+        )
+        assert opt.param_groups[0]["weight_decay"] == 0.02
+
+
+class TestHeuristicMuon:
+    """Tests for the heuristic_muon auto-split feature."""
+
+    def test_heuristic_creates_two_groups(self):
+        """With a mixed model, heuristic_muon should create 2 groups."""
+        model = _make_model_mixed()
+        opt = AMUSE(
+            list(model.parameters()),
+            heuristic_muon=True,
+            warmup_steps=3,
+        )
+        assert len(opt.param_groups) == 2
+        muon_group = [g for g in opt.param_groups if g["use_muon"]]
+        adamw_group = [g for g in opt.param_groups if not g["use_muon"]]
+        assert len(muon_group) == 1
+        assert len(adamw_group) == 1
+
+    def test_heuristic_muon_params_are_ndim_ge_2(self):
+        """Muon group should contain only ndim >= 2 params."""
+        model = _make_model_mixed()
+        opt = AMUSE(
+            list(model.parameters()),
+            heuristic_muon=True,
+            warmup_steps=3,
+        )
+        muon_group = [g for g in opt.param_groups if g["use_muon"]][0]
+        for p in muon_group["params"]:
+            assert p.ndim >= 2, f"Muon param has ndim={p.ndim}, expected >= 2"
+
+    def test_heuristic_adamw_params_are_ndim_lt_2(self):
+        """AdamW group should contain only ndim < 2 params."""
+        model = _make_model_mixed()
+        opt = AMUSE(
+            list(model.parameters()),
+            heuristic_muon=True,
+            warmup_steps=3,
+        )
+        adamw_group = [g for g in opt.param_groups if not g["use_muon"]][0]
+        for p in adamw_group["params"]:
+            assert p.ndim < 2, f"AdamW param has ndim={p.ndim}, expected < 2"
+
+    def test_heuristic_with_2d_only_model(self):
+        """With a 2D-only model, heuristic should create only a Muon group."""
+        model = _make_model_2d_only()
+        opt = AMUSE(
+            list(model.parameters()),
+            heuristic_muon=True,
+            warmup_steps=3,
+        )
+        assert len(opt.param_groups) == 1
+        assert opt.param_groups[0]["use_muon"] is True
+
+    def test_heuristic_with_1d_only_params(self):
+        """With only 1D params, heuristic should create only an AdamW group."""
+        p1 = torch.nn.Parameter(torch.randn(10))
+        p2 = torch.nn.Parameter(torch.randn(5))
+        opt = AMUSE(
+            [p1, p2],
+            heuristic_muon=True,
+            warmup_steps=3,
+        )
+        assert len(opt.param_groups) == 1
+        assert opt.param_groups[0]["use_muon"] is False
+
+    def test_heuristic_with_top_level_lr(self):
+        """heuristic_muon + top-level lr should apply lr to both groups."""
+        model = _make_model_mixed()
+        opt = AMUSE(
+            list(model.parameters()),
+            lr=0.05,
+            heuristic_muon=True,
+            warmup_steps=3,
+        )
+        for group in opt.param_groups:
+            assert group["lr"] == 0.05
+            assert group["base_lr"] == 0.05
+
+    def test_heuristic_with_top_level_weight_decay(self):
+        """heuristic_muon + top-level weight_decay should apply to both groups."""
+        model = _make_model_mixed()
+        opt = AMUSE(
+            list(model.parameters()),
+            weight_decay=0.1,
+            heuristic_muon=True,
+            warmup_steps=3,
+        )
+        for group in opt.param_groups:
+            assert group["weight_decay"] == 0.1
+
+    def test_heuristic_with_pre_grouped_dicts_warns(self):
+        """heuristic_muon=True with pre-grouped dicts should warn and use as-is."""
+        model = _make_model_mixed()
+        groups = [{"params": list(model.parameters()), "use_muon": True}]
+        # Should not raise, just warn
+        opt = AMUSE(groups, heuristic_muon=True, warmup_steps=3)
+        assert len(opt.param_groups) == 1
+        assert opt.param_groups[0]["use_muon"] is True
+
+    def test_heuristic_convergence(self):
+        """heuristic_muon model should converge on a simple task."""
+        model = _make_model_mixed()
+        opt = AMUSE(
+            list(model.parameters()),
+            lr=0.01,
+            heuristic_muon=True,
+            warmup_steps=5,
+            beta1=0.6,
+        )
+        losses = _run_steps(model, opt, n_steps=50, input_size=32)
+        early_avg = sum(losses[:5]) / 5
+        late_avg = sum(losses[-5:]) / 5
+        assert late_avg < early_avg, (
+            f"heuristic_muon loss did not decrease: "
+            f"early_avg={early_avg:.4f}, late_avg={late_avg:.4f}"
+        )
+
+    def test_heuristic_no_nan(self):
+        """heuristic_muon should not produce NaN after multiple steps."""
+        model = _make_model_mixed()
+        opt = AMUSE(
+            list(model.parameters()),
+            lr=0.01,
+            heuristic_muon=True,
+            warmup_steps=5,
+        )
+        _run_steps(model, opt, n_steps=20, input_size=32)
+        for p in model.parameters():
+            assert not torch.isnan(p).any(), "NaN in parameters"
+            assert not torch.isinf(p).any(), "Inf in parameters"
+
+    def test_heuristic_state_initialization(self):
+        """heuristic_muon should initialize correct state buffers."""
+        model = _make_model_mixed()
+        opt = AMUSE(
+            list(model.parameters()),
+            heuristic_muon=True,
+            warmup_steps=3,
+        )
+        muon_group = [g for g in opt.param_groups if g["use_muon"]][0]
+        adamw_group = [g for g in opt.param_groups if not g["use_muon"]][0]
+        for p in muon_group["params"]:
+            assert "momentum_buffer" in opt.state[p]
+        for p in adamw_group["params"]:
+            assert "exp_avg_sq" in opt.state[p]
+
+    def test_backward_compat_no_heuristic_no_lr(self):
+        """Without heuristic_muon or lr, behavior should be identical to before."""
+        model = _make_model_2d_only()
+        opt = AMUSE(
+            [{"params": list(model.parameters()), "use_muon": True}],
+            warmup_steps=3,
+        )
+        assert opt.param_groups[0]["lr"] == 0.02  # Muon default
+        assert opt.param_groups[0]["base_lr"] == 0.02
+
 
 # ---------------------------------------------------------------------------
 # Tests: β_t Schedule (the critical fix)
 # ---------------------------------------------------------------------------
+
+
 
 class TestBetaSchedule:
     """Tests verifying the β_t schedule matches the paper's exact formula.
@@ -246,7 +486,7 @@ class TestBetaSchedule:
         )
         opt.train()
         for i in range(warmup):
-            x = torch.randn(2, 32)
+            x = torch.randn(2, 32, device=DEVICE)
             loss = model(x).sum()
             loss.backward()
             opt.step()
@@ -268,7 +508,7 @@ class TestBetaSchedule:
         opt.train()
         # Run through warmup
         for _ in range(warmup):
-            x = torch.randn(2, 32)
+            x = torch.randn(2, 32, device=DEVICE)
             loss = model(x).sum()
             loss.backward()
             opt.step()
@@ -277,7 +517,7 @@ class TestBetaSchedule:
         # After warmup, beta1 should increase
         prev_beta1 = beta1_init
         for _ in range(20):
-            x = torch.randn(2, 32)
+            x = torch.randn(2, 32, device=DEVICE)
             loss = model(x).sum()
             loss.backward()
             opt.step()
@@ -300,7 +540,7 @@ class TestBetaSchedule:
         )
         opt.train()
         for _ in range(30):
-            x = torch.randn(2, 32)
+            x = torch.randn(2, 32, device=DEVICE)
             loss = model(x).sum()
             loss.backward()
             opt.step()
@@ -312,7 +552,8 @@ class TestBetaSchedule:
 
         β_t = 1 - (c_t(1-c_{T₀}) / (c_{T₀}(1-c_t)))^ρ · (1-β₁)
 
-        Where c_t is the averaging weight computed at step t-1 (the PREVIOUS step).
+        Where c_t is the ckp1 computed at the current step (c_{t+1} in
+        Algorithm 1 notation), matching the reference implementation.
         """
         model = _make_model_2d_only()
         beta1_init = 0.6
@@ -324,10 +565,10 @@ class TestBetaSchedule:
         opt.train()
 
         # Manually track c values to verify the formula
-        c_history = []  # c values at each step (c_{t+1} in paper notation)
+        c_history = []  # ckp1 values at each step (c_{t+1} in paper notation)
 
         for step in range(25):
-            x = torch.randn(2, 32)
+            x = torch.randn(2, 32, device=DEVICE)
             loss = model(x).sum()
             loss.backward()
             opt.step()
@@ -339,13 +580,14 @@ class TestBetaSchedule:
             c_history.append(ckp1)
 
             if t > warmup:
-                # c_t is the previous step's ckp1 (c_t in paper notation)
-                c_t = c_history[step - 1]  # ckp1 from step t-1
-                # c_warmup was saved at t == warmup_steps from c_t at that point,
-                # which was ckp1 from step warmup_steps-1 (index warmup-2).
-                c_T0 = c_history[warmup - 2]  # ckp1 from step T₀-1
+                # After the fix, _compute_beta1 receives the current step's
+                # ckp1, which is c_{t+1} in Algorithm 1 notation.
+                c_t = ckp1
+                # c_warmup was saved at t == warmup_steps from the current
+                # step's ckp1, which is c_history[warmup - 1].
+                c_T0 = c_history[warmup - 1]  # ckp1 from step T₀
 
-                # Paper formula
+                # Paper formula (using the reference's interpretation of c_t)
                 S_t = (c_t * (1.0 - c_T0)) / (c_T0 * (1.0 - c_t))
                 expected_beta1 = 1.0 - (S_t ** rho) * (1.0 - beta1_init)
 
@@ -371,7 +613,7 @@ class TestTrainEvalMode:
         opt = _make_amuse_for_model(model, use_muon=False, warmup_steps=5)
         # opt starts in eval mode
         assert not opt.train_mode
-        x = torch.randn(2, 32)
+        x = torch.randn(2, 32, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         with pytest.raises(Exception, match="train mode"):
@@ -384,7 +626,7 @@ class TestTrainEvalMode:
 
         # Run one step to populate z state
         opt.train()
-        x = torch.randn(2, 32)
+        x = torch.randn(2, 32, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -408,7 +650,7 @@ class TestTrainEvalMode:
         opt = _make_amuse_for_model(model, use_muon=False, warmup_steps=5)
 
         opt.train()
-        x = torch.randn(2, 32)
+        x = torch.randn(2, 32, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -445,7 +687,7 @@ class TestStep:
 
         opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=5)
         opt.train()
-        x = torch.randn(2, 32)
+        x = torch.randn(2, 32, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -467,7 +709,7 @@ class TestStep:
             assert "z" not in opt.state[p]
 
         opt.train()
-        x = torch.randn(2, 32)
+        x = torch.randn(2, 32, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -485,7 +727,7 @@ class TestStep:
 
         for i in range(5):
             assert opt.param_groups[0]["k"] == i
-            x = torch.randn(2, 32)
+            x = torch.randn(2, 32, device=DEVICE)
             loss = model(x).sum()
             loss.backward()
             opt.step()
@@ -505,7 +747,7 @@ class TestStep:
 
         for step in range(15):
             t = step + 1
-            x = torch.randn(2, 32)
+            x = torch.randn(2, 32, device=DEVICE)
             loss = model(x).sum()
             loss.backward()
             opt.step()
@@ -601,7 +843,7 @@ class TestWeightDecay:
         opt.train()
 
         # Record z norms before step
-        x = torch.randn(2, 32)
+        x = torch.randn(2, 32, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -640,33 +882,33 @@ class TestNewtonSchulzComputeDtype:
 
     def test_default_compute_dtype_is_bf16(self):
         """Default compute_dtype should be bfloat16."""
-        G = torch.randn(16, 32, dtype=torch.float32)
+        G = torch.randn(16, 32, dtype=torch.float32, device=DEVICE)
         P = zeropower_via_newtonschulz5(G)
         # The iteration runs in bf16 internally, but output dtype matches input
         assert P.shape == G.shape
 
     def test_fp32_compute_dtype(self):
         """Passing compute_dtype=fp32 should produce results in fp32."""
-        G = torch.randn(16, 32, dtype=torch.float32)
+        G = torch.randn(16, 32, dtype=torch.float32, device=DEVICE)
         P = zeropower_via_newtonschulz5(G, compute_dtype=torch.float32)
         assert P.shape == G.shape
 
     def test_fp16_input_with_bf16_compute(self):
         """fp16 input with bf16 compute_dtype should work."""
-        G = torch.randn(16, 32, dtype=torch.float16)
+        G = torch.randn(16, 32, dtype=torch.float16, device=DEVICE)
         P = zeropower_via_newtonschulz5(G, compute_dtype=torch.bfloat16)
         assert P.shape == G.shape
 
     def test_fp16_input_with_fp32_compute(self):
         """fp16 input with fp32 compute_dtype should work (recommended for fp16)."""
-        G = torch.randn(16, 32, dtype=torch.float16)
+        G = torch.randn(16, 32, dtype=torch.float16, device=DEVICE)
         P = zeropower_via_newtonschulz5(G, compute_dtype=torch.float32)
         assert P.shape == G.shape
 
     def test_compute_dtype_affects_result(self):
         """Different compute_dtypes should produce different (but valid) results."""
         torch.manual_seed(42)
-        G = torch.randn(16, 32, dtype=torch.float32)
+        G = torch.randn(16, 32, dtype=torch.float32, device=DEVICE)
         P_bf16 = zeropower_via_newtonschulz5(G, compute_dtype=torch.bfloat16)
         P_fp32 = zeropower_via_newtonschulz5(G, compute_dtype=torch.float32)
         # Results should differ due to precision differences
@@ -686,8 +928,8 @@ class TestCopyStochasticImport:
 
     def test_copy_stochastic_basic(self):
         """copy_stochastic_ should copy fp32 source to bf16 target."""
-        source = torch.randn(8, 16, dtype=torch.float32)
-        target = torch.zeros(8, 16, dtype=torch.bfloat16)
+        source = torch.randn(8, 16, dtype=torch.float32, device=DEVICE)
+        target = torch.zeros(8, 16, dtype=torch.bfloat16, device=DEVICE)
         copy_stochastic_(target, source)
         # After stochastic copy, target should not be all zeros
         assert not torch.all(target == 0)
@@ -709,7 +951,7 @@ class TestHalfPrecisionEvalTrain:
         opt = _make_amuse_for_model(model, use_muon=False, warmup_steps=5)
 
         opt.train()
-        x = torch.randn(2, 32, dtype=dtype)
+        x = torch.randn(2, 32, dtype=dtype, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -732,7 +974,7 @@ class TestHalfPrecisionEvalTrain:
         opt = _make_amuse_for_model(model, use_muon=False, warmup_steps=5)
 
         opt.train()
-        x = torch.randn(2, 32, dtype=dtype)
+        x = torch.randn(2, 32, dtype=dtype, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -757,7 +999,7 @@ class TestHalfPrecisionEvalTrain:
         opt = _make_amuse_for_model(model, use_muon=False, warmup_steps=5)
 
         opt.train()
-        x = torch.randn(2, 32, dtype=dtype)
+        x = torch.randn(2, 32, dtype=dtype, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -800,7 +1042,7 @@ class TestHalfPrecisionMuonStep:
 
         opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=5)
         opt.train()
-        x = torch.randn(2, 32, dtype=dtype)
+        x = torch.randn(2, 32, dtype=dtype, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -819,7 +1061,7 @@ class TestHalfPrecisionMuonStep:
         opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=5)
 
         opt.train()
-        x = torch.randn(2, 32, dtype=dtype)
+        x = torch.randn(2, 32, dtype=dtype, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -875,7 +1117,7 @@ class TestHalfPrecisionAdamWStep:
         opt = _make_amuse_for_model(model, use_muon=False, warmup_steps=5)
 
         opt.train()
-        x = torch.randn(2, 32, dtype=dtype)
+        x = torch.randn(2, 32, dtype=dtype, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -931,7 +1173,7 @@ class TestHalfPrecisionMixed:
         opt = _make_amuse_mixed(model, warmup_steps=5)
 
         opt.train()
-        x = torch.randn(2, 32, dtype=dtype)
+        x = torch.randn(2, 32, dtype=dtype, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -961,7 +1203,7 @@ class TestFP16NewtonSchulzFP32:
         opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
 
         opt.train()
-        x = torch.randn(2, 32, dtype=torch.float16)
+        x = torch.randn(2, 32, dtype=torch.float16, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -982,7 +1224,7 @@ class TestFP16NewtonSchulzFP32:
         opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
 
         opt.train()
-        x = torch.randn(2, 32, dtype=torch.bfloat16)
+        x = torch.randn(2, 32, dtype=torch.bfloat16, device=DEVICE)
         loss = model(x).sum()
         loss.backward()
         opt.step()
@@ -1005,7 +1247,7 @@ class TestStochasticRounding:
         from simple truncation for values that don't round exactly."""
         torch.manual_seed(123)
         # Create a large fp32 tensor with values that don't round exactly in bf16
-        source = torch.randn(1000, 1000, dtype=torch.float32) * 0.01
+        source = torch.randn(1000, 1000, dtype=torch.float32, device=DEVICE) * 0.01
 
         # Truncation (direct copy)
         target_trunc = torch.zeros_like(source, dtype=torch.bfloat16)
@@ -1028,4 +1270,403 @@ class TestStochasticRounding:
         assert stoch_error < trunc_error * 2.0, (
             f"Stochastic rounding error ({stoch_error:.6f}) should be "
             f"comparable to truncation error ({trunc_error:.6f})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: _lerp_to_z workspace caching
+# ---------------------------------------------------------------------------
+
+class TestLerpToZWorkspaceCaching:
+    """Tests verifying _lerp_to_z uses cached fp32 workspaces."""
+
+    def test_lerp_to_z_uses_fp32_workspace_bf16(self):
+        """_lerp_to_z on a bf16 param should create and reuse fp32 workspaces."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.bfloat16)
+        opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
+
+        opt.train()
+        x = torch.randn(2, 32, dtype=torch.bfloat16, device=DEVICE)
+        loss = model(x).sum()
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+
+        for p in model.parameters():
+            state = opt.state[p]
+            z = state["z"]
+
+            # Call _lerp_to_z directly — should use cached workspaces
+            opt._lerp_to_z(p, z, 0.5, state)
+
+            # Workspace keys should now exist in state
+            assert "_ws_p" in state, "_ws_p workspace not created"
+            assert "_ws_z" in state, "_ws_z workspace not created"
+            # Workspaces should be fp32
+            assert state["_ws_p"].dtype == torch.float32
+            assert state["_ws_z"].dtype == torch.float32
+            # Workspaces should match param shape
+            assert state["_ws_p"].shape == p.shape
+            assert state["_ws_z"].shape == z.shape
+
+    def test_lerp_to_z_uses_fp32_workspace_fp16(self):
+        """_lerp_to_z on a fp16 param should create and reuse fp32 workspaces."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.float16)
+        opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
+
+        opt.train()
+        x = torch.randn(2, 32, dtype=torch.float16, device=DEVICE)
+        loss = model(x).sum()
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+
+        for p in model.parameters():
+            state = opt.state[p]
+            z = state["z"]
+            opt._lerp_to_z(p, z, 0.3, state)
+            assert "_ws_p" in state
+            assert "_ws_z" in state
+
+    def test_lerp_to_z_fp32_params_no_workspace(self):
+        """_lerp_to_z on fp32 params should lerp directly (no workspace needed)."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.float32)
+        opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
+
+        opt.train()
+        # Run 2 steps so ckp1 < 1.0 and p ≠ z (step 1 always gives ckp1=1.0 → p=z)
+        for _ in range(2):
+            x = torch.randn(2, 32, dtype=torch.float32, device=DEVICE)
+            loss = model(x).sum()
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+
+        with torch.no_grad():
+            for p in model.parameters():
+                state = opt.state[p]
+                z = state["z"]
+                p_before = p.clone()
+                opt._lerp_to_z(p, z, 0.5, state)
+                # fp32 path should NOT create workspace keys
+                assert "_ws_p" not in state
+                # But p should have changed
+                assert not torch.equal(p_before, p)
+
+    def test_lerp_to_z_workspace_reused_across_calls(self):
+        """Repeated _lerp_to_z calls should reuse the same workspace tensor."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.bfloat16)
+        opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
+
+        opt.train()
+        x = torch.randn(2, 32, dtype=torch.bfloat16, device=DEVICE)
+        loss = model(x).sum()
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+
+        for p in model.parameters():
+            state = opt.state[p]
+            z = state["z"]
+
+            # First call creates workspace
+            opt._lerp_to_z(p, z, 0.3, state)
+            ws_p_id = state["_ws_p"].data_ptr()
+
+            # Second call should reuse same workspace
+            opt._lerp_to_z(p, z, 0.7, state)
+            assert state["_ws_p"].data_ptr() == ws_p_id, (
+                "Workspace tensor was reallocated instead of reused"
+            )
+
+    def test_lerp_to_z_no_nan_bf16(self):
+        """_lerp_to_z should not produce NaN in bf16 params."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.bfloat16)
+        opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
+
+        opt.train()
+        x = torch.randn(2, 32, dtype=torch.bfloat16, device=DEVICE)
+        loss = model(x).sum()
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+
+        for p in model.parameters():
+            state = opt.state[p]
+            z = state["z"]
+            opt._lerp_to_z(p, z, 0.5, state)
+            assert not torch.isnan(p).any(), "NaN after _lerp_to_z"
+            assert not torch.isinf(p).any(), "Inf after _lerp_to_z"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Batch eval/train with _foreach_lerp_
+# ---------------------------------------------------------------------------
+
+class TestBatchEvalTrainForeach:
+    """Tests verifying eval()/train() use batched _foreach_lerp_."""
+
+    def test_batch_eval_fp32_params_change(self):
+        """eval() on fp32 model should change params (y -> x conversion)."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.float32)
+        opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
+
+        opt.train()
+        # Run 2 steps so ckp1 < 1.0 and p ≠ z (step 1 always gives ckp1=1.0 → p=z)
+        for _ in range(2):
+            x = torch.randn(2, 32, dtype=torch.float32, device=DEVICE)
+            loss = model(x).sum()
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+
+        params_before_eval = [p.clone() for p in model.parameters()]
+        opt.eval()
+
+        changed = any(
+            not torch.allclose(pb, p)
+            for pb, p in zip(params_before_eval, model.parameters())
+        )
+        assert changed, "eval() should change params (y -> x conversion)"
+
+    def test_batch_train_fp32_params_change(self):
+        """train() on fp32 model should change params (x -> y conversion)."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.float32)
+        opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
+
+        opt.train()
+        # Run 2 steps so ckp1 < 1.0 and p ≠ z (step 1 always gives ckp1=1.0 → p=z)
+        for _ in range(2):
+            x = torch.randn(2, 32, dtype=torch.float32, device=DEVICE)
+            loss = model(x).sum()
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+
+        opt.eval()
+        params_after_eval = [p.clone() for p in model.parameters()]
+        opt.train()
+
+        changed = any(
+            not torch.allclose(pe, p)
+            for pe, p in zip(params_after_eval, model.parameters())
+        )
+        assert changed, "train() should change params (x -> y conversion)"
+
+    def test_batch_eval_train_roundtrip_fp32(self):
+        """eval -> train round-trip on fp32 should preserve params."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.float32)
+        opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
+
+        opt.train()
+        x = torch.randn(2, 32, dtype=torch.float32, device=DEVICE)
+        loss = model(x).sum()
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+
+        params_after_step = [p.clone() for p in model.parameters()]
+        opt.eval()
+        opt.train()
+
+        for p_orig, p_restored in zip(params_after_step, model.parameters()):
+            assert torch.allclose(p_orig, p_restored, atol=1e-6), (
+                "eval -> train round-trip changed fp32 params"
+            )
+
+    def test_batch_eval_train_roundtrip_bf16(self):
+        """eval -> train round-trip on bf16 should preserve params approximately."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.bfloat16)
+        opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
+
+        opt.train()
+        x = torch.randn(2, 32, dtype=torch.bfloat16, device=DEVICE)
+        loss = model(x).sum()
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+
+        params_after_step = [p.clone() for p in model.parameters()]
+        opt.eval()
+        opt.train()
+
+        for p_orig, p_restored in zip(params_after_step, model.parameters()):
+            # bf16 stochastic rounding introduces small noise
+            assert torch.allclose(
+                p_orig.float(), p_restored.float(), atol=0.05
+            ), "eval -> train round-trip changed bf16 params beyond tolerance"
+
+    def test_batch_eval_bf16_no_nan(self):
+        """eval() on bf16 model should not produce NaN."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.bfloat16)
+        opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
+
+        opt.train()
+        x = torch.randn(2, 32, dtype=torch.bfloat16, device=DEVICE)
+        loss = model(x).sum()
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+
+        opt.eval()
+        for p in model.parameters():
+            assert not torch.isnan(p).any(), "NaN after eval() on bf16"
+            assert not torch.isinf(p).any(), "Inf after eval() on bf16"
+
+    def test_batch_eval_adamw_roundtrip_fp32(self):
+        """eval -> train round-trip with AdamW fallback should preserve params."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.float32)
+        opt = _make_amuse_for_model(model, use_muon=False, warmup_steps=3)
+
+        opt.train()
+        x = torch.randn(2, 32, dtype=torch.float32, device=DEVICE)
+        loss = model(x).sum()
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+
+        params_after_step = [p.clone() for p in model.parameters()]
+        opt.eval()
+        opt.train()
+
+        for p_orig, p_restored in zip(params_after_step, model.parameters()):
+            assert torch.allclose(p_orig, p_restored, atol=1e-6), (
+                "eval -> train round-trip changed fp32 AdamW params"
+            )
+
+    def test_batch_eval_mixed_precision_groups(self):
+        """eval -> train should work with a group containing multiple bf16 params."""
+        torch.manual_seed(42)
+        # All layers in the same reduced precision to avoid dtype mismatch
+        model = torch.nn.Sequential(
+            torch.nn.Linear(32, 64, bias=False, dtype=torch.bfloat16, device=DEVICE),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, 16, bias=False, dtype=torch.bfloat16, device=DEVICE),
+        )
+        muon_params = [p for p in model.parameters()]
+        opt = AMUSE(
+            [{"params": muon_params, "use_muon": True}],
+            warmup_steps=3,
+        )
+
+        opt.train()
+        x = torch.randn(2, 32, dtype=torch.bfloat16, device=DEVICE)
+        loss = model(x).sum()
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+
+        params_after_step = [p.clone() for p in model.parameters()]
+        opt.eval()
+        opt.train()
+
+        for p_orig, p_restored in zip(params_after_step, model.parameters()):
+            assert not torch.isnan(p_restored).any(), "NaN after round-trip"
+            assert not torch.isinf(p_restored).any(), "Inf after round-trip"
+
+    def test_batch_lerp_multiple_params_foreach(self):
+        """_batch_lerp_to_z should handle multiple parameters in one group."""
+        torch.manual_seed(42)
+        model = _make_model_mixed(dtype=torch.float32)
+        muon_params = [p for p in model.parameters() if p.ndim >= 2]
+        opt = AMUSE(
+            [{"params": muon_params, "use_muon": True}],
+            warmup_steps=3,
+        )
+
+        opt.train()
+        # Run 2 steps so ckp1 < 1.0 and p ≠ z (step 1 always gives ckp1=1.0 → p=z)
+        for _ in range(2):
+            x = torch.randn(2, 32, dtype=torch.float32, device=DEVICE)
+            loss = model(x).sum()
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+
+        # Verify _batch_lerp_to_z works with the group containing multiple params
+        with torch.no_grad():
+            group = opt.param_groups[0]
+            params_before = [p.clone() for p in group["params"]]
+            opt._batch_lerp_to_z(group, 0.5)
+
+            changed = any(
+                not torch.allclose(pb, p)
+                for pb, p in zip(params_before, group["params"])
+            )
+            assert changed, "_batch_lerp_to_z should change params"
+
+    def test_batch_lerp_no_z_state_skipped(self):
+        """_batch_lerp_to_z should skip params without z state."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.float32)
+        opt = _make_amuse_for_model(model, use_muon=True, warmup_steps=3)
+
+        # Don't run step() — no z state should exist yet
+        group = opt.param_groups[0]
+        # Should not raise even though no z state exists
+        opt._batch_lerp_to_z(group, 0.5)
+
+    def test_batch_lerp_convergence_after_mode_switches(self):
+        """Training should converge even with frequent eval/train switches."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.float32)
+        opt = _make_amuse_for_model(model, use_muon=False, warmup_steps=3)
+
+        torch.manual_seed(999)
+        opt.train()
+        losses = []
+        for i in range(15):
+            x = torch.randn(4, 32, dtype=torch.float32, device=DEVICE)
+            loss = model(x).sum()
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+            losses.append(loss.item())
+            # Switch modes every 3 steps
+            if i % 3 == 2:
+                opt.eval()
+                opt.train()
+
+        # Loss should trend downward despite mode switches
+        early_avg = sum(losses[:5]) / 5
+        late_avg = sum(losses[-5:]) / 5
+        assert late_avg < early_avg, (
+            f"Loss should decrease: early={early_avg:.4f}, late={late_avg:.4f}"
+        )
+
+    def test_batch_eval_train_convergence_bf16(self):
+        """Training with bf16 and frequent mode switches should converge."""
+        torch.manual_seed(42)
+        model = _make_model_2d_only(dtype=torch.bfloat16)
+        opt = _make_amuse_for_model(model, use_muon=False, warmup_steps=3)
+
+        torch.manual_seed(999)
+        opt.train()
+        losses = []
+        for i in range(15):
+            x = torch.randn(4, 32, dtype=torch.bfloat16, device=DEVICE)
+            loss = model(x).float().sum()
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+            losses.append(loss.item())
+            if i % 3 == 2:
+                opt.eval()
+                opt.train()
+
+        early_avg = sum(losses[:5]) / 5
+        late_avg = sum(losses[-5:]) / 5
+        assert late_avg < early_avg, (
+            f"bf16 loss should decrease: early={early_avg:.4f}, late={late_avg:.4f}"
         )
