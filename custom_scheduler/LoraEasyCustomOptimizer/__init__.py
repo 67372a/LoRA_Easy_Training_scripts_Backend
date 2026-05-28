@@ -62,6 +62,9 @@ from LoraEasyCustomOptimizer.nor_muon_schedulefree import NorMuonScheduleFree
 from LoraEasyCustomOptimizer.ocgoptv2 import OCGOptV2
 from LoraEasyCustomOptimizer.adamw_schedulefree_plus import AdamWScheduleFreePlus
 from LoraEasyCustomOptimizer.amuse import AMUSE
+from soda import SODA
+from moda import MODA
+from soda_wrapper import SODAWrapper
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
@@ -120,6 +123,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     LPFAdamW,
     LaProp,
     Lion_adv,
+    MODA,
     MomentusCaution,
     Mythical,
     OAGOpt,
@@ -147,6 +151,8 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     SimplifiedAdEMAMixExM,
     SingState,
     SNOO_ASGD,
+    SODA,
+    SODAWrapper,
     StableSPAM,
     TALON,
     VSGD,
