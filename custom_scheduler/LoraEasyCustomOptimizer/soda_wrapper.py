@@ -1,6 +1,6 @@
 import torch
 import torch.optim
-import logging
+from .utils import (clean_dict_params)
 
 
 class SODAWrapper(torch.optim.Optimizer):
@@ -8,45 +8,41 @@ class SODAWrapper(torch.optim.Optimizer):
     OBS: Do not use weight decay for the underlying optimizer.
     """
     def __init__(self, 
-                 base : torch.optim.Optimizer,
+                 base_optimizer : torch.optim.Optimizer,
                  **kwargs,
                  ):
-        
-        # Loop over the keys in the kwargs dictionary
-        for key in kwargs:
-            logging.warning(
-                f"Unrecognized optimizer argument '{key}'. It will be ignored."
-            )
 
-        self.base = base
-        for group in self.base.param_groups:
-            if 'k' not in group:
-                group['k'] = 0
+        clean_kwargs = clean_dict_params(base_optimizer, kwargs, wrapped=True)
+
+        self.base_optimizer = base_optimizer(self.param_groups, **clean_kwargs)
+        for group in self.base_optimizer.param_groups:
+            if 'soda_step' not in group:
+                group['soda_step'] = 0
 
     def add_param_group(self, param_group):
-        if 'k' not in param_group:
-            param_group['k'] = 0
-        return self.base.add_param_group(param_group)
+        if 'soda_step' not in param_group:
+            param_group['soda_step'] = 0
+        return self.base_optimizer.add_param_group(param_group)
 
     def load_state_dict(self, state_dict):
-        self.base.load_state_dict(state_dict)
-        for group in self.base.param_groups:
-            if 'k' not in group:
-                group['k'] = 0
+        self.base_optimizer.load_state_dict(state_dict)
+        for group in self.base_optimizer.param_groups:
+            if 'soda_step' not in group:
+                group['soda_step'] = 0
 
     def state_dict(self):
-        return self.base.state_dict()
+        return self.base_optimizer.state_dict()
         
     def zero_grad(self, set_to_none=True):
-        return self.base.zero_grad(set_to_none)
+        return self.base_optimizer.zero_grad(set_to_none)
 
     @property
     def param_groups(self):
-        return self.base.param_groups
+        return self.base_optimizer.param_groups
 
     @property
     def state(self):
-        return self.base.state
+        return self.base_optimizer.state
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -63,25 +59,25 @@ class SODAWrapper(torch.optim.Optimizer):
                     continue
                 prev_map[p] = torch.clone(p, memory_format=torch.preserve_format)
 
-        self.base.step()
+        self.base_optimizer.step()
 
         for group in self.param_groups:
-            k = group['k']
+            soda_step = group['soda_step']
             for p in group['params']:
                 if p not in prev_map:
                     continue
                 state = self.state[p]
                 prev = prev_map[p]
 
-                if 'z0' not in state:
-                    state['z0'] = torch.clone(prev, memory_format=torch.preserve_format)
+                if 'soda_z0' not in state:
+                    state['soda_z0'] = torch.clone(prev, memory_format=torch.preserve_format)
 
-                z = state['z0']
-                z = z.add((k+2) * (p - prev))
+                soda_z = state['soda_z0']
+                soda_z = soda_z.add((soda_step+2) * (p - prev))
                 
-                x = prev * (1 - 1/(k+2)) + z * (1/(k+2))
+                x = prev * (1 - 1/(soda_step+2)) + soda_z * (1/(soda_step+2))
                 p.copy_(x)
             
-            group['k'] = k+1
+            group['soda_step'] = soda_step+1
 
         return loss
