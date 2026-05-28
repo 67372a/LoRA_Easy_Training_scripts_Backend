@@ -62,9 +62,9 @@ from LoraEasyCustomOptimizer.nor_muon_schedulefree import NorMuonScheduleFree
 from LoraEasyCustomOptimizer.ocgoptv2 import OCGOptV2
 from LoraEasyCustomOptimizer.adamw_schedulefree_plus import AdamWScheduleFreePlus
 from LoraEasyCustomOptimizer.amuse import AMUSE
-from soda import SODA
-from moda import MODA
-from soda_wrapper import SODAWrapper
+from LoraEasyCustomOptimizer.soda import SODA
+from LoraEasyCustomOptimizer.moda import MODA
+from LoraEasyCustomOptimizer.soda_wrapper import SODAWrapper
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,

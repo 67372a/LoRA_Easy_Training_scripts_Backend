@@ -2,10 +2,6 @@ import math
 import torch
 import logging
 
-
-__all__ = ["MODA"]
-
-
 def _default_primal_momentum1(k):
     return 1 / (k + 2)
 
