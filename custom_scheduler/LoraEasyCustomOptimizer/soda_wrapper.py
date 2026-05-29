@@ -1,20 +1,28 @@
 import torch
 import torch.optim
 from .utils import (clean_dict_params)
+from typing import Union, Iterable, Dict, Any
+from typing_extensions import TypeAlias
+from .utils import copy_stochastic_
 
+try:
+    from torch.optim.optimizer import ParamsT
+except ImportError:
+    ParamsT: TypeAlias = Union[Iterable[torch.Tensor], Iterable[Dict[str, Any]]]
 
 class SODAWrapper(torch.optim.Optimizer):
     r"""
     OBS: Do not use weight decay for the underlying optimizer.
     """
     def __init__(self, 
+                 params: ParamsT,
                  base_optimizer : torch.optim.Optimizer,
                  **kwargs,
                  ):
-
+        
         clean_kwargs = clean_dict_params(base_optimizer, kwargs, wrapped=True)
+        self.base_optimizer = base_optimizer(params, **clean_kwargs)
 
-        self.base_optimizer = base_optimizer(self.param_groups, **clean_kwargs)
         for group in self.base_optimizer.param_groups:
             if 'soda_step' not in group:
                 group['soda_step'] = 0
@@ -67,16 +75,19 @@ class SODAWrapper(torch.optim.Optimizer):
                 if p not in prev_map:
                     continue
                 state = self.state[p]
-                prev = prev_map[p]
+                prev = prev_map[p].to(dtype=torch.float32)
 
                 if 'soda_z0' not in state:
                     state['soda_z0'] = torch.clone(prev, memory_format=torch.preserve_format)
 
-                soda_z = state['soda_z0']
+                soda_z = state['soda_z0'].to(dtype=torch.float32)
                 soda_z = soda_z.add((soda_step+2) * (p - prev))
                 
                 x = prev * (1 - 1/(soda_step+2)) + soda_z * (1/(soda_step+2))
-                p.copy_(x)
+                if p.dtype in {torch.bfloat16}:
+                    copy_stochastic_(p, x)
+                else:
+                    p.copy_(x)
             
             group['soda_step'] = soda_step+1
 
