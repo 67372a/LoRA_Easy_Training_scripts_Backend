@@ -5,19 +5,14 @@ import subprocess
 import os
 import shutil
 
+from install_uv import ensure_uv, create_venv, uv_pip_install
+
 PLATFORM = "windows" if sys.platform == "win32" else "linux" if sys.platform == "linux" else ""
 
 import logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-def check_version_and_platform() -> bool:
-    version = sys.version_info
-    if not (False if version.major != 3 and version.minor < 11 else sys.platform in ["win32", "linux"]):
-        logger.error("ERROR: you have too old of a python version, please use python 3.11")
-        return False
-    return True
 
 def check_git_install() -> bool:
     try:
@@ -70,55 +65,92 @@ def setup_accelerate(platform: str) -> None:
     shutil.move("default_config.yaml", str(path.resolve()))
 
 
-def setup_venv(venv_pip):
-    if PLATFORM == "windows":
-        python = Path("venv/Scripts/python.exe")
+# flash-attention wheel URLs for each platform/python combination
+FLASH_ATTN_WHEELS = {
+    ("win32", 11): "https://github.com/sdbds/flash-attention-for-windows/releases/download/2.8.0.post2/flash_attn-2.8.0.post2+cu128torch2.7.1cxx11abiFALSEfullbackward-cp311-cp311-win_amd64.whl",
+    ("linux", 10): "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp310-cp310-linux_x86_64.whl",
+    ("linux", 11): "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp311-cp311-linux_x86_64.whl",
+    ("linux", 12): "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl",
+    ("linux", 13): "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp313-cp313-linux_x86_64.whl",
+}
+
+
+def _install_flash_attn(uv: str, venv_path: str = "venv") -> None:
+    """Install flash-attention wheel for the current platform and Python version.
+
+    This is done explicitly before requirements.txt to avoid uv reinstalling
+    flash-attn due to version normalization differences (FALSE vs false in
+    local version identifiers).
+    """
+    python_minor = sys.version_info.minor
+    platform_key = "win32" if sys.platform == "win32" else "linux"
+    wheel_url = FLASH_ATTN_WHEELS.get((platform_key, python_minor))
+
+    if wheel_url:
+        logger.info(f"Installing flash-attn for {platform_key} Python 3.{python_minor}...")
+        uv_pip_install(uv, "--no-deps", wheel_url, venv_path=venv_path)
     else:
-        python = Path("venv/bin/python")
+        logger.info(f"No flash-attn wheel for {platform_key} Python 3.{python_minor}, skipping")
 
-    subprocess.check_call(f"{python} -m pip install --upgrade pip", shell=PLATFORM == "linux")
-    subprocess.check_call(
-        f"{venv_pip} install -U typing-extensions==4.15.0",
-        shell=PLATFORM == "linux",
-    )
 
-    subprocess.check_call(
-        f"{venv_pip} install -U torch~=2.7.1 torchvision~=0.22.1 --index-url https://download.pytorch.org/whl/cu128",
-        shell=PLATFORM == "linux",
-    )
+def setup_venv(uv: str, venv_path: str = "venv"):
+    """Install all backend + sd_scripts packages into the venv using uv."""
+    uv_pip_install(uv, "-U", "typing-extensions==4.15.0", venv_path=venv_path)
 
-    subprocess.check_call(
-        f"{venv_pip} install -U --force-reinstall --no-deps git+https://github.com/67372a/RamTorch",
-        shell=PLATFORM == "linux",
+    uv_pip_install(
+        uv,
+        "-U", "torch~=2.7.1", "torchvision~=0.22.1", "numpy~=2.2.6",
+        "--index-url", "https://download.pytorch.org/whl/cu128",
+        venv_path=venv_path,
     )
 
-    subprocess.check_call(
-        f"{venv_pip} install -U --force-reinstall --no-deps git+https://github.com/67372a/customized-optimizers",
-        shell=PLATFORM == "linux",
-    )
-        
-    subprocess.check_call(
-        f"{venv_pip} install -U --no-deps xformers==0.0.31.post1 --index-url https://download.pytorch.org/whl/cu128",
-        shell=PLATFORM == "linux",
-    )
-    subprocess.check_call(
-        f"{venv_pip} install -U --no-deps torchao~=0.13.0 --extra-index-url https://download.pytorch.org/whl/cu128",
-        shell=PLATFORM == "linux",
-    )
-    
-    subprocess.check_call(
-        f"{venv_pip} install -U --force-reinstall --no-deps git+https://github.com/67372a/LyCORIS@dev",
-        shell=PLATFORM == "linux",
+    uv_pip_install(
+        uv,
+        "-U", "--force-reinstall", "--no-deps",
+        "git+https://github.com/67372a/RamTorch",
+        venv_path=venv_path,
     )
 
-    subprocess.check_call(f"{venv_pip} install -U -r requirements.txt", shell=PLATFORM == "linux")
-    subprocess.check_call(f"{venv_pip} install -U -e ../custom_scheduler/.", shell=PLATFORM == "linux")
-    subprocess.check_call(f"{venv_pip} install -U -r ../requirements.txt", shell=PLATFORM == "linux")
+    uv_pip_install(
+        uv,
+        "-U", "--force-reinstall", "--no-deps",
+        "git+https://github.com/67372a/customized-optimizers",
+        venv_path=venv_path,
+    )
+
+    uv_pip_install(
+        uv,
+        "-U", "--no-deps", "xformers==0.0.31.post1",
+        "--index-url", "https://download.pytorch.org/whl/cu128",
+        venv_path=venv_path,
+    )
+
+    uv_pip_install(
+        uv,
+        "-U", "--no-deps", "torchao~=0.13.0",
+        "--extra-index-url", "https://download.pytorch.org/whl/cu128",
+        venv_path=venv_path,
+    )
+
+    uv_pip_install(
+        uv,
+        "-U", "--force-reinstall", "--no-deps",
+        "git+https://github.com/67372a/LyCORIS@dev",
+        venv_path=venv_path,
+    )
+
+    # Pre-install flash-attn explicitly to avoid uv version normalization issues
+    # (uv normalizes FALSE -> false in local version identifiers, causing reinstall loops)
+    _install_flash_attn(uv, venv_path)
+
+    uv_pip_install(uv, "-r", "requirements.txt", venv_path=venv_path)
+    uv_pip_install(uv, "-e", "../custom_scheduler/.", venv_path=venv_path)
+    uv_pip_install(uv, "-r", "../requirements.txt", venv_path=venv_path)
 
 
 # colab only
-def setup_colab(venv_pip):
-    setup_venv(venv_pip)
+def setup_colab(uv: str, venv_path: str = "venv"):
+    setup_venv(uv, venv_path)
     setup_accelerate("linux")
 
 
@@ -167,7 +199,7 @@ def setup_config(colab: bool = False, local: bool = False) -> None:
 
 
 def main():
-    if not check_version_and_platform() or not check_git_install():
+    if not check_git_install():
         quit()
 
     subprocess.check_call("git submodule update --init --recursive", shell=PLATFORM == "linux")
@@ -178,22 +210,17 @@ def main():
     )
 
     os.chdir("sd_scripts")
-    if PLATFORM == "windows":
-        pip = Path("venv/Scripts/pip.exe")
-        python = Path("venv/Scripts/python.exe")
-    else:
-        pip = Path("venv/bin/pip")
-        python = Path("venv/bin/python")
 
     logger.info("creating venv and installing requirements")
-    subprocess.check_call(f"{sys.executable} -m venv venv", shell=PLATFORM == "linux")
+    uv = ensure_uv()
+    venv_path = create_venv(uv, "venv", "3.11")
 
     if len(sys.argv) > 1 and sys.argv[1] == "colab":
-        setup_colab(pip)
+        setup_colab(uv, venv_path)
         logger.info("completed installing")
         quit()
 
-    setup_venv(pip)
+    setup_venv(uv, venv_path)
     setup_accelerate(PLATFORM)
 
     logger.info("Completed installing, you can run the server via the run.bat or run.sh files")
