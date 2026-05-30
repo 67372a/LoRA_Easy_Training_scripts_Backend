@@ -1495,3 +1495,334 @@ class TestOCGOptV2ForeachWeightDecay:
         assert norm_wd < norm_no_wd, (
             f"Foreach weight decay did not reduce norms: no_wd={norm_no_wd}, wd={norm_wd}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test: OCGOptV2 cautious weight decay (all three paths)
+# ---------------------------------------------------------------------------
+
+class TestOCGOptV2CautiousWeightDecay:
+    """Verify cautious weight decay masks WD where grad * param < 0.
+
+    Cautious WD should:
+    - Still reduce parameter norms vs no WD (less aggressively than standard WD)
+    - Produce different results from standard WD
+    - Be a no-op when weight_decay=0
+    - Work across all three step paths (native, foreach, compiled)
+    """
+
+    # ---- Native path ---------------------------------------------------
+
+    def test_native_cautious_wd_reduces_norms_less_than_standard(self):
+        """Cautious WD should reduce norms less than standard WD because
+        it skips decay on some parameters."""
+        sizes = [(16, 16)]
+        model_std = _make_model(seed=42, sizes=sizes)
+        model_caut = copy.deepcopy(model_std)
+        opt_std = OCGOptV2(
+            model_std.parameters(), lr=1e-3, weight_decay=0.1,
+            **_NO_COMPILE,
+        )
+        opt_caut = OCGOptV2(
+            model_caut.parameters(), lr=1e-3, weight_decay=0.1,
+            cautious_weight_decay=True, **_NO_COMPILE,
+        )
+
+        torch.manual_seed(999)
+        for _ in range(10):
+            x = torch.randn(4, 16)
+            loss_std = model_std(x).sum()
+            loss_std.backward()
+            opt_std.step()
+            opt_std.zero_grad()
+
+            loss_caut = model_caut(x).sum()
+            loss_caut.backward()
+            opt_caut.step()
+            opt_caut.zero_grad()
+
+        norm_std = sum(p.norm().item() for p in model_std.parameters())
+        norm_caut = sum(p.norm().item() for p in model_caut.parameters())
+        assert norm_caut > norm_std, (
+            f"Cautious WD should reduce norms less than standard WD: "
+            f"cautious={norm_caut:.4f}, standard={norm_std:.4f}"
+        )
+
+    def test_native_cautious_wd_vs_no_wd(self):
+        """Cautious WD should still reduce norms compared to no WD at all."""
+        sizes = [(16, 16)]
+        model_none = _make_model(seed=42, sizes=sizes)
+        model_caut = copy.deepcopy(model_none)
+        opt_none = OCGOptV2(
+            model_none.parameters(), lr=1e-3, weight_decay=0.0,
+            **_NO_COMPILE,
+        )
+        opt_caut = OCGOptV2(
+            model_caut.parameters(), lr=1e-3, weight_decay=0.1,
+            cautious_weight_decay=True, **_NO_COMPILE,
+        )
+
+        torch.manual_seed(999)
+        for _ in range(10):
+            x = torch.randn(4, 16)
+            loss_none = model_none(x).sum()
+            loss_none.backward()
+            opt_none.step()
+            opt_none.zero_grad()
+
+            loss_caut = model_caut(x).sum()
+            loss_caut.backward()
+            opt_caut.step()
+            opt_caut.zero_grad()
+
+        norm_none = sum(p.norm().item() for p in model_none.parameters())
+        norm_caut = sum(p.norm().item() for p in model_caut.parameters())
+        assert norm_caut < norm_none, (
+            f"Cautious WD should still reduce norms vs no WD: "
+            f"cautious={norm_caut:.4f}, no_wd={norm_none:.4f}"
+        )
+
+    def test_native_cautious_wd_produces_different_params(self):
+        """Cautious WD should produce different parameter values than standard WD."""
+        sizes = [(16, 16)]
+        model_std = _make_model(seed=42, sizes=sizes)
+        model_caut = copy.deepcopy(model_std)
+        opt_std = OCGOptV2(
+            model_std.parameters(), lr=1e-3, weight_decay=0.1,
+            **_NO_COMPILE,
+        )
+        opt_caut = OCGOptV2(
+            model_caut.parameters(), lr=1e-3, weight_decay=0.1,
+            cautious_weight_decay=True, **_NO_COMPILE,
+        )
+
+        torch.manual_seed(999)
+        for _ in range(5):
+            x = torch.randn(4, 16)
+            loss_std = model_std(x).sum()
+            loss_std.backward()
+            opt_std.step()
+            opt_std.zero_grad()
+
+            loss_caut = model_caut(x).sum()
+            loss_caut.backward()
+            opt_caut.step()
+            opt_caut.zero_grad()
+
+        diff = _max_param_diff(_snapshot_params(model_std), _snapshot_params(model_caut))
+        assert diff > 1e-6, (
+            f"Cautious WD should produce different params from standard WD: diff={diff}"
+        )
+
+    def test_native_cautious_wd_noop_when_wd_zero(self):
+        """When weight_decay=0, cautious_weight_decay=True should be a no-op."""
+        sizes = [(16, 16)]
+        model_a = _make_model(seed=42, sizes=sizes)
+        model_b = copy.deepcopy(model_a)
+        opt_a = OCGOptV2(
+            model_a.parameters(), lr=1e-3, weight_decay=0.0,
+            **_NO_COMPILE,
+        )
+        opt_b = OCGOptV2(
+            model_b.parameters(), lr=1e-3, weight_decay=0.0,
+            cautious_weight_decay=True, **_NO_COMPILE,
+        )
+
+        torch.manual_seed(999)
+        for _ in range(5):
+            x = torch.randn(4, 16)
+            loss_a = model_a(x).sum()
+            loss_a.backward()
+            opt_a.step()
+            opt_a.zero_grad()
+
+            loss_b = model_b(x).sum()
+            loss_b.backward()
+            opt_b.step()
+            opt_b.zero_grad()
+
+        diff = _max_param_diff(_snapshot_params(model_a), _snapshot_params(model_b))
+        assert diff < 1e-7, (
+            f"Cautious WD with weight_decay=0 should be a no-op: diff={diff}"
+        )
+
+    def test_native_cautious_wd_training_converges(self):
+        """Training should still converge with cautious weight decay."""
+        model = _make_model(dtype=torch.float32)
+        opt = OCGOptV2(
+            model.parameters(), lr=1e-3, weight_decay=0.01,
+            cautious_weight_decay=True, **_NO_COMPILE,
+        )
+        loss_init = _run_steps(model, opt, n_steps=1).item()
+        loss_final = _run_steps(model, opt, n_steps=20).item()
+        assert loss_final < loss_init, (
+            f"Loss did not decrease with cautious WD: init={loss_init:.4f}, final={loss_final:.4f}"
+        )
+
+    # ---- Foreach path --------------------------------------------------
+
+    def test_foreach_cautious_wd_reduces_norms_less_than_standard(self):
+        """Foreach path: cautious WD should reduce norms less than standard WD."""
+        sizes = [(16, 16)]
+        model_std = _make_model(seed=42, sizes=sizes)
+        model_caut = copy.deepcopy(model_std)
+        opt_std = OCGOptV2(
+            model_std.parameters(), lr=1e-3, weight_decay=0.1,
+            foreach=True, **_NO_COMPILE,
+        )
+        opt_caut = OCGOptV2(
+            model_caut.parameters(), lr=1e-3, weight_decay=0.1,
+            cautious_weight_decay=True, foreach=True, **_NO_COMPILE,
+        )
+
+        torch.manual_seed(999)
+        for _ in range(10):
+            x = torch.randn(4, 16)
+            loss_std = model_std(x).sum()
+            loss_std.backward()
+            opt_std.step()
+            opt_std.zero_grad()
+
+            loss_caut = model_caut(x).sum()
+            loss_caut.backward()
+            opt_caut.step()
+            opt_caut.zero_grad()
+
+        norm_std = sum(p.norm().item() for p in model_std.parameters())
+        norm_caut = sum(p.norm().item() for p in model_caut.parameters())
+        assert norm_caut > norm_std, (
+            f"Foreach cautious WD should reduce norms less than standard WD: "
+            f"cautious={norm_caut:.4f}, standard={norm_std:.4f}"
+        )
+
+    def test_foreach_cautious_wd_produces_different_params(self):
+        """Foreach path: cautious WD should produce different params from standard WD."""
+        sizes = [(16, 16)]
+        model_std = _make_model(seed=42, sizes=sizes)
+        model_caut = copy.deepcopy(model_std)
+        opt_std = OCGOptV2(
+            model_std.parameters(), lr=1e-3, weight_decay=0.1,
+            foreach=True, **_NO_COMPILE,
+        )
+        opt_caut = OCGOptV2(
+            model_caut.parameters(), lr=1e-3, weight_decay=0.1,
+            cautious_weight_decay=True, foreach=True, **_NO_COMPILE,
+        )
+
+        torch.manual_seed(999)
+        for _ in range(5):
+            x = torch.randn(4, 16)
+            loss_std = model_std(x).sum()
+            loss_std.backward()
+            opt_std.step()
+            opt_std.zero_grad()
+
+            loss_caut = model_caut(x).sum()
+            loss_caut.backward()
+            opt_caut.step()
+            opt_caut.zero_grad()
+
+        diff = _max_param_diff(_snapshot_params(model_std), _snapshot_params(model_caut))
+        assert diff > 1e-6, (
+            f"Foreach cautious WD should produce different params: diff={diff}"
+        )
+
+    # ---- Compiled path -------------------------------------------------
+
+    def test_compiled_cautious_wd_reduces_norms_less_than_standard(self):
+        """Compiled path: cautious WD should reduce norms less than standard WD."""
+        sizes = [(16, 16)]
+        model_std = _make_model(seed=42, sizes=sizes)
+        model_caut = copy.deepcopy(model_std)
+        opt_std = _make_compiled_step_opt(
+            model_std.parameters(), lr=1e-3, weight_decay=0.1,
+            **_NO_COMPILE,
+        )
+        opt_caut = _make_compiled_step_opt(
+            model_caut.parameters(), lr=1e-3, weight_decay=0.1,
+            cautious_weight_decay=True, **_NO_COMPILE,
+        )
+
+        torch.manual_seed(999)
+        for _ in range(10):
+            x = torch.randn(4, 16)
+            loss_std = model_std(x).sum()
+            loss_std.backward()
+            opt_std.step()
+            opt_std.zero_grad()
+
+            loss_caut = model_caut(x).sum()
+            loss_caut.backward()
+            opt_caut.step()
+            opt_caut.zero_grad()
+
+        norm_std = sum(p.norm().item() for p in model_std.parameters())
+        norm_caut = sum(p.norm().item() for p in model_caut.parameters())
+        assert norm_caut > norm_std, (
+            f"Compiled cautious WD should reduce norms less than standard WD: "
+            f"cautious={norm_caut:.4f}, standard={norm_std:.4f}"
+        )
+
+    def test_compiled_cautious_wd_produces_different_params(self):
+        """Compiled path: cautious WD should produce different params from standard WD."""
+        sizes = [(16, 16)]
+        model_std = _make_model(seed=42, sizes=sizes)
+        model_caut = copy.deepcopy(model_std)
+        opt_std = _make_compiled_step_opt(
+            model_std.parameters(), lr=1e-3, weight_decay=0.1,
+            **_NO_COMPILE,
+        )
+        opt_caut = _make_compiled_step_opt(
+            model_caut.parameters(), lr=1e-3, weight_decay=0.1,
+            cautious_weight_decay=True, **_NO_COMPILE,
+        )
+
+        torch.manual_seed(999)
+        for _ in range(5):
+            x = torch.randn(4, 16)
+            loss_std = model_std(x).sum()
+            loss_std.backward()
+            opt_std.step()
+            opt_std.zero_grad()
+
+            loss_caut = model_caut(x).sum()
+            loss_caut.backward()
+            opt_caut.step()
+            opt_caut.zero_grad()
+
+        diff = _max_param_diff(_snapshot_params(model_std), _snapshot_params(model_caut))
+        assert diff > 1e-6, (
+            f"Compiled cautious WD should produce different params: diff={diff}"
+        )
+
+    def test_compiled_cautious_wd_noop_when_wd_zero(self):
+        """Compiled path: cautious WD with weight_decay=0 should be a no-op."""
+        sizes = [(16, 16)]
+        model_a = _make_model(seed=42, sizes=sizes)
+        model_b = copy.deepcopy(model_a)
+        opt_a = _make_compiled_step_opt(
+            model_a.parameters(), lr=1e-3, weight_decay=0.0,
+            **_NO_COMPILE,
+        )
+        opt_b = _make_compiled_step_opt(
+            model_b.parameters(), lr=1e-3, weight_decay=0.0,
+            cautious_weight_decay=True, **_NO_COMPILE,
+        )
+
+        torch.manual_seed(999)
+        for _ in range(5):
+            x = torch.randn(4, 16)
+            loss_a = model_a(x).sum()
+            loss_a.backward()
+            opt_a.step()
+            opt_a.zero_grad()
+
+            loss_b = model_b(x).sum()
+            loss_b.backward()
+            opt_b.step()
+            opt_b.zero_grad()
+
+        diff = _max_param_diff(_snapshot_params(model_a), _snapshot_params(model_b))
+        assert diff < 1e-7, (
+            f"Compiled cautious WD with weight_decay=0 should be a no-op: diff={diff}"
+        )

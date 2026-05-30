@@ -141,6 +141,10 @@ class OCGOptV2(Optimizer):
             AdamW-like weight decay, i.e. a L2 penalty (default: 0.0).
         weight_decay_rate (float):
             Decay the multiplier at which rate weight decay is applied, weight_decay * weight_decay_rate**step - Visualization: https://www.desmos.com/calculator/ipgbjovebr - (default: 0.995).
+        cautious_weight_decay (bool):
+            Apply weight decay only where the gradient and parameter agree in sign,
+            preventing weight decay from fighting the gradient direction.
+            Based on Cautious Optimizers — https://arxiv.org/abs/2411.16085 (default: False).
         centralization (float):
             Subtract the full gradient momentum from the current gradient at this ratio (default: 1.0).
         spectral_adaptive (bool):
@@ -189,6 +193,7 @@ class OCGOptV2(Optimizer):
         betas: float = (0.95, 0.9975, 0.9999),
         weight_decay: float = 0.0,
         weight_decay_rate: float = 0.995,
+        cautious_weight_decay: bool = False,
         centralization: float = 1.0,
         spectral_adaptive: bool = True,
         spectral_clip_compile: bool = True,
@@ -238,6 +243,7 @@ class OCGOptV2(Optimizer):
             betas = betas,
             weight_decay = weight_decay,
             weight_decay_rate = weight_decay_rate,
+            cautious_weight_decay = cautious_weight_decay,
             centralization = centralization,
             spectral_adaptive = spectral_adaptive,
             spectral_clip_compile = spectral_clip_compile,
@@ -349,6 +355,7 @@ class OCGOptV2(Optimizer):
         do_input_norm:         bool,          # True when input_norm AND dimcount >= 1
         do_adaptive:           bool,          # True when adaptive is enabled
         do_weight_decay:       bool,          # True when weight_decay != 0
+        do_cautious_wd:        bool,          # True when cautious_weight_decay AND weight_decay != 0
         spectral_adaptive:     bool,          # adaptive spectral clipping flag
         is_scalar:             bool,          # True when dimcount < 1
         is_1d:                 bool,          # True when dimcount == 1
@@ -476,7 +483,11 @@ class OCGOptV2(Optimizer):
 
         # ---- 13. Decoupled weight decay ---------------------------------
         if do_weight_decay:
-            full_step = full_step + p_data * wd_mul_t
+            if do_cautious_wd:
+                cwd_mask = (grad * p_data >= 0).to(full_step.dtype)
+                full_step = full_step + p_data * wd_mul_t * cwd_mask
+            else:
+                full_step = full_step + p_data * wd_mul_t
 
         # ---- 14. Parameter update ---------------------------------------
         p_data.sub_(full_step * lr_t)
@@ -503,6 +514,7 @@ class OCGOptV2(Optimizer):
             beta1, beta2, beta3 = group["betas"][0], group["betas"][1], group["betas"][2]
             weight_decay = group["weight_decay"]
             weight_decay_rate = group["weight_decay_rate"]
+            cautious_weight_decay = group["cautious_weight_decay"]
             centralization = group["centralization"]
             stochastic_fp = group["stochastic_fp"]
             lowpass_grad = group["lowpass_grad"]
@@ -602,6 +614,7 @@ class OCGOptV2(Optimizer):
                     input_norm and not is_scalar, # do_input_norm
                     adaptive,                     # do_adaptive
                     weight_decay != 0,            # do_weight_decay
+                    cautious_weight_decay and weight_decay != 0,  # do_cautious_wd
                     spectral_adaptive,
                     is_scalar,
                     dimcount == 1,                # is_1d
@@ -666,6 +679,7 @@ class OCGOptV2(Optimizer):
             beta1, beta2, beta3 = group["betas"][0], group["betas"][1], group["betas"][2]
             weight_decay = group["weight_decay"]
             weight_decay_rate = group["weight_decay_rate"]
+            cautious_weight_decay = group["cautious_weight_decay"]
             centralization = group["centralization"]
             stochastic_fp = group["stochastic_fp"]
             lowpass_grad = group["lowpass_grad"]
@@ -774,7 +788,11 @@ class OCGOptV2(Optimizer):
 
                 # Weight decay
                 if wd_mul != 0:
-                    full_step.add_(p_fp32.data, alpha=wd_mul)
+                    if cautious_weight_decay:
+                        cwd_mask = (grad * p_fp32.data >= 0).to(full_step.dtype)
+                        full_step.add_(p_fp32.data * cwd_mask, alpha=wd_mul)
+                    else:
+                        full_step.add_(p_fp32.data, alpha=wd_mul)
 
                 # Parameter update
                 p_fp32.data.add_(full_step, alpha=-lr)
@@ -985,7 +1003,12 @@ class OCGOptV2(Optimizer):
 
             # ==== BATCH: Decoupled weight decay ==============================
             if wd_mul != 0:
-                torch._foreach_add_(full_step_list, p_fp32_list, alpha=wd_mul)
+                if cautious_weight_decay:
+                    for idx in range(n):
+                        cwd_mask = (grad_list[idx] * p_fp32_list[idx] >= 0).to(full_step_list[idx].dtype)
+                        full_step_list[idx] = full_step_list[idx] + p_fp32_list[idx] * wd_mul * cwd_mask
+                else:
+                    torch._foreach_add_(full_step_list, p_fp32_list, alpha=wd_mul)
 
             # ==== BATCH: Parameter update ====================================
             torch._foreach_add_(p_fp32_list, full_step_list, alpha=-lr)
@@ -1084,6 +1107,7 @@ class OCGOptV2(Optimizer):
             beta1, beta2, beta3 = group["betas"][0], group["betas"][1], group["betas"][2]
             weight_decay = group["weight_decay"]
             weight_decay_rate = group["weight_decay_rate"]
+            cautious_weight_decay = group.get("cautious_weight_decay", False)
             centralization = group["centralization"]
 
             step = group['step']
@@ -1222,7 +1246,11 @@ class OCGOptV2(Optimizer):
 
                 # Perform weight decay (using pre-computed group-level multiplier)
                 if _wd_mul != 0:
-                    full_step.add_(p_fp32.data, alpha=_wd_mul)
+                    if cautious_weight_decay:
+                        cwd_mask = (grad * p_fp32.data >= 0).to(full_step.dtype)
+                        full_step.add_(p_fp32.data * cwd_mask, alpha=_wd_mul)
+                    else:
+                        full_step.add_(p_fp32.data, alpha=_wd_mul)
 
                 p_fp32.data.add_(full_step, alpha=-lr)
 
