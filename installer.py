@@ -128,6 +128,7 @@ def setup_venv(uv: str, venv_path: str = "venv"):
     uv_pip_install(
         uv,
         "-U", "--no-deps", "torchao~=0.13.0",
+        "--index-strategy", "unsafe-best-match",
         "--extra-index-url", "https://download.pytorch.org/whl/cu128",
         venv_path=venv_path,
     )
