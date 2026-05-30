@@ -114,54 +114,6 @@ def filter_grad(grad, fft_alpha=1.0):
     # The result should be real, but take .real to discard negligible imaginary parts
     return modified_grad.real
 
-def create_gaussian_mask(shape, sigma=1.0, device='cpu'):
-    """
-    Creates a n-dimensional Gaussian mask, centered for use with fftshift.
-    """
-    freq_dims = [torch.fft.fftfreq(s, device=device) for s in shape]
-    # Center the grid for radial calculation
-    shifted_freq_dims = [torch.fft.ifftshift(d) for d in freq_dims]
-
-    # Create a meshgrid of coordinates
-    coords = torch.stack(torch.meshgrid(*shifted_freq_dims, indexing='ij'))
-
-    # Calculate the radial distance (L2 norm) from the center (zero frequency)
-    # Normalize by the max possible frequency radius for scale invariance
-    max_radius = 0.5 * math.sqrt(len(shape))
-    radius = torch.linalg.norm(coords, dim=0) / max_radius
-
-    # Create a Gaussian low-pass filter.
-    # Higher alpha means sharper decay, i.e., more aggressive filtering
-    filter_weights = torch.exp(-sigma * (radius ** 2))
-    return filter_weights
-
-def similarity_fft(grad, prev_grad, sigma=0.0):
-    # 1. Apply n-dimensional FFT
-    grad_freq = torch.fft.fftn(grad, norm='ortho')
-    prev_grad_freq = torch.fft.fftn(prev_grad, norm='ortho')
-
-    grad_freq_shifted = torch.fft.fftshift(grad_freq)
-    prev_grad_freq_shifted = torch.fft.fftshift(prev_grad_freq)
-
-    agreement_mask = grad_freq_shifted.abs() * prev_grad_freq_shifted.abs().conj()
-
-    mask_max = torch.max(agreement_mask.abs())
-    if mask_max > 1e-16:
-        agreement_mask /= mask_max
-
-    new_grad_fft = grad_freq_shifted * agreement_mask.real
-
-    if sigma != 0:
-        gaussian_mask = create_gaussian_mask(grad.shape, sigma=sigma, device=grad.device)
-        new_grad_fft = new_grad_fft * gaussian_mask
-
-    new_grad_fft = torch.fft.ifftshift(new_grad_fft)
-
-    new_grad = torch.fft.ifftn(new_grad_fft, norm='ortho').real
-
-    return new_grad
-
-
 def _reshape_to_2d(t: torch.Tensor) -> torch.Tensor:
     """Reshape tensor to 2D: [N, -1] for >2D, [1, -1] for 1D, identity for 2D."""
     if t.ndim > 2:
@@ -209,10 +161,6 @@ class OCGOptV2(Optimizer):
             Use RMS variant of AOL (Almost-Orthogonal-Layer) preconditioning on the input gradient instead of regular RMS normalization. Computes Gram matrix and rescales rows by inverse sqrt of absolute row sums (default: False).
         lowpass_grad (float):
             Pre-conditions the gradient via a low-pass filter that maintains the direction of the gradient. Higher = stronger filtering, 0 = disabled (default: 0.0).
-        sim_match (bool):
-            Filters the frequencies of the running average with the gradient of the current step's frequencies (default: False).
-        cautious_min (float):
-            A value other than 1.0 will utilize cautious-stepping. At 0.0, this zeros out parts of the momentum which don't correlate with the current gradient's direction. 0.5 will halve it instead (default: 0.0).
         stochastic_fp (bool):
             Utilize stochastic rounding for bf16 and fp16 tensors. (default: True).
         compile_step (bool):
@@ -251,7 +199,6 @@ class OCGOptV2(Optimizer):
         input_norm: bool = False,
         aol: bool = False,
         lowpass_grad: float = 0.0,
-        cautious_min: float = 0.0,
         stochastic_fp: bool = True,
         compile_step: bool = False,
         foreach: bool = False,
@@ -301,7 +248,6 @@ class OCGOptV2(Optimizer):
             input_norm = input_norm,
             aol = aol,
             lowpass_grad = lowpass_grad,
-            cautious_min = cautious_min,
             stochastic_fp = stochastic_fp,
             foreach = foreach,
         )
