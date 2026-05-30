@@ -68,7 +68,7 @@ def gram_newton_schulz_2step(
     # so I is never mutated.
     Q = I
 
-    # 5-step iteration with pre-optimized coefficients
+    # 2-step iteration with pre-optimized coefficients
     for step_idx, (a, b, c) in enumerate(GRAM_NEWTON_SCHULZ_2STEP_COEFFS1):
         # Cubic polynomial on Gram matrix
         R2 = R @ R
@@ -152,7 +152,7 @@ class OCGOptV2(Optimizer):
         spectral_clip_compile (bool):
             Compile the spectral clip function (Highly recommended for a large speed increase) (default: True).
         spectral_clip_dtype (torch.dtype in string format):
-            Sets the dtype of spectral clipping calculation. Recommended to use torch.float32 (or leave at default of None) (default: None, which results in torch.float32).
+            Sets the dtype of spectral clipping calculation. Recommended to use torch.float32 (or leave at default of None) (default: None, which results in torch.bfloat16).
         adaptive (bool):
             Scale the full step to the momentumized average gradient, always utilizes RMS normalization on the gradient if True, otherwise caps RMS at 1.0 (default: False).
         adaptive_min (float):
@@ -409,8 +409,9 @@ class OCGOptV2(Optimizer):
                 grad_2d = grad
             rms = grad_2d.pow(2).mean(dim=1, keepdim=True).sqrt_().clamp_min_(1e-16)
             grad = grad_2d.div(rms).reshape_as(grad)
-        else:
-            # Global RMS normalization (also used for scalar tensors)
+        elif not do_aol:
+            # Global RMS normalization (for scalar tensors and non-scalar without AOL/input_norm).
+            # Skipped when do_aol is True: AOL already provides normalization.
             rms = grad.pow(2).mean().sqrt_().clamp_min_(1e-16)
             grad = grad.div(rms)
 
@@ -907,13 +908,15 @@ class OCGOptV2(Optimizer):
                     A = grad_2d @ grad_2d.mT
                     rescaling = A.abs().sum(dim=-1, keepdim=True).clamp_min_(1e-16)
                     grad_2d = grad_2d * rescaling.rsqrt()
-                    grad = grad_2d.view_as(grad)
+                    grad = grad_2d.reshape_as(grad)
 
                 if input_norm:
                     grad_2d = _reshape_to_2d(grad)
                     rms = grad_2d.pow(2).mean(dim=1, keepdim=True).sqrt_().clamp_min_(1e-16)
-                    grad = grad_2d.div(rms).view_as(grad)
-                else:
+                    grad = grad_2d.div(rms).reshape_as(grad)
+                elif not aol:
+                    # Global RMS normalization (for scalar tensors and non-scalar without AOL/input_norm).
+                    # Skipped when aol is True: AOL already provides normalization.
                     rms = grad.pow(2).mean().sqrt_().clamp_min_(1e-16)
                     grad = grad.div(rms)
 
@@ -973,7 +976,7 @@ class OCGOptV2(Optimizer):
                 if flip:
                     exp_avg_2d_o = exp_avg_2d_o.T
 
-                full_step = exp_avg_2d_o.view_as(exp_avg)
+                full_step = exp_avg_2d_o.reshape_as(exp_avg)
                 full_step = full_step.div(full_step.pow(2).mean().sqrt_().clamp_min_(1))
 
                 full_step_list[idx] = full_step
@@ -1177,15 +1180,17 @@ class OCGOptV2(Optimizer):
                     rescaling = A.abs().sum(dim=-1, keepdim=True).clamp_min_(1e-16)
                     grad_2d = grad_2d * rescaling.rsqrt()
 
-                    grad = grad_2d.view_as(grad)
+                    grad = grad_2d.reshape_as(grad)
 
                 if dimcount >= 1 and group["input_norm"]:
                     grad_2d = _reshape_to_2d(grad)
 
                     rms = grad_2d.pow(2).mean(dim=1, keepdim=True).sqrt_().clamp_min_(1e-16) # Cap at RMS of 1.0
 
-                    grad = grad_2d.div(rms).view_as(grad)
-                else:
+                    grad = grad_2d.div(rms).reshape_as(grad)
+                elif not (dimcount >= 1 and group["aol"]):
+                    # Global RMS normalization (for scalar tensors and non-scalar without AOL/input_norm).
+                    # Skipped when aol is True: AOL already provides normalization.
                     rms = grad.pow(2).mean().sqrt_().clamp_min_(1e-16) # Cap at RMS of 1.0
                     grad = grad.div(rms)
 
@@ -1226,7 +1231,7 @@ class OCGOptV2(Optimizer):
                     if flip:
                         exp_avg_2d_o = exp_avg_2d_o.T
 
-                    full_step = exp_avg_2d_o.view_as(exp_avg)
+                    full_step = exp_avg_2d_o.reshape_as(exp_avg)
 
                     full_step = full_step.div(full_step.pow(2).mean().sqrt_().clamp_min_(1))
                 else:
