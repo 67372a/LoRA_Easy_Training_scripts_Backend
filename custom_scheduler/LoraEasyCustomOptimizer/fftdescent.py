@@ -642,16 +642,29 @@ class FFTDescent(Optimizer):
 
             # ---- Collect eligible params (numel >= 16) --------------------
             foreach_params: list = []
+            small_params: list = []  # numel < 16 — processed via native path
             for p in group["params"]:
                 if p.grad is None:
                     continue
+                state = self.state[p]
+                if len(state) == 0:
+                    state["momentum"] = torch.zeros_like(p.grad)
+                    if use_sign_momentum:
+                        state["sign_momentum"] = torch.zeros_like(p.grad)
                 if p.numel() >= 16:
-                    state = self.state[p]
-                    if len(state) == 0:
-                        state["momentum"] = torch.zeros_like(p.grad)
-                        if use_sign_momentum:
-                            state["sign_momentum"] = torch.zeros_like(p.grad)
                     foreach_params.append(p)
+                else:
+                    small_params.append(p)
+
+            # ---- Process small params via native per-parameter loop -------
+            if small_params:
+                self._process_small_params(
+                    small_params, group, step, lr, beta, wd_scaled,
+                    sign_mom_coeff, lowpass_grad, do_spectral_clip,
+                    spectral_min, spectral_max, spectral_adaptive,
+                    spectral_clip_dtype, stochastic_fp, weight_decay,
+                    use_sign_momentum,
+                )
 
             if not foreach_params:
                 continue
@@ -891,6 +904,104 @@ class FFTDescent(Optimizer):
                 torch._foreach_copy_(ns_p_dst, ns_p_src)
 
     # ------------------------------------------------------------------
+    # Small-param fallback (numel < 16) used by _step_foreach
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _process_small_params(
+        self, small_params, group, step, lr, beta, wd_scaled,
+        sign_mom_coeff, lowpass_grad, do_spectral_clip,
+        spectral_min, spectral_max, spectral_adaptive,
+        spectral_clip_dtype, stochastic_fp, weight_decay,
+        use_sign_momentum,
+    ) -> None:
+        r"""Process parameters with ``numel < 16`` using the native
+        per-parameter loop.
+
+        Called by ``_step_foreach`` to ensure small parameters that cannot
+        benefit from foreach batching still receive gradient updates.
+        Uses the same update logic as ``_step_native``.
+        """
+        for p in small_params:
+            state = self.state[p]
+            grad = p.grad.data
+            dimcount = grad.ndim
+
+            use_fp32 = p.dtype in {torch.float16, torch.bfloat16} and stochastic_fp
+            if use_fp32:
+                grad = grad.to(torch.float32)
+                p_fp32 = p.detach().to(dtype=torch.float32, copy=True)
+                momentum = state["momentum"].detach().to(dtype=torch.float32, copy=True)
+                if sign_mom_coeff != 0:
+                    sign_momentum = state["sign_momentum"].detach().to(dtype=torch.float32, copy=True)
+            else:
+                p_fp32 = p.detach().to(dtype=torch.float32, copy=True)
+                momentum = state["momentum"].detach().to(dtype=torch.float32, copy=True)
+                if sign_mom_coeff != 0:
+                    sign_momentum = state["sign_momentum"].detach().to(dtype=torch.float32, copy=True)
+
+            # Low-pass filter via FFT (only when user enabled it)
+            if dimcount > 0 and lowpass_grad != 0.0:
+                grad = filter_grad(grad, fft_alpha=lowpass_grad).abs().mul_(grad.sign())
+
+            if step == 1:
+                grad.zero_()
+
+            # Momentum update
+            if sign_mom_coeff != 0:
+                momentum = momentum.mul(beta).add_(grad.abs(), alpha=1. - beta)
+            else:
+                momentum = momentum.mul(beta).add_(grad, alpha=1. - beta)
+
+            # Sign momentum + Nesterov-like look-ahead
+            if sign_mom_coeff != 0:
+                sign_momentum = sign_momentum.mul(sign_mom_coeff).add_(grad.sign(), alpha=1 - sign_mom_coeff)
+                c_t = grad.abs().lerp(momentum, weight=beta)
+            else:
+                c_t = grad.lerp(momentum, weight=beta)
+
+            # Spectral clipping or atan2 normalization
+            if dimcount >= 2 and do_spectral_clip:
+                if dimcount > 2:
+                    c_t_2d = c_t.reshape(len(c_t), -1)
+                else:
+                    c_t_2d = c_t
+
+                flip = c_t_2d.shape[0] > c_t_2d.shape[1]
+                if flip:
+                    c_t_2d = c_t_2d.T
+
+                full_step = self.clip_func(c_t_2d, sigma_min=spectral_min, sigma_max=spectral_max, adaptive=spectral_adaptive, ortho_dtype=spectral_clip_dtype)
+
+                if flip:
+                    full_step = full_step.T
+
+                full_step = full_step.view_as(c_t).atan2(momentum.abs()).mul_(1.27323954474)
+            else:
+                full_step = c_t.atan2(momentum.abs()).mul_(1.27323954474)
+
+            # Apply sign if using sign_momentum
+            if sign_mom_coeff != 0:
+                full_step = full_step.mul(sign_momentum)
+
+            # Weight decay
+            if weight_decay != 0:
+                full_step = full_step.add(p_fp32, alpha=wd_scaled)
+
+            p_fp32.add_(full_step, alpha=-lr)
+
+            if use_fp32:
+                copy_stochastic_(state["momentum"], momentum)
+                if sign_mom_coeff != 0:
+                    copy_stochastic_(state["sign_momentum"], sign_momentum)
+                copy_stochastic_(p, p_fp32)
+            else:
+                state["momentum"].copy_(momentum)
+                if sign_mom_coeff != 0:
+                    state["sign_momentum"].copy_(sign_momentum)
+                p.copy_(p_fp32)
+
+    # ------------------------------------------------------------------
     # Native (uncompiled) step path — original behaviour preserved
     # ------------------------------------------------------------------
 
@@ -956,8 +1067,8 @@ class FFTDescent(Optimizer):
                     if sign_mom_coeff != 0:
                         sign_momentum = state["sign_momentum"].detach().to(dtype=torch.float32, copy=True)
 
-                # Low-pass filter via FFT
-                if dimcount > 0:
+                # Low-pass filter via FFT (only when user enabled it)
+                if dimcount > 0 and lowpass_grad != 0.0:
                     grad = filter_grad(grad, fft_alpha=lowpass_grad).abs().mul_(grad.sign())
 
                 if step == 1:
