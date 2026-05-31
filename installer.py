@@ -5,7 +5,7 @@ import subprocess
 import os
 import shutil
 
-from install_uv import ensure_uv, create_venv, uv_pip_install
+from install_uv import ensure_uv, create_venv, uv_pip_install, get_venv_python_version
 
 PLATFORM = "windows" if sys.platform == "win32" else "linux" if sys.platform == "linux" else ""
 
@@ -78,11 +78,13 @@ FLASH_ATTN_WHEELS = {
 def _install_flash_attn(uv: str, venv_path: str = "venv") -> None:
     """Install flash-attention wheel for the current platform and Python version.
 
-    This is done explicitly before requirements.txt to avoid uv reinstalling
-    flash-attn due to version normalization differences (FALSE vs false in
-    local version identifiers).
+    Detects the Python version from the venv executable. This is done
+    explicitly before requirements.txt to avoid uv reinstalling flash-attn
+    due to version normalization differences (FALSE vs false in local
+    version identifiers).
     """
-    python_minor = sys.version_info.minor
+    python_version = get_venv_python_version(venv_path)
+    python_minor = int(python_version.split(".")[1])
     platform_key = "win32" if sys.platform == "win32" else "linux"
     wheel_url = FLASH_ATTN_WHEELS.get((platform_key, python_minor))
 
