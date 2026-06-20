@@ -123,6 +123,34 @@ def _reshape_to_2d(t: torch.Tensor) -> torch.Tensor:
     return t
 
 
+# Low-precision dtypes that must be upcast to fp32 for compute to avoid
+# overflow/underflow in pow(2), lerp, and beta**step operations.
+_LOW_PRECISION_DTYPES = frozenset({torch.bfloat16, torch.float16})
+
+
+def _slow_beta(beta: float, step: int) -> float:
+    r"""Numerically stable "slow" (step-averaged) beta.
+
+    Computes ``slow_beta = (beta**step - beta) / (beta**step - 1)`` via
+    ``math.expm1`` to avoid catastrophic cancellation when ``beta`` is very
+    close to 1.0 (e.g. the documented default ``0.9999999``), where both the
+    numerator and denominator approach zero and direct evaluation loses
+    precision.
+
+    Equivalent form used:
+        ``beta * expm1((step - 1) * log(beta)) / expm1(step * log(beta))``
+
+    Returns ``0.0`` at ``step == 1`` (no averaging yet) and ``1.0`` for the
+    degenerate ``beta >= 1.0`` case (pure momentum, no decay).
+    """
+    if step <= 1:
+        return 0.0
+    if beta >= 1.0:
+        return 1.0
+    log_beta = math.log(beta)
+    return beta * math.expm1((step - 1) * log_beta) / math.expm1(step * log_beta)
+
+
 class OCGOptV2(Optimizer):
     r"""
     OCGOptV2: Orthogonal Centralized Gradient Optimization.
@@ -166,7 +194,11 @@ class OCGOptV2(Optimizer):
         lowpass_grad (float):
             Pre-conditions the gradient via a low-pass filter that maintains the direction of the gradient. Higher = stronger filtering, 0 = disabled (default: 0.0).
         stochastic_fp (bool):
-            Utilize stochastic rounding for bf16 and fp16 tensors. (default: True).
+            Utilize stochastic rounding for bf16 tensors on writeback. Both bf16
+            and fp16 parameters are always upcast to fp32 for compute to avoid
+            overflow/underflow; stochastic rounding (which is bf16-specific) is
+            only applied to bf16 parameters when this is True. fp16 parameters
+            use a plain fp32→fp16 cast on writeback. (default: True).
         compile_step (bool):
             Compile the entire per-parameter step function with torch.compile(fullgraph=True, dynamic=False).
             When True, the full momentum+spectral_clip+update pipeline is fused into a single
@@ -529,13 +561,12 @@ class OCGOptV2(Optimizer):
 
             step = group['step']
 
-            # Pre-compute slow betas (constant for all params in this group)
-            b1p = beta1 ** step
-            slow_beta1 = (b1p - beta1) / (b1p - 1.0)
-            b2p = beta2 ** step
-            slow_beta2 = (b2p - beta2) / (b2p - 1.0)
-            b3p = beta3 ** step
-            slow_beta3 = (b3p - beta3) / (b3p - 1.0)
+            # Pre-compute slow betas (constant for all params in this group).
+            # Uses the numerically stable _slow_beta helper to avoid catastrophic
+            # cancellation when a beta is very close to 1.0.
+            slow_beta1 = _slow_beta(beta1, step)
+            slow_beta2 = _slow_beta(beta2, step)
+            slow_beta3 = _slow_beta(beta3, step)
 
             # Pre-compute weight decay multiplier
             wd_mul = weight_decay * weight_decay_rate ** step if weight_decay != 0 else 0.0
@@ -560,7 +591,12 @@ class OCGOptV2(Optimizer):
                     state["centralized_momentum"] = torch.zeros_like(grad)
 
                 # ---- Prepare FP32 working copies -------------------------
-                use_fp32 = p.dtype in {torch.bfloat16} and stochastic_fp
+                # Always upcast low-precision (bf16/fp16) params to fp32 for
+                # compute to avoid overflow/underflow in pow(2)/lerp/beta**step.
+                use_fp32 = p.dtype in _LOW_PRECISION_DTYPES
+                # Stochastic rounding is bf16-specific (manipulates the 16-bit
+                # mantissa of an fp32 value); fp16 uses a plain cast on writeback.
+                use_stochastic = p.dtype == torch.bfloat16 and stochastic_fp
                 if use_fp32:
                     grad_work = grad.to(torch.float32)
                     p_work = p.detach().clone().to(torch.float32)
@@ -624,7 +660,8 @@ class OCGOptV2(Optimizer):
                 )
 
                 # ---- Copy back with optional stochastic rounding ---------
-                if use_fp32:
+                # Stochastic rounding only applies to bf16; fp16 uses plain copy.
+                if use_stochastic:
                     if is_scalar:
                         copy_stochastic_(state["denom"], denom_work)
                     copy_stochastic_(state["value_momentum"], value_momentum_work)
@@ -694,13 +731,12 @@ class OCGOptV2(Optimizer):
 
             step = group['step']
 
-            # Pre-compute slow betas (constant for all params in this group)
-            b1p = beta1 ** step
-            slow_beta1 = (b1p - beta1) / (b1p - 1.0)
-            b2p = beta2 ** step
-            slow_beta2 = (b2p - beta2) / (b2p - 1.0)
-            b3p = beta3 ** step
-            slow_beta3 = (b3p - beta3) / (b3p - 1.0)
+            # Pre-compute slow betas (constant for all params in this group).
+            # Uses the numerically stable _slow_beta helper to avoid catastrophic
+            # cancellation when a beta is very close to 1.0.
+            slow_beta1 = _slow_beta(beta1, step)
+            slow_beta2 = _slow_beta(beta2, step)
+            slow_beta3 = _slow_beta(beta3, step)
 
             # Pre-compute weight decay multiplier
             wd_mul = weight_decay * weight_decay_rate ** step if weight_decay != 0 else 0.0
@@ -732,7 +768,10 @@ class OCGOptV2(Optimizer):
                 state = self.state[p]
                 grad = p.grad.data
 
-                use_fp32 = p.dtype in {torch.bfloat16} and stochastic_fp
+                # Always upcast low-precision (bf16/fp16) params to fp32 for compute.
+                use_fp32 = p.dtype in _LOW_PRECISION_DTYPES
+                # Stochastic rounding is bf16-specific; fp16 uses a plain cast.
+                use_stochastic = p.dtype == torch.bfloat16 and stochastic_fp
                 if use_fp32:
                     grad = grad.to(torch.float32)
                     p_fp32 = p.detach().to(torch.float32)
@@ -798,8 +837,8 @@ class OCGOptV2(Optimizer):
                 # Parameter update
                 p_fp32.data.add_(full_step, alpha=-lr)
 
-                # Write-back
-                if use_fp32:
+                # Write-back (stochastic rounding only for bf16)
+                if use_stochastic:
                     copy_stochastic_(state["denom"], denom)
                     copy_stochastic_(state["value_momentum"], value_momentum)
                     copy_stochastic_(state["centralized_momentum"], centralized_momentum)
@@ -830,6 +869,7 @@ class OCGOptV2(Optimizer):
             centralized_momentum_list = [None] * n
             filter_weights_list = [None] * n
             use_fp32_list = [False] * n
+            use_stochastic_list = [False] * n
             state_list = [None] * n
             param_list = [None] * n
 
@@ -840,8 +880,11 @@ class OCGOptV2(Optimizer):
 
                 grad = p.grad.data
 
-                use_fp32 = p.dtype in {torch.bfloat16} and stochastic_fp
+                # Always upcast low-precision (bf16/fp16) params to fp32 for compute.
+                use_fp32 = p.dtype in _LOW_PRECISION_DTYPES
                 use_fp32_list[idx] = use_fp32
+                # Track bf16+stochastic separately for writeback rounding choice.
+                use_stochastic_list[idx] = p.dtype == torch.bfloat16 and stochastic_fp
 
                 target_dtype = torch.float32 if use_fp32 else p.dtype
 
@@ -1021,10 +1064,10 @@ class OCGOptV2(Optimizer):
             # non-stochastic (batched via foreach_copy_) paths to minimize
             # kernel-launch overhead for the common fp32 case.
             stoch_indices = [
-                idx for idx in range(n) if use_fp32_list[idx]
+                idx for idx in range(n) if use_stochastic_list[idx]
             ]
             non_stoch_indices = [
-                idx for idx in range(n) if not use_fp32_list[idx]
+                idx for idx in range(n) if not use_stochastic_list[idx]
             ]
 
             # Stochastic rounding path (per-tensor, uses shared scratch buffer)
@@ -1066,7 +1109,23 @@ class OCGOptV2(Optimizer):
 
     @torch.no_grad()
     def reset(self):
-        pass
+        r"""Reset optimizer state.
+
+        Clears all per-parameter state (momentum buffers, denom, etc.) and
+        resets each parameter group's step counter to 0, so the next
+        ``step()`` call starts from a clean slate (step 1).  The cached
+        scalar-tensor and stochastic-rounding scratch buffers are also cleared
+        so they are reallocated for the current device/shape on next use.
+        """
+        # Clear per-parameter state (momentum, denom, ...).
+        for p, state in self.state.items():
+            state.clear()
+        # Reset per-group step counters.
+        for group in self.param_groups:
+            group['step'] = 0
+        # Drop cached scratch buffers so they are rebuilt for current devices.
+        self._scalar_tensors = {}
+        self._srng_buf = None
 
     # ------------------------------------------------------------------
     # Step — public entry point
@@ -1119,6 +1178,25 @@ class OCGOptV2(Optimizer):
             # recomputing weight_decay_rate**step for every parameter).
             _wd_mul = weight_decay * weight_decay_rate ** step if weight_decay != 0 else 0.0
 
+            # Pre-compute slow betas once per group (avoids recomputing
+            # beta**step for every parameter). Uses the numerically stable
+            # _slow_beta helper to avoid catastrophic cancellation when a beta
+            # is very close to 1.0.
+            slow_beta1 = _slow_beta(beta1, step)
+            slow_beta2 = _slow_beta(beta2, step)
+            slow_beta3 = _slow_beta(beta3, step)
+
+            # Hoist remaining group-level scalars (previously re-read per param).
+            stochastic_fp = group["stochastic_fp"]
+            lowpass_grad = group["lowpass_grad"]
+            spectral_adaptive = group["spectral_adaptive"]
+            spectral_clip_dtype = group["spectral_clip_dtype"]
+            adaptive = group["adaptive"]
+            adaptive_min = group["adaptive_min"]
+            adaptive_max = group["adaptive_max"]
+            input_norm = group["input_norm"]
+            aol = group["aol"]
+
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -1137,10 +1215,12 @@ class OCGOptV2(Optimizer):
                     state["centralized_momentum"] = torch.zeros_like(grad)
 
                 # Detach and unpack state into working copies.
-                # When the parameter is bf16 with stochastic rounding, cast directly
-                # to fp32 via .to() which already creates a new tensor on dtype change,
-                # avoiding wasteful intermediate bf16 clones.
-                if p.dtype in {torch.bfloat16} and group["stochastic_fp"]:
+                # Always upcast low-precision (bf16/fp16) params to fp32 for
+                # compute via .to() which creates a new tensor on dtype change,
+                # avoiding wasteful intermediate low-precision clones.
+                # Stochastic rounding is bf16-specific; fp16 uses a plain cast.
+                use_stochastic = p.dtype == torch.bfloat16 and stochastic_fp
+                if p.dtype in _LOW_PRECISION_DTYPES:
                     grad = grad.to(torch.float32)
                     p_fp32 = p.detach().to(torch.float32)
                     if dimcount < 1:
@@ -1154,25 +1234,16 @@ class OCGOptV2(Optimizer):
                     value_momentum = state["value_momentum"].detach().clone()
                     centralized_momentum = state["centralized_momentum"].detach().clone()
 
-                # Averaged beta (step 1 = 0, step 2 = 0.5, step 3 = 0.6667, step 4 = 0.75...)
-                # Cache beta**step to avoid computing it twice per beta (6 → 3 pow calls).
-                b1p = beta1 ** step
-                slow_beta1 = (b1p - beta1) / (b1p - 1.0)
-                b2p = beta2 ** step
-                slow_beta2 = (b2p - beta2) / (b2p - 1.0)
-                b3p = beta3 ** step
-                slow_beta3 = (b3p - beta3) / (b3p - 1.0)
-
                 # ADOPT-style clamping for early stability / to prevent NaNs
                 grad = grad.clamp(-step, step)
 
                 # Low-pass filter via FFT, maintains direction
-                if dimcount > 0 and group["lowpass_grad"] != 0:
-                    grad = filter_grad(grad, fft_alpha=group["lowpass_grad"]).abs().mul_(grad.sign())
+                if dimcount > 0 and lowpass_grad != 0:
+                    grad = filter_grad(grad, fft_alpha=lowpass_grad).abs().mul_(grad.sign())
 
                 # Move RMS to 1.0, input-feature-wise if 2D or larger, otherwise utilize standard gradient-wide RMS normalization.
                 # AOL preconditioning variant: uses Gram matrix row rescaling instead of RMS
-                if dimcount >= 1 and group["aol"]:
+                if dimcount >= 1 and aol:
                     grad_2d = _reshape_to_2d(grad)
 
                     # AOL-RMS: Compute Gram matrix and rescale rows by inverse sqrt of absolute row sums
@@ -1182,13 +1253,13 @@ class OCGOptV2(Optimizer):
 
                     grad = grad_2d.reshape_as(grad)
 
-                if dimcount >= 1 and group["input_norm"]:
+                if dimcount >= 1 and input_norm:
                     grad_2d = _reshape_to_2d(grad)
 
                     rms = grad_2d.pow(2).mean(dim=1, keepdim=True).sqrt_().clamp_min_(1e-16) # Cap at RMS of 1.0
 
                     grad = grad_2d.div(rms).reshape_as(grad)
-                elif not (dimcount >= 1 and group["aol"]):
+                elif not (dimcount >= 1 and aol):
                     # Global RMS normalization (for scalar tensors and non-scalar without AOL/input_norm).
                     # Skipped when aol is True: AOL already provides normalization.
                     rms = grad.pow(2).mean().sqrt_().clamp_min_(1e-16) # Cap at RMS of 1.0
@@ -1222,9 +1293,9 @@ class OCGOptV2(Optimizer):
                     if flip:
                         exp_avg_2d = exp_avg_2d.T # Flip if first dim is larger
 
-                    exp_avg_2d_o = self.clip_func(exp_avg_2d, ortho_dtype=group["spectral_clip_dtype"])
+                    exp_avg_2d_o = self.clip_func(exp_avg_2d, ortho_dtype=spectral_clip_dtype)
 
-                    if group["spectral_adaptive"]:
+                    if spectral_adaptive:
                         scale_factor = (exp_avg_2d_o * exp_avg_2d).sum()
                         exp_avg_2d_o.mul_(scale_factor)
 
@@ -1245,8 +1316,8 @@ class OCGOptV2(Optimizer):
                 full_step.mul_(mask).mul_(alpha)
 
                 # Scale the full step with the gradient
-                if group["adaptive"]:
-                    scale_factor = (exp_avg.pow(2).mean().sqrt_() * full_step.pow(2).mean().sqrt_()).mean().clamp(group["adaptive_min"], group["adaptive_max"])
+                if adaptive:
+                    scale_factor = (exp_avg.pow(2).mean().sqrt_() * full_step.pow(2).mean().sqrt_()).mean().clamp(adaptive_min, adaptive_max)
                     full_step = scale_factor * full_step
 
                 # Perform weight decay (using pre-computed group-level multiplier)
@@ -1259,8 +1330,8 @@ class OCGOptV2(Optimizer):
 
                 p_fp32.data.add_(full_step, alpha=-lr)
 
-                # Stochastic update
-                if p.dtype in {torch.bfloat16} and group["stochastic_fp"]:
+                # Write-back (stochastic rounding only for bf16; fp16 uses plain copy)
+                if use_stochastic:
                     if dimcount < 1:
                         copy_stochastic_(state["denom"], denom)
                     copy_stochastic_(state["value_momentum"], value_momentum)
