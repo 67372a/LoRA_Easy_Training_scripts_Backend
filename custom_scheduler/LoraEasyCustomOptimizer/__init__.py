@@ -50,7 +50,7 @@ from LoraEasyCustomOptimizer.fftdescent import FFTDescent
 from LoraEasyCustomOptimizer.scgopt import SCGOpt
 from LoraEasyCustomOptimizer.singstate import SingState
 from LoraEasyCustomOptimizer.snoo_asgd import SNOO_ASGD
-from adv_optm.optim import AdamW_adv, Adopt_adv, Simplified_AdEMAMix as Simplified_AdEMAMix_adv, Lion_adv
+from adv_optm.optim import AdamW_adv, Adopt_adv, Lion_adv, Prodigy_adv, Muon_adv, AdaMuon_adv, SignSGD_adv, SinkSGD_adv
 from LoraEasyCustomOptimizer.abmog import ABMOG
 from LoraEasyCustomOptimizer.bcos import BCOS
 from LoraEasyCustomOptimizer.projective_adam import ProjectiveAdam
@@ -81,6 +81,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdaBelief,
     AdaGC,
     AdamMini,
+    AdaMuon_adv,
     Adan,
     AdamW_adv,
     AdamW4bitAO,
@@ -125,12 +126,14 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     Lion_adv,
     MODA,
     MomentusCaution,
+    Muon_adv,
     Mythical,
-    OAGOpt,
     NorMuonScheduleFree,
+    OAGOpt,
     OCGOpt,
     OCGOptV2,
     ProdigyPlusScheduleFree,
+    Prodigy_adv,
     ProjectiveAdam,
     RACS,
     REMASTER,
@@ -146,9 +149,10 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     ScheduleFreeWrapper,
     SCORN,
     SCORNMachina,
-    Simplified_AdEMAMix_adv,
     SimplifiedAdEMAMix,
     SimplifiedAdEMAMixExM,
+    SignSGD_adv,
+    SinkSGD_adv,
     SingState,
     SNOO_ASGD,
     SODA,
