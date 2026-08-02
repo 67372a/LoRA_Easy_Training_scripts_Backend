@@ -93,7 +93,7 @@ from typing import Dict, Optional, Tuple
 import torch
 from torch.optim import Optimizer
 
-from LoFac import (
+from LoraEasyCustomOptimizer.lofac import (
     GRAM_NEWTON_SCHULZ_2STEP_COEFFS,
     copy_stochastic_,
     _poly_beta,
