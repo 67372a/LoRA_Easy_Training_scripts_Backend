@@ -65,7 +65,6 @@ from LoraEasyCustomOptimizer.amuse import AMUSE
 from LoraEasyCustomOptimizer.soda import SODA
 from LoraEasyCustomOptimizer.moda import MODA
 from LoraEasyCustomOptimizer.soda_wrapper import SODAWrapper
-from LoraEasyCustomOptimizer.bilatmuon import BilatMuon
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
@@ -91,7 +90,6 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     Adopt_adv,
     Alice,
     BCOS,
-    BilatMuon,
     CAME,
     CASCADE,
     Compass,
