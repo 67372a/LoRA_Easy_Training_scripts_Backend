@@ -66,6 +66,8 @@ from LoraEasyCustomOptimizer.soda import SODA
 from LoraEasyCustomOptimizer.moda import MODA
 from LoraEasyCustomOptimizer.soda_wrapper import SODAWrapper
 from LoraEasyCustomOptimizer.bilatmuon import BilatMuon
+from LoraEasyCustomOptimizer.bilatmuonns import BilatMuonNS
+from LoraEasyCustomOptimizer.ainoopt import AINOOpt
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
@@ -89,9 +91,11 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     AdamW8bitAO,
     AdamWfp8AO,
     Adopt_adv,
+    AINOOpt,
     Alice,
     BCOS,
     BilatMuon,
+    BilatMuonNS,
     CAME,
     CASCADE,
     Compass,
