@@ -1,34 +1,41 @@
 # Source: https://github.com/Clybius/Personalized-Optimizers
 
-"""WarpAINO: AINOOpt with the WarpAdam learnable low-rank gradient warp.
+"""WarpAINO: AINOOpt with a WarpAdam learnable low-rank update warp.
 
 Based on AINOOpt, with the WarpAdam (arXiv:2409.04244) learnable distortion
-matrix P = I + U @ V^T inserted *after* Sinkhorn normalization, before the
-sign-momentum / innovation machinery:
+matrix P = I + U @ V^T inserted after the crafted update, immediately before
+Gram Newton-Schulz orthogonalization:
 
-    g_norm   = Sinkhorn(g)                    (RMS row/col norm for 1D)
-    g_warped = g_norm + U @ (V^T @ g_norm)    (P = I + U @ V^T)
+    g_norm        = Sinkhorn(g)               (RMS row/col norm for 1D)
+    update        = AINO(update machinery)
+    update_warped = update + U @ (V^T @ update)
 
-All subsequent AINOOpt machinery -- tracked sign momentum, CAME-style
-factorized row & column squared innovation tracking, tracked value momentum,
-Gram Newton-Schulz orthogonalization, row-wise variance normalization,
-tensor-wise RMS rescale, cautious updates & cautious weight decay,
-stochastic rounding for BF16, foreach and torch.compile support -- operates
-on the warped gradient.
+The tracked sign momentum, CAME-style factorized row & column squared
+innovation tracking, and tracked value momentum operate on the unwarped
+normalized gradient. Gram Newton-Schulz orthogonalization and the remaining
+update processing operate on the warped crafted update.
 
 P is trained per-parameter with the WarpAdam online meta-objective (no
 closure, one closure-free pass per step): after each step, U and V take one
-SGD step on the one-step-ahead gradient prediction loss
+SGD step on the one-step-ahead prediction loss
 
-    ||P @ g_norm_{t-1} - g_norm_t||^2 / ||g_norm_{t-1}||^2,
+    ||P @ update_{t-1} - update_t||^2 / ||update_{t-1}||^2,
 
-i.e. P learns the transition structure of the *normalized* gradient process
-(the paper's "transfer off-diagonal information"). The norm normalization
-makes the meta-dynamics scale-invariant (stable for meta_lr * ||V||^2 < 2,
-independent of the gradient magnitude); because the warp input is
-Sinkhorn-normalized (unit row/col RMS), the meta-dynamics are additionally
-bounded per layer. meta_wd damps U and V back toward 0, keeping P near the
-identity anchor.
+i.e. P learns the transition structure of the crafted update process (the
+paper's "transfer off-diagonal information") -- the same signal it is
+applied to. The norm normalization makes the meta-dynamics scale-invariant
+(independent of the update magnitude); meta_wd damps U and V back toward 0,
+keeping P near the identity anchor.
+
+Stability: the coupled bilinear SGD on (U, V) is locally contractive only
+while meta_lr * ||V||^2 < 2. With V ~ N(0, 1) (||V||^2 ~ m * r) and large
+meta_lr this bound is violated and U, V amplify each other exponentially
+(NaN within a few steps; e.g. meta_lr=0.05 with rank=64 blows up in <10
+steps on a diffusion U-Net). To enforce stability, ||V|| is capped at
+sqrt(1 / meta_lr) (meta_v_cap) after every meta-update, so
+meta_lr * ||V||^2 <= 1 < 2 holds by construction; U absorbs any scale, so
+the cap does not restrict the family P = I + U @ V^T. Pass
+meta_v_cap=float('inf') to disable the cap.
 
 U is zero-initialized so P = I exactly and WarpAINO is bitwise-identical to
 AINOOpt until the factors learn (the first step is exactly AINOOpt); V is
@@ -48,11 +55,16 @@ Hyperparameters added over AINOOpt:
         meta_lr=0 disables the warp (plain AINOOpt). (default: 1e-3)
     meta_wd (float): Damping on U and V toward 0 (identity anchor).
         (default: 1e-2)
+    meta_v_cap (float): Upper bound on ||V|| enforced after each meta-update
+        (keeps meta_lr * ||V||^2 <= 1, the stability condition, with margin).
+        None auto-selects sqrt(1 / meta_lr); float('inf') disables the cap.
+        (default: None)
 """
 
 import torch
 from torch.optim import Optimizer
 from typing import Tuple, List, Union, Iterable
+import math
 
 GRAM_NEWTON_SCHULZ_2STEP_COEFFS1 = [
     (1.4897216394163149, -0.5798724169434551, 0.0831346315615072),
@@ -125,10 +137,13 @@ def _warp_meta_update(
     g_cur_2d: torch.Tensor,
     meta_lr: float,
     meta_wd: float,
+    meta_v_cap: float,
 ) -> None:
     """One SGD step of U, V on the one-step-ahead prediction loss
-    ||P @ g_{t-1} - g_t||^2 / ||g_{t-1}||^2 (normalized gradients, in 2D
-    warp form). Also stores the current gradient as the new previous one."""
+    ||P @ u_{t-1} - u_t||^2 / ||u_{t-1}||^2 of the crafted update process,
+    in 2D warp form. Also stores the current update as the new previous
+    one. meta_v_cap caps ||V|| (auto sqrt(1 / meta_lr)) so the bilinear
+    meta-dynamics stay contractive (meta_lr * ||V||^2 <= 1 < 2)."""
     U = state["U"]
     V = state["V"]
     prev = state.get("prev_g")
@@ -140,26 +155,33 @@ def _warp_meta_update(
         if meta_wd > 0:
             U.mul_(1.0 - meta_lr * meta_wd)
             V.mul_(1.0 - meta_lr * meta_wd)
+        if meta_v_cap < float("inf"):
+            v_norm = V.norm()
+            if v_norm > meta_v_cap:
+                V.mul_(meta_v_cap / v_norm)
     state["prev_g"] = g_cur_2d.clone()
 
 
 class WarpAINO(Optimizer):
-    """Innovation Noise-conditioned Optimizer (WarpAINO) with CAME Factorization,
-    Sign Momentum & the WarpAdam learnable low-rank gradient warp.
+    """AINO optimizer with a WarpAdam low-rank warp on the crafted update.
 
-    Every Sinkhorn-normalized gradient is linearly warped by a learnable
-    low-rank, identity-anchored distortion matrix P = I + U @ V^T before it
-    enters the sign-momentum / innovation machinery:
+    The Sinkhorn-normalized gradient first enters the ordinary AINO sign,
+    innovation, and value-momentum machinery. The resulting crafted update is
+    then linearly warped by a learnable low-rank, identity-anchored distortion
+    matrix P = I + U @ V^T immediately before orthogonalization:
 
-        g_warped = g_norm + U @ (V^T @ g_norm),   U = 0, V ~ N(0, 1)
+        update_warped = update + U @ (V^T @ update),   U = 0, V ~ N(0, 1)
 
     U is zero-initialized so P = I exactly and WarpAINO is exactly AINOOpt
     until the factors learn; V is random-initialized to break the stationary
     point of the meta-objective at the identity anchor. After each step, U
     and V are updated with one SGD step (no closure required) on the
-    one-step-ahead prediction loss of the normalized gradient process
-    ||P @ g_{t-1} - g_t||^2 / ||g_{t-1}||^2; meta_wd damps them back toward
-    0. rank=0 or meta_lr=0 disables the warp (plain AINOOpt).
+    one-step-ahead prediction loss of the crafted update process
+    ||P @ u_{t-1} - u_t||^2 / ||u_{t-1}||^2; meta_wd damps them back toward
+    0. ||V|| is capped at sqrt(1 / meta_lr) (meta_v_cap) after each
+    meta-update, so meta_lr * ||V||^2 <= 1 < 2 and the coupled bilinear
+    meta-dynamics stay stable at any meta_lr (no runaway U/V amplification).
+    rank=0 or meta_lr=0 disables the warp (plain AINOOpt).
     """
 
     def __init__(
@@ -177,8 +199,9 @@ class WarpAINO(Optimizer):
         ortho_dtype: torch.dtype = torch.bfloat16,
         eps: float = 1e-16,
         rank: int = 16,
-        meta_lr: float = 1e-3,
+        meta_lr: float = 5e-2,
         meta_wd: float = 1e-2,
+        meta_v_cap: float = None,
         **kwargs,
     ):
         if lr < 0.0:
@@ -201,6 +224,8 @@ class WarpAINO(Optimizer):
             raise ValueError(f"Invalid meta_lr value: {meta_lr}")
         if meta_wd < 0.0:
             raise ValueError(f"Invalid meta_wd value: {meta_wd}")
+        if meta_v_cap is not None and meta_v_cap <= 0.0:
+            raise ValueError(f"Invalid meta_v_cap value: {meta_v_cap}")
 
         defaults = dict(
             lr=lr,
@@ -215,6 +240,7 @@ class WarpAINO(Optimizer):
             rank=rank,
             meta_lr=meta_lr,
             meta_wd=meta_wd,
+            meta_v_cap=meta_v_cap,
         )
         super().__init__(params, defaults)
 
@@ -237,12 +263,12 @@ class WarpAINO(Optimizer):
                     dynamic=False,
                 )
                 self._compiled_warp_step_2d = torch.compile(
-                    self._warpaino_step_core_2d,
+                    self._WarpAINO_step_core_2d,
                     fullgraph=True,
                     dynamic=False,
                 )
                 self._compiled_warp_step_1d = torch.compile(
-                    self._warpaino_step_core_1d,
+                    self._WarpAINO_step_core_1d,
                     fullgraph=True,
                     dynamic=False,
                 )
@@ -253,13 +279,13 @@ class WarpAINO(Optimizer):
                 )
                 self._compiled_step_2d = self._aino_step_core_2d
                 self._compiled_step_1d = self._aino_step_core_1d
-                self._compiled_warp_step_2d = self._warpaino_step_core_2d
-                self._compiled_warp_step_1d = self._warpaino_step_core_1d
+                self._compiled_warp_step_2d = self._WarpAINO_step_core_2d
+                self._compiled_warp_step_1d = self._WarpAINO_step_core_1d
         else:
             self._compiled_step_2d = self._aino_step_core_2d
             self._compiled_step_1d = self._aino_step_core_1d
-            self._compiled_warp_step_2d = self._warpaino_step_core_2d
-            self._compiled_warp_step_1d = self._warpaino_step_core_1d
+            self._compiled_warp_step_2d = self._WarpAINO_step_core_2d
+            self._compiled_warp_step_1d = self._WarpAINO_step_core_1d
 
     @staticmethod
     def _aino_step_core_2d(
@@ -452,7 +478,7 @@ class WarpAINO(Optimizer):
         return update_final
 
     @staticmethod
-    def _warpaino_step_core_2d(
+    def _WarpAINO_step_core_2d(
         p_2d: torch.Tensor,
         g_2d: torch.Tensor,
         U: torch.Tensor,
@@ -473,9 +499,7 @@ class WarpAINO(Optimizer):
         cautious_wd: bool,
         ortho_dtype: torch.dtype,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Core 2D+ update step compilable by torch.compile, with the WarpAdam
-        warp P = I + U @ V^T applied to the Sinkhorn-normalized gradient.
-        Returns (update_final, g_norm)."""
+        """Core 2D+ step with P applied to the crafted update before NS."""
         # 1. Sinkhorn normalization for 2D+ parameters
         g_norm = g_2d
         for _ in range(sinkhorn_steps):
@@ -483,9 +507,6 @@ class WarpAINO(Optimizer):
             g_norm = g_norm / row_rms
             col_rms = torch.sqrt(g_norm.pow(2).mean(dim=-2, keepdim=True) + eps)
             g_norm = g_norm / col_rms
-
-        # 1b. Warp: g -> P @ g with P = I + U @ V^T (mixes the row dimension)
-        g_warped = g_norm + U @ (V.t() @ g_norm)
 
         # Compute poly-beta values for beta1, beta2, and beta3
         beta1_pow = beta1 ** step_t
@@ -509,12 +530,12 @@ class WarpAINO(Optimizer):
             torch.zeros_like(beta3_pow),
         )
 
-        # 2. Track gradient sign momentum using beta1 (on the warped gradient)
-        g_sign = g_warped.sign()
+        # 2. Track gradient sign momentum using beta1
+        g_sign = g_norm.sign()
         sign_momentum.lerp_(g_sign, 1.0 - beta1)
 
         # 3. Track CAME-style factorized row & column squared innovation using poly_beta2
-        diff_sq = (g_warped - momentum).pow(2)
+        diff_sq = (g_norm - momentum).pow(2)
         exp_avg_sq_row.lerp_(diff_sq.mean(dim=-1, keepdim=True), 1.0 - poly_beta2)
         exp_avg_sq_col.lerp_(diff_sq.mean(dim=-2, keepdim=True), 1.0 - poly_beta2)
 
@@ -523,14 +544,15 @@ class WarpAINO(Optimizer):
         c_factor = ((exp_avg_sq_col + eps) / (exp_avg_sq_col.mean(dim=-1, keepdim=True) + eps)).sqrt()
         denom = r_factor * c_factor
 
-        # 4. Update tracked value momentum using poly_beta1 (on the warped gradient)
-        momentum.lerp_(g_warped, 1.0 - poly_beta1)
+        # 4. Update tracked value momentum using poly_beta1
+        momentum.lerp_(g_norm, 1.0 - poly_beta1)
 
         # 5. Craft update: apply tracked sign to absolute value of (momentum / denom)
         update = sign_momentum * (momentum.abs() / denom)
 
-        # 6. Orthogonalize update using 2-step Gram Newton-Schulz
-        O = gram_newton_schulz_2step(update, eps=eps, ortho_dtype=ortho_dtype)
+        # 6. Warp the crafted update before 2-step Gram Newton-Schulz
+        update_warped = update + U @ (V.t() @ update)
+        O = gram_newton_schulz_2step(update_warped, eps=eps, ortho_dtype=ortho_dtype)
 
         # 7. Track row-wise variance using poly_beta3 & normalize using updated tracked row-wise variance
         row_sq = O.pow(2).mean(dim=-1)
@@ -538,13 +560,13 @@ class WarpAINO(Optimizer):
         O_norm = O / torch.sqrt(row_var.clamp_min(eps).unsqueeze(-1))
 
         # 8. Rescale back to update's RMS norm
-        target_rms = torch.sqrt(update.pow(2).mean() + eps)
+        target_rms = torch.sqrt(update_warped.pow(2).mean() + eps)
         current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
         update_final = O_norm * (target_rms / (current_rms + eps))
 
-        # 9. Cautious updates (masked against the warped gradient)
+        # 9. Cautious updates (masked against the original gradient)
         if cautious_update:
-            mask = (g_warped * update_final > 0).to(update_final.dtype)
+            mask = (g_2d * update_final > 0).to(update_final.dtype)
             mask_mean = mask.mean().clamp_min(1e-3)
             update_final = update_final * mask / mask_mean
 
@@ -556,10 +578,10 @@ class WarpAINO(Optimizer):
             else:
                 update_final = update_final + weight_decay * p_2d
 
-        return update_final, g_norm
+        return update_final, update
 
     @staticmethod
-    def _warpaino_step_core_1d(
+    def _WarpAINO_step_core_1d(
         p_data: torch.Tensor,
         g_data: torch.Tensor,
         U: torch.Tensor,
@@ -577,16 +599,10 @@ class WarpAINO(Optimizer):
         cautious_update: bool,
         cautious_wd: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Core 1D/0D update step compilable by torch.compile, with the WarpAdam
-        warp P = I + U @ V^T applied across the full vector (mixing dim =
-        numel). Returns (update_final, g_norm)."""
+        """Core 1D/0D step with P applied to the crafted update before NS."""
         # 1. RMS normalize gradient for 1D/0D parameters
         grad_rms = torch.sqrt(g_data.pow(2).mean() + eps)
         g_norm = g_data / grad_rms
-
-        # 1b. Warp across the full vector: U, V in R^{m x r}, m = numel
-        g2d = g_norm.reshape(-1, 1)
-        g_warped = (g2d + U @ (V.t() @ g2d)).reshape(g_norm.shape)
 
         # Compute poly-beta values for beta1, beta2 and beta3
         beta1_pow = beta1 ** step_t
@@ -610,23 +626,24 @@ class WarpAINO(Optimizer):
             torch.zeros_like(beta3_pow),
         )
 
-        # 2. Track gradient sign momentum using beta1 (on the warped gradient)
-        g_sign = g_warped.sign()
+        # 2. Track gradient sign momentum using beta1
+        g_sign = g_norm.sign()
         sign_momentum.lerp_(g_sign, 1.0 - beta1)
 
         # 3. Track squared innovation relative to un-updated momentum using poly_beta2
-        diff_sq = (g_warped - momentum).pow(2)
+        diff_sq = (g_norm - momentum).pow(2)
         exp_avg_sq.lerp_(diff_sq, 1.0 - poly_beta2)
         denom = exp_avg_sq.sqrt().clamp_min_(eps)
 
-        # 4. Update tracked value momentum using poly_beta1 (on the warped gradient)
-        momentum.lerp_(g_warped, 1.0 - poly_beta1)
+        # 4. Update tracked value momentum using poly_beta1
+        momentum.lerp_(g_norm, 1.0 - poly_beta1)
 
         # 5. Craft update: apply tracked sign to absolute value of (momentum / denom)
         update = sign_momentum * (momentum.abs() / denom)
 
-        # 6. Skip orthogonalization for 1D/0D parameters
-        O = update
+        # 6. Warp the crafted update before the (skipped) orthogonalization
+        update_2d = update.reshape(-1, 1)
+        O = (update_2d + U @ (V.t() @ update_2d)).reshape(update.shape)
 
         # 7. Track variance using poly_beta3 & normalize
         var_sq = O.pow(2).mean()
@@ -634,13 +651,13 @@ class WarpAINO(Optimizer):
         O_norm = O / torch.sqrt(row_var.clamp_min(eps))
 
         # 8. Rescale back to update's RMS norm
-        target_rms = torch.sqrt(update.pow(2).mean() + eps)
+        target_rms = torch.sqrt(O.pow(2).mean() + eps)
         current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
         update_final = O_norm * (target_rms / (current_rms + eps))
 
-        # 9. Cautious updates (masked against the warped gradient)
+        # 9. Cautious updates (masked against the original gradient)
         if cautious_update:
-            mask = (g_warped * update_final > 0).to(update_final.dtype)
+            mask = (g_data * update_final > 0).to(update_final.dtype)
             mask_mean = mask.mean().clamp_min(1e-3)
             update_final = update_final * mask / mask_mean
 
@@ -652,7 +669,7 @@ class WarpAINO(Optimizer):
             else:
                 update_final = update_final + weight_decay * p_data
 
-        return update_final, g_norm
+        return update_final, update
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -727,6 +744,9 @@ class WarpAINO(Optimizer):
         eps = group["eps"]
         meta_lr = group["meta_lr"]
         meta_wd = group["meta_wd"]
+        meta_v_cap = group["meta_v_cap"]
+        if meta_v_cap is None:
+            meta_v_cap = math.sqrt(1.0 / meta_lr) if meta_lr > 0 else float("inf")
 
         for p in group["params"]:
             if p.grad is None:
@@ -803,7 +823,7 @@ class WarpAINO(Optimizer):
                     p.data.copy_(p_2d_fp32.view_as(p.data))
 
                 if U is not None:
-                    _warp_meta_update(state, g_norm, meta_lr, meta_wd)
+                    _warp_meta_update(state, g_norm, meta_lr, meta_wd, meta_v_cap)
 
             else:
                 p_fp32 = p.data.float() if p.dtype is torch.bfloat16 else p.data.clone()
@@ -853,7 +873,7 @@ class WarpAINO(Optimizer):
                     p.data.copy_(p_fp32)
 
                 if U is not None:
-                    _warp_meta_update(state, g_norm.reshape(-1, 1), meta_lr, meta_wd)
+                    _warp_meta_update(state, g_norm.reshape(-1, 1), meta_lr, meta_wd, meta_v_cap)
 
     def _step_foreach(self, group):
         lr = group["lr"]
@@ -867,6 +887,9 @@ class WarpAINO(Optimizer):
         eps = group["eps"]
         meta_lr = group["meta_lr"]
         meta_wd = group["meta_wd"]
+        meta_v_cap = group["meta_v_cap"]
+        if meta_v_cap is None:
+            meta_v_cap = math.sqrt(1.0 / meta_lr) if meta_lr > 0 else float("inf")
 
         params_2d = []
         params_1d = []
@@ -937,7 +960,7 @@ class WarpAINO(Optimizer):
                 p.data.copy_(p_fp32)
 
             if U is not None:
-                _warp_meta_update(state, g_norm.reshape(-1, 1), meta_lr, meta_wd)
+                _warp_meta_update(state, g_norm.reshape(-1, 1), meta_lr, meta_wd, meta_v_cap)
 
         # 2. Process 2D+ parameters
         if not params_2d:
@@ -1023,4 +1046,4 @@ class WarpAINO(Optimizer):
                 p.data.copy_(p_reshaped)
 
         for state, g_norm in meta_list:
-            _warp_meta_update(state, g_norm, meta_lr, meta_wd)
+            _warp_meta_update(state, g_norm, meta_lr, meta_wd, meta_v_cap)
