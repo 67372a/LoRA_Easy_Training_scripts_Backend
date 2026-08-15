@@ -809,6 +809,7 @@ class BilatMuon(Optimizer):
         eps: float = 1e-8,
         ortho_dtype: torch.dtype = torch.bfloat16,
         compile_step: bool = True,
+        **kwargs,
     ):
         if not 0.0 <= lr:
             raise ValueError(f"Invalid lr: {lr}")

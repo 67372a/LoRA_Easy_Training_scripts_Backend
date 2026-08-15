@@ -68,6 +68,8 @@ from LoraEasyCustomOptimizer.soda_wrapper import SODAWrapper
 from LoraEasyCustomOptimizer.bilatmuon import BilatMuon
 from LoraEasyCustomOptimizer.bilatmuonns import BilatMuonNS
 from LoraEasyCustomOptimizer.ainoopt import AINOOpt
+from LoraEasyCustomOptimizer.warpadam import WarpAdam
+from LoraEasyCustomOptimizer.warpaino import WarpAINO
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
@@ -165,6 +167,8 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     SODAWrapper,
     StableSPAM,
     TALON,
+    WarpAdam,
+    WarpAINO,
     VSGD,
     WiwiOpt,
 ]

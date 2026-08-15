@@ -104,6 +104,7 @@ class AINOOpt(Optimizer):
         sinkhorn_steps: int = 5,
         ortho_dtype: torch.dtype = torch.bfloat16,
         eps: float = 1e-8,
+        **kwargs,
     ):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")

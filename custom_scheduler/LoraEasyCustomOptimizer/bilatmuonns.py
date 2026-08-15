@@ -550,6 +550,7 @@ class BilatMuonNS(Optimizer):
         compile_step: bool = True,
         compile_mode: str = "default",
         fullgraph: bool = False,
+        **kwargs,
     ):
         if not 0.0 <= lr:
             raise ValueError(f"Invalid lr: {lr}")
