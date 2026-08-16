@@ -552,7 +552,7 @@ class WarpAINO(Optimizer):
 
         # 6. Warp the crafted update before 2-step Gram Newton-Schulz
         update_warped = update + U @ (V.t() @ update)
-        O = gram_newton_schulz_2step(update_warped, eps=eps, ortho_dtype=ortho_dtype)
+        O = gram_newton_schulz_2step(update_warped, eps=1e-7, ortho_dtype=ortho_dtype)
 
         # 7. Track row-wise variance using poly_beta3 & normalize using updated tracked row-wise variance
         row_sq = O.pow(2).mean(dim=-1)

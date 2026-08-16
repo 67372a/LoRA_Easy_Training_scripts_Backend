@@ -103,7 +103,7 @@ class AINOOpt(Optimizer):
         foreach: bool = False,
         sinkhorn_steps: int = 5,
         ortho_dtype: torch.dtype = torch.bfloat16,
-        eps: float = 1e-8,
+        eps: float = 1e-16,
         **kwargs,
     ):
         if lr < 0.0:
@@ -228,7 +228,7 @@ class AINOOpt(Optimizer):
         update = sign_momentum * (momentum.abs() / denom)
 
         # 6. Orthogonalize update using 2-step Gram Newton-Schulz
-        O = gram_newton_schulz_2step(update, eps=eps, ortho_dtype=ortho_dtype)
+        O = gram_newton_schulz_2step(update, eps=1e-7, ortho_dtype=ortho_dtype)
 
         # 7. Track row-wise variance using poly_beta3 & normalize using updated tracked row-wise variance
         row_sq = O.pow(2).mean(dim=-1)
