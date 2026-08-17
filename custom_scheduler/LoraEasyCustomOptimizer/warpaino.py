@@ -1,14 +1,14 @@
 # Source: https://github.com/Clybius/Personalized-Optimizers
 
-"""WarpAINO: AINOOpt with a WarpAdam learnable low-rank update warp.
+"""WarpAINO: AINOOpt with learnable dense or spectral update warps.
 
 Based on AINOOpt, with the WarpAdam (arXiv:2409.04244) learnable distortion
-matrix P = I + U @ V^T inserted after the crafted update, immediately before
+matrix P = I + D inserted after the crafted update, immediately before
 Gram Newton-Schulz orthogonalization:
 
     g_norm        = Sinkhorn(g)               (RMS row/col norm for 1D)
     update        = AINO(update machinery)
-    update_warped = update + U @ (V^T @ update)
+    update_warped = update + D @ update
 
 The tracked sign momentum, CAME-style factorized row & column squared
 innovation tracking, and tracked value momentum operate on the unwarped
@@ -16,55 +16,48 @@ normalized gradient. Gram Newton-Schulz orthogonalization and the remaining
 update processing operate on the warped crafted update.
 
 P is trained per-parameter with the WarpAdam online meta-objective (no
-closure, one closure-free pass per step): after each step, U and V take one
-SGD step on the one-step-ahead prediction loss
+closure, one closure-free pass per step): after each step, D takes one SGD
+step on the one-step-ahead prediction loss
 
     ||P @ update_{t-1} - update_t||^2 / ||update_{t-1}||^2,
 
 i.e. P learns the transition structure of the crafted update process (the
 paper's "transfer off-diagonal information") -- the same signal it is
 applied to. The norm normalization makes the meta-dynamics scale-invariant
-(independent of the update magnitude); meta_wd damps U and V back toward 0,
+(independent of the update magnitude); meta_wd damps D back toward 0,
 keeping P near the identity anchor.
 
-Stability: the coupled bilinear SGD on (U, V) is locally contractive only
-while meta_lr * ||V||^2 < 2. With V ~ N(0, 1) (||V||^2 ~ m * r) and large
-meta_lr this bound is violated and U, V amplify each other exponentially
-(NaN within a few steps; e.g. meta_lr=0.05 with rank=64 blows up in <10
-steps on a diffusion U-Net). To enforce stability, ||V|| is capped at
-sqrt(1 / meta_lr) (meta_v_cap) after every meta-update, so
-meta_lr * ||V||^2 <= 1 < 2 holds by construction; U absorbs any scale, so
-the cap does not restrict the family P = I + U @ V^T. Pass
-meta_v_cap=float('inf') to disable the cap.
+D is zero-initialized so P = I exactly and WarpAINO is bitwise-identical to
+AINOOpt until the dense warp learns (the first step is exactly AINOOpt).
+meta_lr=0 disables the warp entirely (plain AINOOpt).
 
-U is zero-initialized so P = I exactly and WarpAINO is bitwise-identical to
-AINOOpt until the factors learn (the first step is exactly AINOOpt); V is
-random-initialized to break the stationary point of the meta-objective at
-the identity anchor (with U = V = 0 the meta-gradients vanish and P can
-never learn). rank=0 or meta_lr=0 disables the warp entirely (plain
-AINOOpt).
-
-Factors are shaped (m, r) with r = min(rank, m), m = the mixing dimension
+The dense residual is shaped (m, m), where m is the mixing dimension
 (number of rows after 2D reshape for >= 2D tensors, the full size for
-1D/0D tensors) -- matching WarpAdam's mixing convention.
+1D/0D tensors). ``warp_mode="spectral"`` instead uses a full-rank,
+symmetric-circulant warp represented by bounded log-frequency scales and
+applied with FFTs. Spectral 2D+ warps can independently mix the row and
+column dimensions without storing dense matrices. Spectral log-scales are
+kept in FP32; ``warp_dtype`` controls dense residual storage.
 
 Hyperparameters added over AINOOpt:
-    rank (int): Rank r of the P factors U, V (capped at m).
-        rank=0 disables the warp entirely (plain AINOOpt). (default: 16)
-    meta_lr (float): Learning rate for the U, V meta-update.
-        meta_lr=0 disables the warp (plain AINOOpt). (default: 1e-3)
-    meta_wd (float): Damping on U and V toward 0 (identity anchor).
+    meta_lr (float): Learning rate for the dense residual meta-update.
+        meta_lr=0 disables the warp (plain AINOOpt). (default: 5e-2)
+    meta_wd (float): Damping on D toward 0 (identity anchor).
         (default: 1e-2)
-    meta_v_cap (float): Upper bound on ||V|| enforced after each meta-update
-        (keeps meta_lr * ||V||^2 <= 1, the stability condition, with margin).
-        None auto-selects sqrt(1 / meta_lr); float('inf') disables the cap.
-        (default: None)
+    warp_mode (str): ``"dense"`` for the original dense residual or
+        ``"spectral"`` for the FFT-based full-rank warp. (default: "dense")
+    spectral_bilateral (bool): In spectral mode, independently warp both
+        dimensions of 2D+ updates. Vector and scalar parameters always use
+        the left/vector warp only. (default: True)
+    spectral_log_bound (float): Absolute bound on spectral log-scales. Gains
+        are constrained to ``[exp(-bound), exp(bound)]``. (default: 1.0)
+    warp_dtype (torch.dtype): Storage dtype for D. FP16, BF16, and FP32 are
+        supported; BF16 is the default.
 """
 
 import torch
 from torch.optim import Optimizer
-from typing import Tuple, List, Union, Iterable
-import math
+from typing import Tuple, List, Union, Iterable, Optional
 
 GRAM_NEWTON_SCHULZ_2STEP_COEFFS1 = [
     (1.4897216394163149, -0.5798724169434551, 0.0831346315615072),
@@ -90,6 +83,43 @@ def _reshape_to_2d(t: torch.Tensor) -> torch.Tensor:
     if t.ndim < 2:
         return t.reshape(1, -1)
     return t
+
+
+def _spectral_mirror(x: torch.Tensor) -> torch.Tensor:
+    """Reflect a full FFT spectrum onto its negative-frequency indices."""
+    return torch.roll(x.flip(0), shifts=1, dims=0)
+
+
+def _spectral_log_gain(
+    log_scale: torch.Tensor,
+    log_bound: float,
+) -> torch.Tensor:
+    """Return real conjugate-symmetric positive gains for a FFT warp."""
+    log_scale = 0.5 * (log_scale + _spectral_mirror(log_scale))
+    return log_scale.clamp(-log_bound, log_bound).exp()
+
+
+def _spectral_apply(
+    update_2d: torch.Tensor,
+    spectral_log_left: torch.Tensor,
+    spectral_log_right: Optional[torch.Tensor],
+    spectral_log_bound: float,
+) -> torch.Tensor:
+    """Apply a full-rank symmetric-circulant warp using orthonormal FFTs."""
+    left_gain = _spectral_log_gain(spectral_log_left, spectral_log_bound)
+    if spectral_log_right is None:
+        spectrum = torch.fft.fft(update_2d, dim=0, norm="ortho")
+        delta = torch.fft.ifft(
+            spectrum * (left_gain[:, None] - 1.0), dim=0, norm="ortho"
+        ).real
+    else:
+        right_gain = _spectral_log_gain(spectral_log_right, spectral_log_bound)
+        spectrum = torch.fft.fft2(update_2d, dim=(0, 1), norm="ortho")
+        gain_delta = left_gain[:, None] * right_gain[None, :] - 1.0
+        delta = torch.fft.ifft2(
+            spectrum * gain_delta, dim=(0, 1), norm="ortho"
+        ).real
+    return update_2d + delta
 
 
 @torch.no_grad()
@@ -134,54 +164,112 @@ def gram_newton_schulz_2step(
 @torch.no_grad()
 def _warp_meta_update(
     state: dict,
-    g_cur_2d: torch.Tensor,
+    update_cur_2d: torch.Tensor,
     meta_lr: float,
     meta_wd: float,
-    meta_v_cap: float,
 ) -> None:
-    """One SGD step of U, V on the one-step-ahead prediction loss
-    ||P @ u_{t-1} - u_t||^2 / ||u_{t-1}||^2 of the crafted update process,
-    in 2D warp form. Also stores the current update as the new previous
-    one. meta_v_cap caps ||V|| (auto sqrt(1 / meta_lr)) so the bilinear
-    meta-dynamics stay contractive (meta_lr * ||V||^2 <= 1 < 2)."""
-    U = state["U"]
-    V = state["V"]
-    prev = state.get("prev_g")
+    """Update the dense residual on the normalized prediction objective.
+
+    The stored residual is D in P = I + D. It is kept in low precision to
+    reduce optimizer-state memory, but the update is accumulated in FP32
+    before being quantized back to the configured storage dtype.
+    """
+    warp = state["warp"]
+    prev = state.get("prev_update")
     if prev is not None:
-        R = (prev + U @ (V.t() @ prev)) - g_cur_2d
+        warp_fp32 = warp.float()
+        R = (prev + warp_fp32 @ prev) - update_cur_2d
         scale = 1.0 / prev.norm().square().clamp_min_(1e-12)
-        U.add_(R @ (prev.t() @ V), alpha=-meta_lr * scale)
-        V.add_(prev @ (R.t() @ U), alpha=-meta_lr * scale)
+        warp_fp32.add_(R @ prev.t(), alpha=-meta_lr * scale)
         if meta_wd > 0:
-            U.mul_(1.0 - meta_lr * meta_wd)
-            V.mul_(1.0 - meta_lr * meta_wd)
-        if meta_v_cap < float("inf"):
-            v_norm = V.norm()
-            if v_norm > meta_v_cap:
-                V.mul_(meta_v_cap / v_norm)
-    state["prev_g"] = g_cur_2d.clone()
+            warp_fp32.mul_(1.0 - meta_lr * meta_wd)
+        warp.copy_(warp_fp32.to(warp.dtype))
+    state["prev_update"] = update_cur_2d.clone()
+
+
+@torch.no_grad()
+def _spectral_meta_update(
+    state: dict,
+    update_cur_2d: torch.Tensor,
+    meta_lr: float,
+    meta_wd: float,
+    spectral_log_bound: float,
+) -> None:
+    """Update FFT log-scales on the normalized prediction objective."""
+    prev = state.get("prev_update")
+    if prev is not None:
+        log_left = state["spectral_log_left"]
+        left_gain = _spectral_log_gain(log_left, spectral_log_bound)
+        scale = 1.0 / prev.norm().square().clamp_min_(1e-12)
+
+        log_right = state.get("spectral_log_right")
+        if log_right is None:
+            prev_spectrum = torch.fft.fft(prev, dim=0, norm="ortho")
+            current_spectrum = torch.fft.fft(update_cur_2d, dim=0, norm="ortho")
+            prediction = left_gain[:, None] * prev_spectrum
+            residual = prediction - current_spectrum
+            grad_left = left_gain * torch.real(
+                torch.conj(residual) * prev_spectrum
+            ).sum(dim=1)
+            grad_left.mul_(scale)
+        else:
+            right_gain = _spectral_log_gain(log_right, spectral_log_bound)
+            prev_spectrum = torch.fft.fft2(prev, dim=(0, 1), norm="ortho")
+            current_spectrum = torch.fft.fft2(
+                update_cur_2d, dim=(0, 1), norm="ortho"
+            )
+            base_left = prev_spectrum * right_gain[None, :]
+            prediction = left_gain[:, None] * base_left
+            residual = prediction - current_spectrum
+            grad_left = left_gain * torch.real(
+                torch.conj(residual) * base_left
+            ).sum(dim=1)
+            base_right = prev_spectrum * left_gain[:, None]
+            grad_right = right_gain * torch.real(
+                torch.conj(residual) * base_right
+            ).sum(dim=0)
+            grad_left.mul_(scale)
+            grad_right.mul_(scale)
+
+        log_left.add_(grad_left, alpha=-meta_lr)
+        if meta_wd > 0:
+            log_left.mul_(1.0 - meta_lr * meta_wd)
+        log_left.clamp_(-spectral_log_bound, spectral_log_bound)
+        log_left.copy_(0.5 * (log_left + _spectral_mirror(log_left)))
+
+        if log_right is not None:
+            log_right.add_(grad_right, alpha=-meta_lr)
+            if meta_wd > 0:
+                log_right.mul_(1.0 - meta_lr * meta_wd)
+            log_right.clamp_(-spectral_log_bound, spectral_log_bound)
+            log_right.copy_(0.5 * (log_right + _spectral_mirror(log_right)))
+
+    state["prev_update"] = update_cur_2d.clone()
 
 
 class WarpAINO(Optimizer):
-    """AINO optimizer with a WarpAdam low-rank warp on the crafted update.
+    """AINO optimizer with a dense or spectral WarpAdam-style crafted-update warp.
 
     The Sinkhorn-normalized gradient first enters the ordinary AINO sign,
     innovation, and value-momentum machinery. The resulting crafted update is
-    then linearly warped by a learnable low-rank, identity-anchored distortion
-    matrix P = I + U @ V^T immediately before orthogonalization:
+    then linearly warped by an identity-anchored operator immediately before
+    orthogonalization. The default dense mode uses:
 
-        update_warped = update + U @ (V^T @ update),   U = 0, V ~ N(0, 1)
+        update_warped = update + D @ update,   D = 0
 
-    U is zero-initialized so P = I exactly and WarpAINO is exactly AINOOpt
-    until the factors learn; V is random-initialized to break the stationary
-    point of the meta-objective at the identity anchor. After each step, U
-    and V are updated with one SGD step (no closure required) on the
+    Spectral mode uses bounded positive log-frequency scales and orthonormal
+    FFTs. In 2D+ bilateral mode it applies independent symmetric-circulant
+    operators on the row and column dimensions.
+
+    D is zero-initialized so P = I exactly and WarpAINO is exactly AINOOpt
+    until the dense residual learns. After each step, D is updated with one
+    SGD step (no closure required) on the
     one-step-ahead prediction loss of the crafted update process
-    ||P @ u_{t-1} - u_t||^2 / ||u_{t-1}||^2; meta_wd damps them back toward
-    0. ||V|| is capped at sqrt(1 / meta_lr) (meta_v_cap) after each
-    meta-update, so meta_lr * ||V||^2 <= 1 < 2 and the coupled bilinear
-    meta-dynamics stay stable at any meta_lr (no runaway U/V amplification).
-    rank=0 or meta_lr=0 disables the warp (plain AINOOpt).
+    ||P @ u_{t-1} - u_t||^2 / ||u_{t-1}||^2; meta_wd damps D back toward
+    0. meta_lr=0 disables the warp (plain AINOOpt).
+
+    The dense residual is stored in ``warp_dtype`` and promoted to FP32 for
+    matrix multiplication and meta-updates.
     """
 
     def __init__(
@@ -198,10 +286,12 @@ class WarpAINO(Optimizer):
         sinkhorn_steps: int = 5,
         ortho_dtype: torch.dtype = torch.bfloat16,
         eps: float = 1e-16,
-        rank: int = 16,
         meta_lr: float = 5e-2,
         meta_wd: float = 1e-2,
-        meta_v_cap: float = None,
+        warp_dtype: torch.dtype = torch.bfloat16,
+        warp_mode: str = "spectral",
+        spectral_bilateral: bool = True,
+        spectral_log_bound: float = 1.0,
         **kwargs,
     ):
         if lr < 0.0:
@@ -218,14 +308,23 @@ class WarpAINO(Optimizer):
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
         if eps < 0.0:
             raise ValueError(f"Invalid eps value: {eps}")
-        if not isinstance(rank, int) or rank < 0:
-            raise ValueError(f"Invalid rank: {rank}")
         if meta_lr < 0.0:
             raise ValueError(f"Invalid meta_lr value: {meta_lr}")
         if meta_wd < 0.0:
             raise ValueError(f"Invalid meta_wd value: {meta_wd}")
-        if meta_v_cap is not None and meta_v_cap <= 0.0:
-            raise ValueError(f"Invalid meta_v_cap value: {meta_v_cap}")
+        if warp_mode not in ("dense", "spectral"):
+            raise ValueError(
+                f"Invalid warp_mode: {warp_mode}; expected 'dense' or 'spectral'"
+            )
+        if spectral_log_bound < 0.0:
+            raise ValueError(
+                f"Invalid spectral_log_bound value: {spectral_log_bound}"
+            )
+        if warp_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            raise ValueError(
+                "warp_dtype must be torch.float16, torch.bfloat16, or torch.float32, "
+                f"got {warp_dtype}"
+            )
 
         defaults = dict(
             lr=lr,
@@ -237,10 +336,12 @@ class WarpAINO(Optimizer):
             sinkhorn_steps=sinkhorn_steps,
             ortho_dtype=ortho_dtype,
             eps=eps,
-            rank=rank,
             meta_lr=meta_lr,
             meta_wd=meta_wd,
-            meta_v_cap=meta_v_cap,
+            warp_dtype=warp_dtype,
+            warp_mode=warp_mode,
+            spectral_bilateral=spectral_bilateral,
+            spectral_log_bound=spectral_log_bound,
         )
         super().__init__(params, defaults)
 
@@ -248,10 +349,12 @@ class WarpAINO(Optimizer):
         self._foreach = foreach
 
         if self._compile_step:
+            import logging
+
+            torch._dynamo.config.recompile_limit = max(
+                torch._dynamo.config.recompile_limit, 64
+            )
             try:
-                torch._dynamo.config.recompile_limit = max(
-                    torch._dynamo.config.recompile_limit, 64
-                )
                 self._compiled_step_2d = torch.compile(
                     self._aino_step_core_2d,
                     fullgraph=True,
@@ -273,19 +376,43 @@ class WarpAINO(Optimizer):
                     dynamic=False,
                 )
             except Exception as e:
-                import logging
                 logging.warning(
-                    f"torch.compile failed to initialize: {e}. Falling back to uncompiled step."
+                    f"torch.compile failed for AINO/dense cores: {e}. "
+                    "Falling back to uncompiled cores."
                 )
                 self._compiled_step_2d = self._aino_step_core_2d
                 self._compiled_step_1d = self._aino_step_core_1d
                 self._compiled_warp_step_2d = self._WarpAINO_step_core_2d
                 self._compiled_warp_step_1d = self._WarpAINO_step_core_1d
+            if warp_mode == "spectral":
+                try:
+                    self._compiled_spectral_step_2d = torch.compile(
+                        self._spectral_step_core_2d,
+                        fullgraph=True,
+                        dynamic=False,
+                    )
+                    self._compiled_spectral_step_1d = torch.compile(
+                        self._spectral_step_core_1d,
+                        fullgraph=True,
+                        dynamic=False,
+                    )
+                except Exception as e:
+                    logging.warning(
+                        f"torch.compile failed for spectral cores: {e}. "
+                        "Falling back to uncompiled spectral cores."
+                    )
+                    self._compiled_spectral_step_2d = self._spectral_step_core_2d
+                    self._compiled_spectral_step_1d = self._spectral_step_core_1d
+            else:
+                self._compiled_spectral_step_2d = self._spectral_step_core_2d
+                self._compiled_spectral_step_1d = self._spectral_step_core_1d
         else:
             self._compiled_step_2d = self._aino_step_core_2d
             self._compiled_step_1d = self._aino_step_core_1d
             self._compiled_warp_step_2d = self._WarpAINO_step_core_2d
             self._compiled_warp_step_1d = self._WarpAINO_step_core_1d
+            self._compiled_spectral_step_2d = self._spectral_step_core_2d
+            self._compiled_spectral_step_1d = self._spectral_step_core_1d
 
     @staticmethod
     def _aino_step_core_2d(
@@ -481,8 +608,7 @@ class WarpAINO(Optimizer):
     def _WarpAINO_step_core_2d(
         p_2d: torch.Tensor,
         g_2d: torch.Tensor,
-        U: torch.Tensor,
-        V: torch.Tensor,
+        warp: torch.Tensor,
         momentum: torch.Tensor,
         sign_momentum: torch.Tensor,
         exp_avg_sq_row: torch.Tensor,
@@ -551,7 +677,7 @@ class WarpAINO(Optimizer):
         update = sign_momentum * (momentum.abs() / denom)
 
         # 6. Warp the crafted update before 2-step Gram Newton-Schulz
-        update_warped = update + U @ (V.t() @ update)
+        update_warped = update + warp.float() @ update
         O = gram_newton_schulz_2step(update_warped, eps=1e-7, ortho_dtype=ortho_dtype)
 
         # 7. Track row-wise variance using poly_beta3 & normalize using updated tracked row-wise variance
@@ -584,8 +710,7 @@ class WarpAINO(Optimizer):
     def _WarpAINO_step_core_1d(
         p_data: torch.Tensor,
         g_data: torch.Tensor,
-        U: torch.Tensor,
-        V: torch.Tensor,
+        warp: torch.Tensor,
         momentum: torch.Tensor,
         sign_momentum: torch.Tensor,
         exp_avg_sq: torch.Tensor,
@@ -643,7 +768,7 @@ class WarpAINO(Optimizer):
 
         # 6. Warp the crafted update before the (skipped) orthogonalization
         update_2d = update.reshape(-1, 1)
-        O = (update_2d + U @ (V.t() @ update_2d)).reshape(update.shape)
+        O = (update_2d + warp.float() @ update_2d).reshape(update.shape)
 
         # 7. Track variance using poly_beta3 & normalize
         var_sq = O.pow(2).mean()
@@ -662,6 +787,214 @@ class WarpAINO(Optimizer):
             update_final = update_final * mask / mask_mean
 
         # Decoupled weight decay
+        if weight_decay != 0:
+            if cautious_wd:
+                wd_mask = (update_final.sign() == p_data.sign()).to(update_final.dtype)
+                update_final = update_final + weight_decay * p_data * wd_mask
+            else:
+                update_final = update_final + weight_decay * p_data
+
+        return update_final, update
+
+    @staticmethod
+    def _spectral_step_core_2d(
+        p_2d: torch.Tensor,
+        g_2d: torch.Tensor,
+        spectral_log_left: torch.Tensor,
+        spectral_log_right: torch.Tensor,
+        momentum: torch.Tensor,
+        sign_momentum: torch.Tensor,
+        exp_avg_sq_row: torch.Tensor,
+        exp_avg_sq_col: torch.Tensor,
+        row_var: torch.Tensor,
+        beta1: float,
+        beta2: float,
+        beta3: float,
+        weight_decay: float,
+        eps: float,
+        step_t: torch.Tensor,
+        sinkhorn_steps: int,
+        cautious_update: bool,
+        cautious_wd: bool,
+        ortho_dtype: torch.dtype,
+        spectral_bilateral: bool,
+        spectral_log_bound: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Core 2D+ step with a full-rank FFT spectral warp."""
+        # 1. Sinkhorn normalization for 2D+ parameters
+        g_norm = g_2d
+        for _ in range(sinkhorn_steps):
+            row_rms = torch.sqrt(g_norm.pow(2).mean(dim=-1, keepdim=True) + eps)
+            g_norm = g_norm / row_rms
+            col_rms = torch.sqrt(g_norm.pow(2).mean(dim=-2, keepdim=True) + eps)
+            g_norm = g_norm / col_rms
+
+        # Compute poly-beta values for beta1, beta2, and beta3
+        beta1_pow = beta1 ** step_t
+        poly_beta1 = torch.where(
+            step_t > 1.0,
+            (beta1_pow - beta1) / (beta1_pow - 1.0),
+            torch.zeros_like(beta1_pow),
+        )
+        beta2_pow = beta2 ** step_t
+        poly_beta2 = torch.where(
+            step_t > 1.0,
+            (beta2_pow - beta2) / (beta2_pow - 1.0),
+            torch.zeros_like(beta2_pow),
+        )
+        beta3_pow = beta3 ** step_t
+        poly_beta3 = torch.where(
+            step_t > 1.0,
+            (beta3_pow - beta3) / (beta3_pow - 1.0),
+            torch.zeros_like(beta3_pow),
+        )
+
+        # 2. Track gradient sign momentum using beta1
+        g_sign = g_norm.sign()
+        sign_momentum.lerp_(g_sign, 1.0 - beta1)
+
+        # 3. Track factorized squared innovation using poly_beta2
+        diff_sq = (g_norm - momentum).pow(2)
+        exp_avg_sq_row.lerp_(diff_sq.mean(dim=-1, keepdim=True), 1.0 - poly_beta2)
+        exp_avg_sq_col.lerp_(diff_sq.mean(dim=-2, keepdim=True), 1.0 - poly_beta2)
+
+        r_factor = (exp_avg_sq_row + eps).sqrt()
+        c_factor = (
+            (exp_avg_sq_col + eps)
+            / (exp_avg_sq_col.mean(dim=-1, keepdim=True) + eps)
+        ).sqrt()
+        denom = r_factor * c_factor
+
+        # 4. Update tracked value momentum using poly_beta1
+        momentum.lerp_(g_norm, 1.0 - poly_beta1)
+
+        # 5. Craft update
+        update = sign_momentum * (momentum.abs() / denom)
+
+        # 6. Apply the full-rank spectral warp before Gram Newton-Schulz.
+        if spectral_bilateral:
+            warped = _spectral_apply(
+                update,
+                spectral_log_left,
+                spectral_log_right,
+                spectral_log_bound,
+            )
+        else:
+            warped = _spectral_apply(
+                update, spectral_log_left, None, spectral_log_bound
+            )
+        update_warped = torch.where(step_t <= 1.0, update, warped)
+        O = gram_newton_schulz_2step(
+            update_warped, eps=1e-7, ortho_dtype=ortho_dtype
+        )
+
+        # 7. Track row-wise variance
+        row_sq = O.pow(2).mean(dim=-1)
+        row_var.lerp_(row_sq, 1.0 - poly_beta3)
+        O_norm = O / torch.sqrt(row_var.clamp_min(eps).unsqueeze(-1))
+
+        # 8. Rescale back to the warped update's RMS norm
+        target_rms = torch.sqrt(update_warped.pow(2).mean() + eps)
+        current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
+        update_final = O_norm * (target_rms / (current_rms + eps))
+
+        # 9. Cautious updates against the original gradient
+        if cautious_update:
+            mask = (g_2d * update_final > 0).to(update_final.dtype)
+            mask_mean = mask.mean().clamp_min(1e-3)
+            update_final = update_final * mask / mask_mean
+
+        if weight_decay != 0:
+            if cautious_wd:
+                wd_mask = (update_final.sign() == p_2d.sign()).to(update_final.dtype)
+                update_final = update_final + weight_decay * p_2d * wd_mask
+            else:
+                update_final = update_final + weight_decay * p_2d
+
+        return update_final, update
+
+    @staticmethod
+    def _spectral_step_core_1d(
+        p_data: torch.Tensor,
+        g_data: torch.Tensor,
+        spectral_log_left: torch.Tensor,
+        momentum: torch.Tensor,
+        sign_momentum: torch.Tensor,
+        exp_avg_sq: torch.Tensor,
+        row_var: torch.Tensor,
+        beta1: float,
+        beta2: float,
+        beta3: float,
+        weight_decay: float,
+        eps: float,
+        step_t: torch.Tensor,
+        cautious_update: bool,
+        cautious_wd: bool,
+        spectral_log_bound: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Core 1D/0D step with a full-rank FFT spectral warp."""
+        # 1. RMS normalize gradient for 1D/0D parameters
+        grad_rms = torch.sqrt(g_data.pow(2).mean() + eps)
+        g_norm = g_data / grad_rms
+
+        # Compute poly-beta values for beta1, beta2, and beta3
+        beta1_pow = beta1 ** step_t
+        poly_beta1 = torch.where(
+            step_t > 1.0,
+            (beta1_pow - beta1) / (beta1_pow - 1.0),
+            torch.zeros_like(beta1_pow),
+        )
+        beta2_pow = beta2 ** step_t
+        poly_beta2 = torch.where(
+            step_t > 1.0,
+            (beta2_pow - beta2) / (beta2_pow - 1.0),
+            torch.zeros_like(beta2_pow),
+        )
+        beta3_pow = beta3 ** step_t
+        poly_beta3 = torch.where(
+            step_t > 1.0,
+            (beta3_pow - beta3) / (beta3_pow - 1.0),
+            torch.zeros_like(beta3_pow),
+        )
+
+        # 2. Track gradient sign momentum using beta1
+        g_sign = g_norm.sign()
+        sign_momentum.lerp_(g_sign, 1.0 - beta1)
+
+        # 3. Track squared innovation relative to un-updated momentum
+        diff_sq = (g_norm - momentum).pow(2)
+        exp_avg_sq.lerp_(diff_sq, 1.0 - poly_beta2)
+        denom = exp_avg_sq.sqrt().clamp_min_(eps)
+
+        # 4. Update tracked value momentum using poly_beta1
+        momentum.lerp_(g_norm, 1.0 - poly_beta1)
+
+        # 5. Craft update
+        update = sign_momentum * (momentum.abs() / denom)
+
+        # 6. Apply the spectral warp to the vector dimension
+        update_2d = update.reshape(-1, 1)
+        warped = _spectral_apply(
+            update_2d, spectral_log_left, None, spectral_log_bound
+        )
+        O = torch.where(step_t <= 1.0, update_2d, warped).reshape(update.shape)
+
+        # 7. Track variance
+        var_sq = O.pow(2).mean()
+        row_var.lerp_(var_sq, 1.0 - poly_beta3)
+        O_norm = O / torch.sqrt(row_var.clamp_min(eps))
+
+        # 8. Rescale back to the warped update's RMS norm
+        target_rms = torch.sqrt(O.pow(2).mean() + eps)
+        current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
+        update_final = O_norm * (target_rms / (current_rms + eps))
+
+        # 9. Cautious updates against the original gradient
+        if cautious_update:
+            mask = (g_data * update_final > 0).to(update_final.dtype)
+            mask_mean = mask.mean().clamp_min(1e-3)
+            update_final = update_final * mask / mask_mean
+
         if weight_decay != 0:
             if cautious_wd:
                 wd_mask = (update_final.sign() == p_data.sign()).to(update_final.dtype)
@@ -716,14 +1049,24 @@ class WarpAINO(Optimizer):
                         state["exp_avg_sq"] = torch.zeros_like(p.data, dtype=torch.float32)
                         state["row_var"] = torch.zeros((), device=p.device, dtype=torch.float32)
                         warp_m = p.numel()
-                    if group["rank"] > 0 and group["meta_lr"] > 0:
-                        r = min(group["rank"], warp_m)
-                        state["U"] = torch.zeros(
-                            warp_m, r, dtype=torch.float32, device=p.device
-                        )
-                        state["V"] = torch.zeros(
-                            warp_m, r, dtype=torch.float32, device=p.device
-                        ).normal_(0.0, 1.0)
+                    if group["meta_lr"] > 0:
+                        if group["warp_mode"] == "dense":
+                            state["warp"] = torch.zeros(
+                                warp_m,
+                                warp_m,
+                                dtype=group["warp_dtype"],
+                                device=p.device,
+                            )
+                        else:
+                            state["spectral_log_left"] = torch.zeros(
+                                warp_m, dtype=torch.float32, device=p.device
+                            )
+                            if p.ndim >= 2 and group["spectral_bilateral"]:
+                                state["spectral_log_right"] = torch.zeros(
+                                    w_2d.shape[1],
+                                    dtype=torch.float32,
+                                    device=p.device,
+                                )
 
             if self._foreach:
                 self._step_foreach(group)
@@ -744,9 +1087,8 @@ class WarpAINO(Optimizer):
         eps = group["eps"]
         meta_lr = group["meta_lr"]
         meta_wd = group["meta_wd"]
-        meta_v_cap = group["meta_v_cap"]
-        if meta_v_cap is None:
-            meta_v_cap = math.sqrt(1.0 / meta_lr) if meta_lr > 0 else float("inf")
+        spectral_bilateral = group["spectral_bilateral"]
+        spectral_log_bound = group["spectral_log_bound"]
 
         for p in group["params"]:
             if p.grad is None:
@@ -764,7 +1106,8 @@ class WarpAINO(Optimizer):
             if grad.dtype in (torch.bfloat16, torch.float16):
                 grad = grad.float()
 
-            U = state.get("U")
+            warp = state.get("warp")
+            spectral_log_left = state.get("spectral_log_left")
 
             if p.ndim >= 2:
                 p_2d = _reshape_to_2d(p.data)
@@ -772,12 +1115,40 @@ class WarpAINO(Optimizer):
 
                 p_2d_fp32 = p_2d.float() if p.dtype is torch.bfloat16 else p_2d.clone()
 
-                if U is not None:
-                    update_final, g_norm = self._compiled_warp_step_2d(
+                if spectral_log_left is not None:
+                    spectral_log_right = state.get("spectral_log_right")
+                    if spectral_log_right is None:
+                        spectral_log_right = torch.empty(
+                            0, dtype=torch.float32, device=p.device
+                        )
+                    update_final, crafted_update = self._compiled_spectral_step_2d(
                         p_2d_fp32,
                         g_2d,
-                        U,
-                        state["V"],
+                        spectral_log_left,
+                        spectral_log_right,
+                        state["momentum"],
+                        state["sign_momentum"],
+                        state["exp_avg_sq_row"],
+                        state["exp_avg_sq_col"],
+                        state["row_var"],
+                        beta1,
+                        beta2,
+                        beta3,
+                        weight_decay,
+                        eps,
+                        step_t,
+                        sinkhorn_steps,
+                        cautious_update,
+                        cautious_wd,
+                        ortho_dtype,
+                        spectral_bilateral,
+                        spectral_log_bound,
+                    )
+                elif warp is not None:
+                    update_final, crafted_update = self._compiled_warp_step_2d(
+                        p_2d_fp32,
+                        g_2d,
+                        warp,
                         state["momentum"],
                         state["sign_momentum"],
                         state["exp_avg_sq_row"],
@@ -822,18 +1193,44 @@ class WarpAINO(Optimizer):
                 else:
                     p.data.copy_(p_2d_fp32.view_as(p.data))
 
-                if U is not None:
-                    _warp_meta_update(state, g_norm, meta_lr, meta_wd, meta_v_cap)
+                if spectral_log_left is not None:
+                    _spectral_meta_update(
+                        state,
+                        crafted_update,
+                        meta_lr,
+                        meta_wd,
+                        spectral_log_bound,
+                    )
+                elif warp is not None:
+                    _warp_meta_update(state, crafted_update, meta_lr, meta_wd)
 
             else:
                 p_fp32 = p.data.float() if p.dtype is torch.bfloat16 else p.data.clone()
 
-                if U is not None:
-                    update_final, g_norm = self._compiled_warp_step_1d(
+                if spectral_log_left is not None:
+                    update_final, crafted_update = self._compiled_spectral_step_1d(
                         p_fp32,
                         grad,
-                        U,
-                        state["V"],
+                        spectral_log_left,
+                        state["momentum"],
+                        state["sign_momentum"],
+                        state["exp_avg_sq"],
+                        state["row_var"],
+                        beta1,
+                        beta2,
+                        beta3,
+                        weight_decay,
+                        eps,
+                        step_t,
+                        cautious_update,
+                        cautious_wd,
+                        spectral_log_bound,
+                    )
+                elif warp is not None:
+                    update_final, crafted_update = self._compiled_warp_step_1d(
+                        p_fp32,
+                        grad,
+                        warp,
                         state["momentum"],
                         state["sign_momentum"],
                         state["exp_avg_sq"],
@@ -872,8 +1269,18 @@ class WarpAINO(Optimizer):
                 else:
                     p.data.copy_(p_fp32)
 
-                if U is not None:
-                    _warp_meta_update(state, g_norm.reshape(-1, 1), meta_lr, meta_wd, meta_v_cap)
+                if spectral_log_left is not None:
+                    _spectral_meta_update(
+                        state,
+                        crafted_update.reshape(-1, 1),
+                        meta_lr,
+                        meta_wd,
+                        spectral_log_bound,
+                    )
+                elif warp is not None:
+                    _warp_meta_update(
+                        state, crafted_update.reshape(-1, 1), meta_lr, meta_wd
+                    )
 
     def _step_foreach(self, group):
         lr = group["lr"]
@@ -887,9 +1294,8 @@ class WarpAINO(Optimizer):
         eps = group["eps"]
         meta_lr = group["meta_lr"]
         meta_wd = group["meta_wd"]
-        meta_v_cap = group["meta_v_cap"]
-        if meta_v_cap is None:
-            meta_v_cap = math.sqrt(1.0 / meta_lr) if meta_lr > 0 else float("inf")
+        spectral_bilateral = group["spectral_bilateral"]
+        spectral_log_bound = group["spectral_log_bound"]
 
         params_2d = []
         params_1d = []
@@ -915,13 +1321,32 @@ class WarpAINO(Optimizer):
             grad = p.grad.data.float() if p.grad.data.dtype in (torch.bfloat16, torch.float16) else p.grad.data
 
             p_fp32 = p.data.float() if p.dtype is torch.bfloat16 else p.data.clone()
-            U = state.get("U")
-            if U is not None:
-                update_final, g_norm = self._compiled_warp_step_1d(
+            warp = state.get("warp")
+            spectral_log_left = state.get("spectral_log_left")
+            if spectral_log_left is not None:
+                update_final, crafted_update = self._compiled_spectral_step_1d(
                     p_fp32,
                     grad,
-                    U,
-                    state["V"],
+                    spectral_log_left,
+                    state["momentum"],
+                    state["sign_momentum"],
+                    state["exp_avg_sq"],
+                    state["row_var"],
+                    beta1,
+                    beta2,
+                    beta3,
+                    weight_decay,
+                    eps,
+                    step_t,
+                    cautious_update,
+                    cautious_wd,
+                    spectral_log_bound,
+                )
+            elif warp is not None:
+                update_final, crafted_update = self._compiled_warp_step_1d(
+                    p_fp32,
+                    grad,
+                    warp,
                     state["momentum"],
                     state["sign_momentum"],
                     state["exp_avg_sq"],
@@ -959,8 +1384,18 @@ class WarpAINO(Optimizer):
             else:
                 p.data.copy_(p_fp32)
 
-            if U is not None:
-                _warp_meta_update(state, g_norm.reshape(-1, 1), meta_lr, meta_wd, meta_v_cap)
+            if spectral_log_left is not None:
+                _spectral_meta_update(
+                    state,
+                    crafted_update.reshape(-1, 1),
+                    meta_lr,
+                    meta_wd,
+                    spectral_log_bound,
+                )
+            elif warp is not None:
+                _warp_meta_update(
+                    state, crafted_update.reshape(-1, 1), meta_lr, meta_wd
+                )
 
         # 2. Process 2D+ parameters
         if not params_2d:
@@ -987,13 +1422,43 @@ class WarpAINO(Optimizer):
 
             p_2d_fp32 = p_2d.float() if p.dtype is torch.bfloat16 else p_2d.clone()
 
-            U = state.get("U")
-            if U is not None:
-                update_final, g_norm = self._compiled_warp_step_2d(
+            warp = state.get("warp")
+            spectral_log_left = state.get("spectral_log_left")
+            if spectral_log_left is not None:
+                spectral_log_right = state.get("spectral_log_right")
+                if spectral_log_right is None:
+                    spectral_log_right = torch.empty(
+                        0, dtype=torch.float32, device=p.device
+                    )
+                update_final, crafted_update = self._compiled_spectral_step_2d(
                     p_2d_fp32,
                     g_2d,
-                    U,
-                    state["V"],
+                    spectral_log_left,
+                    spectral_log_right,
+                    state["momentum"],
+                    state["sign_momentum"],
+                    state["exp_avg_sq_row"],
+                    state["exp_avg_sq_col"],
+                    state["row_var"],
+                    beta1,
+                    beta2,
+                    beta3,
+                    weight_decay,
+                    eps,
+                    step_t,
+                    sinkhorn_steps,
+                    cautious_update,
+                    cautious_wd,
+                    ortho_dtype,
+                    spectral_bilateral,
+                    spectral_log_bound,
+                )
+                meta_list.append((state, crafted_update))
+            elif warp is not None:
+                update_final, crafted_update = self._compiled_warp_step_2d(
+                    p_2d_fp32,
+                    g_2d,
+                    warp,
                     state["momentum"],
                     state["sign_momentum"],
                     state["exp_avg_sq_row"],
@@ -1010,7 +1475,7 @@ class WarpAINO(Optimizer):
                     cautious_wd,
                     ortho_dtype,
                 )
-                meta_list.append((state, g_norm))
+                meta_list.append((state, crafted_update))
             else:
                 update_final = self._compiled_step_2d(
                     p_2d_fp32,
@@ -1045,5 +1510,14 @@ class WarpAINO(Optimizer):
             else:
                 p.data.copy_(p_reshaped)
 
-        for state, g_norm in meta_list:
-            _warp_meta_update(state, g_norm, meta_lr, meta_wd, meta_v_cap)
+        for state, crafted_update in meta_list:
+            if "spectral_log_left" in state:
+                _spectral_meta_update(
+                    state,
+                    crafted_update,
+                    meta_lr,
+                    meta_wd,
+                    spectral_log_bound,
+                )
+            else:
+                _warp_meta_update(state, crafted_update, meta_lr, meta_wd)
