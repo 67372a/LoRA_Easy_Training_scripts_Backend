@@ -508,7 +508,7 @@ class WarpAINO(Optimizer):
         # Decoupled weight decay
         if weight_decay != 0:
             if cautious_wd:
-                wd_mask = (update_final.sign() == p_2d.sign()).to(update_final.dtype)
+                wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
                 update_final = update_final + weight_decay * p_2d * wd_mask
             else:
                 update_final = update_final + weight_decay * p_2d
@@ -597,7 +597,7 @@ class WarpAINO(Optimizer):
         # Decoupled weight decay
         if weight_decay != 0:
             if cautious_wd:
-                wd_mask = (update_final.sign() == p_data.sign()).to(update_final.dtype)
+                wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
                 update_final = update_final + weight_decay * p_data * wd_mask
             else:
                 update_final = update_final + weight_decay * p_data
