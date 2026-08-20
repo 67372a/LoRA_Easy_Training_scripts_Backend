@@ -1174,12 +1174,12 @@ class WarpAINO(Optimizer):
                 # 4. Apply weight decay
                 eff_wd = weight_decay * scale
                 if cautious_wd:
-                    wd_mask = (update_final.sign() == p_data.sign()).to(update_final.dtype)
+                    wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
                     update_final = update_final + eff_wd * (p_data * wd_mask)
                 else:
                     update_final = update_final + eff_wd * p_data
             elif cautious_wd:
-                wd_mask = (update_final.sign() == p_data.sign()).to(update_final.dtype)
+                wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
                 update_final = update_final + weight_decay * (p_data * wd_mask)
             else:
                 update_final = update_final + weight_decay * p_data
