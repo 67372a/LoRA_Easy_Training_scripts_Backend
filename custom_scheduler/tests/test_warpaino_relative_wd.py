@@ -7,9 +7,9 @@ Validates the two hyperparameters added for relative weight decay:
 * ``relative_wd_max_contraction`` -- discrete-time overshoot guard capping the
   effective decay multiplier to ``max_contraction / (lr * weight_decay)``.
 
-The tests exercise the plain AINO core directly (deterministic, no warp) for the
-exact numeric behaviour, and then run full WarpAINO steps on CUDA across the
-native/foreach paths and dense/spectral warp modes as a functional smoke check.
+The overshoot cap is precomputed outside the ``torch.compile``'d step cores so
+the compiled graph never contains data-dependent control flow on the learning
+rate (which can be a tensor when driven by schedulers/accelerate).
 """
 
 import os
@@ -21,7 +21,7 @@ import torch
 # Ensure the custom_scheduler package is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from LoraEasyCustomOptimizer.warpaino import WarpAINO
+from LoraEasyCustomOptimizer.warpaino import WarpAINO, _relative_wd_max_scale
 
 
 DEVICE = "cuda"
@@ -36,10 +36,9 @@ def _run_1d_core(
     p,
     g,
     weight_decay,
-    lr,
+    max_scale,
     eps,
     delta,
-    max_contraction,
     cautious_wd=False,
     cautious_update=False,
 ):
@@ -60,14 +59,13 @@ def _run_1d_core(
         beta2=0.95,
         beta3=0.999,
         weight_decay=weight_decay,
-        lr=lr,
+        max_scale=max_scale,
         eps=eps,
         step_t=step_t,
         cautious_update=cautious_update,
         cautious_wd=cautious_wd,
         relative_wd=True,
         relative_wd_delta=delta,
-        relative_wd_max_contraction=max_contraction,
     )
 
 
@@ -93,8 +91,9 @@ def test_relative_wd_matches_reference():
     delta = 1e-2
     max_contraction = 0.99
 
-    update_no_wd = _run_1d_core(p, g, 0.0, lr, eps, delta, max_contraction)
-    update_wd = _run_1d_core(p, g, wd, lr, eps, delta, max_contraction)
+    max_scale = _relative_wd_max_scale(lr, wd, max_contraction)
+    update_no_wd = _run_1d_core(p, g, 0.0, max_scale, eps, delta)
+    update_wd = _run_1d_core(p, g, wd, max_scale, eps, delta)
 
     expected_wd = _reference_wd(
         update_no_wd, p, wd, lr, eps, delta, max_contraction
@@ -115,8 +114,9 @@ def test_relative_wd_max_contraction_caps_scale():
     delta = 1e-4
     max_contraction = 0.1
 
-    update_no_wd = _run_1d_core(p, g, 0.0, lr, eps, delta, max_contraction)
-    update_wd = _run_1d_core(p, g, wd, lr, eps, delta, max_contraction)
+    max_scale = _relative_wd_max_scale(lr, wd, max_contraction)
+    update_no_wd = _run_1d_core(p, g, 0.0, max_scale, eps, delta)
+    update_wd = _run_1d_core(p, g, wd, max_scale, eps, delta)
 
     update_rms = torch.sqrt(update_no_wd.pow(2).mean() + eps)
     param_rms_smooth = torch.sqrt(p.pow(2).mean() + delta**2)
@@ -139,10 +139,18 @@ def test_relative_wd_delta_smooths_zero_param():
     torch.manual_seed(2)
     p = torch.zeros(8, device=DEVICE)
     g = torch.randn(8, device=DEVICE)
+    max_scale = _relative_wd_max_scale(0.1, 0.5, 0.99)
     update_wd = _run_1d_core(
-        p, g, weight_decay=0.5, lr=0.1, eps=1e-8, delta=1e-3, max_contraction=0.99
+        p, g, weight_decay=0.5, max_scale=max_scale, eps=1e-8, delta=1e-3
     )
     assert torch.isfinite(update_wd).all()
+
+
+def test_relative_wd_max_scale_no_cap_when_non_positive():
+    """A non-positive lr * weight_decay disables the overshoot cap."""
+    assert _relative_wd_max_scale(0.0, 1.0, 0.5) == float("inf")
+    assert _relative_wd_max_scale(1.0, 0.0, 0.5) == float("inf")
+    assert _relative_wd_max_scale(1.0, 1.0, 0.5) == 0.5
 
 
 @pytest.mark.parametrize("foreach", [False, True])
@@ -201,6 +209,37 @@ def test_relative_wd_compile_step_cuda():
     x = torch.randn(4, 8, device=DEVICE)
     lin(x).square().mean().backward()
     opt.step()
+
+    assert torch.isfinite(lin.weight).all()
+    assert torch.isfinite(lin.bias).all()
+
+
+def test_relative_wd_compile_step_tensor_lr_cuda():
+    """Compiled cores must not branch on a tensor-valued learning rate."""
+    _requires_cuda()
+    torch.manual_seed(5)
+
+    lin = torch.nn.Linear(8, 4, device=DEVICE)
+    opt = WarpAINO(
+        list(lin.parameters()),
+        lr=1e-3,
+        weight_decay=1e-2,
+        relative_wd=True,
+        relative_wd_delta=1e-2,
+        relative_wd_max_contraction=0.9,
+        compile_step=True,
+        warp_mode="spectral",
+    )
+
+    # Simulate accelerate/scheduler passing lr as a 0-dim CUDA tensor.
+    for group in opt.param_groups:
+        group["lr"] = torch.tensor(group["lr"], device=DEVICE)
+
+    for _ in range(2):
+        x = torch.randn(4, 8, device=DEVICE)
+        lin(x).square().mean().backward()
+        opt.step()
+        opt.zero_grad()
 
     assert torch.isfinite(lin.weight).all()
     assert torch.isfinite(lin.bias).all()
