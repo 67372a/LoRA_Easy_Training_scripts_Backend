@@ -53,6 +53,22 @@ Hyperparameters added over AINOOpt:
         are constrained to ``[exp(-bound), exp(bound)]``. (default: 1.0)
     warp_dtype (torch.dtype): Storage dtype for D. FP16, BF16, and FP32 are
         supported; BF16 is the default.
+    relative_wd (bool): If True, weight decay is RMS-relative: the p_data
+        term is scaled to ``weight_decay`` times the RMS of the (cautious-
+        masked) crafted update, i.e. ``wd = weight_decay * (rms_update /
+        rms_param) * p`` so ``RMS(wd) = weight_decay * RMS(update)``.
+        When False (default), uses absolute ``weight_decay * p``.
+    relative_wd_delta (float): Pseudo-Huber smoothing threshold for relative
+        weight decay denominator, i.e. ``rms_param_smooth = sqrt(rms_param^2 + delta^2)``.
+        Prevents singular scaling and high-frequency sign chatter near zero by
+        smoothly transitioning relative decay back to standard linear decay
+        as ``rms_param << delta``. (default: 1e-3)
+    relative_wd_max_contraction (float): Maximum fractional parameter shrinkage
+        permitted in a single discrete step under relative weight decay. Caps the
+        effective decay multiplier so that ``scale <= max_contraction / (lr * weight_decay)``,
+        guaranteeing the discrete update factor ``(1 - lr * weight_decay * scale)``
+        remains strictly non-negative and preventing sign-flipping overshoots.
+        (default: 0.99)
 """
 
 import torch
@@ -292,7 +308,9 @@ class WarpAINO(Optimizer):
         warp_mode: str = "spectral",
         spectral_bilateral: bool = True,
         spectral_log_bound: float = 1.0,
-        **kwargs,
+        relative_wd: bool = False,
+        relative_wd_delta: float = 1e-3,
+        relative_wd_max_contraction: float = 0.99,
     ):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -325,6 +343,8 @@ class WarpAINO(Optimizer):
                 "warp_dtype must be torch.float16, torch.bfloat16, or torch.float32, "
                 f"got {warp_dtype}"
             )
+        if not isinstance(relative_wd, bool):
+            raise ValueError(f"relative_wd must be bool, got {relative_wd}")
 
         defaults = dict(
             lr=lr,
@@ -342,6 +362,9 @@ class WarpAINO(Optimizer):
             warp_mode=warp_mode,
             spectral_bilateral=spectral_bilateral,
             spectral_log_bound=spectral_log_bound,
+            relative_wd=relative_wd,
+            relative_wd_delta=relative_wd_delta,
+            relative_wd_max_contraction=relative_wd_max_contraction,
         )
         super().__init__(params, defaults)
 
@@ -427,12 +450,16 @@ class WarpAINO(Optimizer):
         beta2: float,
         beta3: float,
         weight_decay: float,
+        lr: float,
         eps: float,
         step_t: torch.Tensor,
         sinkhorn_steps: int,
         cautious_update: bool,
         cautious_wd: bool,
         ortho_dtype: torch.dtype,
+        relative_wd: bool = False,
+        relative_wd_delta: float = 1e-3,
+        relative_wd_max_contraction: float = 0.99,
     ) -> torch.Tensor:
         """Core 2D+ update step compilable by torch.compile (plain AINOOpt,
         used when the warp is disabled)."""
@@ -505,9 +532,27 @@ class WarpAINO(Optimizer):
             mask_mean = mask.mean().clamp_min(1e-3)
             update_final = update_final * mask / mask_mean
 
-        # Decoupled weight decay
+        # Decoupled weight decay (absolute or RMS-relative)
         if weight_decay != 0:
-            if cautious_wd:
+            if relative_wd:
+                # 1. Compute RMS values
+                update_rms = torch.sqrt(update_final.pow(2).mean() + eps)
+                param_rms_smooth = torch.sqrt(
+                    p_2d.pow(2).mean() + relative_wd_delta**2
+                )
+                # 2. Scale with Huber smoothing
+                scale = update_rms / param_rms_smooth
+                # 3. Guard against discrete time-step overshooting
+                if weight_decay > 0 and lr > 0:
+                    max_scale = relative_wd_max_contraction / (lr * weight_decay)
+                    scale = torch.clamp_max(scale, max_scale)
+                # 4. Apply weight decay
+                if cautious_wd:
+                    wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
+                    update_final = update_final + weight_decay * scale * p_2d * wd_mask
+                else:
+                    update_final = update_final + weight_decay * scale * p_2d
+            elif cautious_wd:
                 wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
                 update_final = update_final + weight_decay * p_2d * wd_mask
             else:
@@ -527,10 +572,14 @@ class WarpAINO(Optimizer):
         beta2: float,
         beta3: float,
         weight_decay: float,
+        lr: float,
         eps: float,
         step_t: torch.Tensor,
         cautious_update: bool,
         cautious_wd: bool,
+        relative_wd: bool = False,
+        relative_wd_delta: float = 1e-3,
+        relative_wd_max_contraction: float = 0.99,
     ) -> torch.Tensor:
         """Core 1D/0D update step compilable by torch.compile (plain AINOOpt,
         used when the warp is disabled)."""
@@ -594,9 +643,27 @@ class WarpAINO(Optimizer):
             mask_mean = mask.mean().clamp_min(1e-3)
             update_final = update_final * mask / mask_mean
 
-        # Decoupled weight decay
+        # Decoupled weight decay (absolute or RMS-relative)
         if weight_decay != 0:
-            if cautious_wd:
+            if relative_wd:
+                # 1. Compute RMS values
+                update_rms = torch.sqrt(update_final.pow(2).mean() + eps)
+                param_rms_smooth = torch.sqrt(
+                    p_data.pow(2).mean() + relative_wd_delta**2
+                )
+                # 2. Scale with Huber smoothing
+                scale = update_rms / param_rms_smooth
+                # 3. Guard against discrete time-step overshooting
+                if weight_decay > 0 and lr > 0:
+                    max_scale = relative_wd_max_contraction / (lr * weight_decay)
+                    scale = torch.clamp_max(scale, max_scale)
+                # 4. Apply weight decay
+                if cautious_wd:
+                    wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
+                    update_final = update_final + weight_decay * scale * p_data * wd_mask
+                else:
+                    update_final = update_final + weight_decay * scale * p_data
+            elif cautious_wd:
                 wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
                 update_final = update_final + weight_decay * p_data * wd_mask
             else:
@@ -618,12 +685,16 @@ class WarpAINO(Optimizer):
         beta2: float,
         beta3: float,
         weight_decay: float,
+        lr: float,
         eps: float,
         step_t: torch.Tensor,
         sinkhorn_steps: int,
         cautious_update: bool,
         cautious_wd: bool,
         ortho_dtype: torch.dtype,
+        relative_wd: bool = False,
+        relative_wd_delta: float = 1e-3,
+        relative_wd_max_contraction: float = 0.99,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Core 2D+ step with P applied to the crafted update before NS."""
         # 1. Sinkhorn normalization for 2D+ parameters
@@ -696,10 +767,28 @@ class WarpAINO(Optimizer):
             mask_mean = mask.mean().clamp_min(1e-3)
             update_final = update_final * mask / mask_mean
 
-        # Decoupled weight decay
+        # Decoupled weight decay (absolute or RMS-relative)
         if weight_decay != 0:
-            if cautious_wd:
-                wd_mask = (update_final.sign() == p_2d.sign()).to(update_final.dtype)
+            if relative_wd:
+                # 1. Compute RMS values
+                update_rms = torch.sqrt(update_final.pow(2).mean() + eps)
+                param_rms_smooth = torch.sqrt(
+                    p_2d.pow(2).mean() + relative_wd_delta**2
+                )
+                # 2. Scale with Huber smoothing
+                scale = update_rms / param_rms_smooth
+                # 3. Guard against discrete time-step overshooting
+                if weight_decay > 0 and lr > 0:
+                    max_scale = relative_wd_max_contraction / (lr * weight_decay)
+                    scale = torch.clamp_max(scale, max_scale)
+                # 4. Apply weight decay
+                if cautious_wd:
+                    wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
+                    update_final = update_final + weight_decay * scale * p_2d * wd_mask
+                else:
+                    update_final = update_final + weight_decay * scale * p_2d
+            elif cautious_wd:
+                wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
                 update_final = update_final + weight_decay * p_2d * wd_mask
             else:
                 update_final = update_final + weight_decay * p_2d
@@ -719,10 +808,14 @@ class WarpAINO(Optimizer):
         beta2: float,
         beta3: float,
         weight_decay: float,
+        lr: float,
         eps: float,
         step_t: torch.Tensor,
         cautious_update: bool,
         cautious_wd: bool,
+        relative_wd: bool = False,
+        relative_wd_delta: float = 1e-3,
+        relative_wd_max_contraction: float = 0.99,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Core 1D/0D step with P applied to the crafted update before NS."""
         # 1. RMS normalize gradient for 1D/0D parameters
@@ -786,10 +879,28 @@ class WarpAINO(Optimizer):
             mask_mean = mask.mean().clamp_min(1e-3)
             update_final = update_final * mask / mask_mean
 
-        # Decoupled weight decay
+        # Decoupled weight decay (absolute or RMS-relative)
         if weight_decay != 0:
-            if cautious_wd:
-                wd_mask = (update_final.sign() == p_data.sign()).to(update_final.dtype)
+            if relative_wd:
+                # 1. Compute RMS values
+                update_rms = torch.sqrt(update_final.pow(2).mean() + eps)
+                param_rms_smooth = torch.sqrt(
+                    p_data.pow(2).mean() + relative_wd_delta**2
+                )
+                # 2. Scale with Huber smoothing
+                scale = update_rms / param_rms_smooth
+                # 3. Guard against discrete time-step overshooting
+                if weight_decay > 0 and lr > 0:
+                    max_scale = relative_wd_max_contraction / (lr * weight_decay)
+                    scale = torch.clamp_max(scale, max_scale)
+                # 4. Apply weight decay
+                if cautious_wd:
+                    wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
+                    update_final = update_final + weight_decay * scale * p_data * wd_mask
+                else:
+                    update_final = update_final + weight_decay * scale * p_data
+            elif cautious_wd:
+                wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
                 update_final = update_final + weight_decay * p_data * wd_mask
             else:
                 update_final = update_final + weight_decay * p_data
@@ -811,6 +922,7 @@ class WarpAINO(Optimizer):
         beta2: float,
         beta3: float,
         weight_decay: float,
+        lr: float,
         eps: float,
         step_t: torch.Tensor,
         sinkhorn_steps: int,
@@ -819,6 +931,9 @@ class WarpAINO(Optimizer):
         ortho_dtype: torch.dtype,
         spectral_bilateral: bool,
         spectral_log_bound: float,
+        relative_wd: bool = False,
+        relative_wd_delta: float = 1e-3,
+        relative_wd_max_contraction: float = 0.99,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Core 2D+ step with a full-rank FFT spectral warp."""
         # 1. Sinkhorn normalization for 2D+ parameters
@@ -905,8 +1020,26 @@ class WarpAINO(Optimizer):
             update_final = update_final * mask / mask_mean
 
         if weight_decay != 0:
-            if cautious_wd:
-                wd_mask = (update_final.sign() == p_2d.sign()).to(update_final.dtype)
+            if relative_wd:
+                # 1. Compute RMS values
+                update_rms = torch.sqrt(update_final.pow(2).mean() + eps)
+                param_rms_smooth = torch.sqrt(
+                    p_2d.pow(2).mean() + relative_wd_delta**2
+                )
+                # 2. Scale with Huber smoothing
+                scale = update_rms / param_rms_smooth
+                # 3. Guard against discrete time-step overshooting
+                if weight_decay > 0 and lr > 0:
+                    max_scale = relative_wd_max_contraction / (lr * weight_decay)
+                    scale = torch.clamp_max(scale, max_scale)
+                # 4. Apply weight decay
+                if cautious_wd:
+                    wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
+                    update_final = update_final + weight_decay * scale * p_2d * wd_mask
+                else:
+                    update_final = update_final + weight_decay * scale * p_2d
+            elif cautious_wd:
+                wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
                 update_final = update_final + weight_decay * p_2d * wd_mask
             else:
                 update_final = update_final + weight_decay * p_2d
@@ -926,11 +1059,15 @@ class WarpAINO(Optimizer):
         beta2: float,
         beta3: float,
         weight_decay: float,
+        lr: float,
         eps: float,
         step_t: torch.Tensor,
         cautious_update: bool,
         cautious_wd: bool,
         spectral_log_bound: float,
+        relative_wd: bool = False,
+        relative_wd_delta: float = 1e-3,
+        relative_wd_max_contraction: float = 0.99,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Core 1D/0D step with a full-rank FFT spectral warp."""
         # 1. RMS normalize gradient for 1D/0D parameters
@@ -996,8 +1133,26 @@ class WarpAINO(Optimizer):
             update_final = update_final * mask / mask_mean
 
         if weight_decay != 0:
-            if cautious_wd:
-                wd_mask = (update_final.sign() == p_data.sign()).to(update_final.dtype)
+            if relative_wd:
+                # 1. Compute RMS values
+                update_rms = torch.sqrt(update_final.pow(2).mean() + eps)
+                param_rms_smooth = torch.sqrt(
+                    p_data.pow(2).mean() + relative_wd_delta**2
+                )
+                # 2. Scale with Huber smoothing
+                scale = update_rms / param_rms_smooth
+                # 3. Guard against discrete time-step overshooting
+                if weight_decay > 0 and lr > 0:
+                    max_scale = relative_wd_max_contraction / (lr * weight_decay)
+                    scale = torch.clamp_max(scale, max_scale)
+                # 4. Apply weight decay
+                if cautious_wd:
+                    wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
+                    update_final = update_final + weight_decay * scale * p_data * wd_mask
+                else:
+                    update_final = update_final + weight_decay * scale * p_data
+            elif cautious_wd:
+                wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
                 update_final = update_final + weight_decay * p_data * wd_mask
             else:
                 update_final = update_final + weight_decay * p_data
@@ -1089,6 +1244,9 @@ class WarpAINO(Optimizer):
         meta_wd = group["meta_wd"]
         spectral_bilateral = group["spectral_bilateral"]
         spectral_log_bound = group["spectral_log_bound"]
+        relative_wd = group.get("relative_wd", False)
+        relative_wd_delta = group.get("relative_wd_delta", 1e-3)
+        relative_wd_max_contraction = group.get("relative_wd_max_contraction", 0.99)
 
         for p in group["params"]:
             if p.grad is None:
@@ -1135,6 +1293,7 @@ class WarpAINO(Optimizer):
                         beta2,
                         beta3,
                         weight_decay,
+                        lr,
                         eps,
                         step_t,
                         sinkhorn_steps,
@@ -1143,6 +1302,9 @@ class WarpAINO(Optimizer):
                         ortho_dtype,
                         spectral_bilateral,
                         spectral_log_bound,
+                        relative_wd,
+                        relative_wd_delta,
+                        relative_wd_max_contraction,
                     )
                 elif warp is not None:
                     update_final, crafted_update = self._compiled_warp_step_2d(
@@ -1158,12 +1320,16 @@ class WarpAINO(Optimizer):
                         beta2,
                         beta3,
                         weight_decay,
+                        lr,
                         eps,
                         step_t,
                         sinkhorn_steps,
                         cautious_update,
                         cautious_wd,
                         ortho_dtype,
+                        relative_wd,
+                        relative_wd_delta,
+                        relative_wd_max_contraction,
                     )
                 else:
                     update_final = self._compiled_step_2d(
@@ -1178,12 +1344,16 @@ class WarpAINO(Optimizer):
                         beta2,
                         beta3,
                         weight_decay,
+                        lr,
                         eps,
                         step_t,
                         sinkhorn_steps,
                         cautious_update,
                         cautious_wd,
                         ortho_dtype,
+                        relative_wd,
+                        relative_wd_delta,
+                        relative_wd_max_contraction,
                     )
 
                 p_2d_fp32.add_(update_final, alpha=-lr)
@@ -1220,11 +1390,15 @@ class WarpAINO(Optimizer):
                         beta2,
                         beta3,
                         weight_decay,
+                        lr,
                         eps,
                         step_t,
                         cautious_update,
                         cautious_wd,
                         spectral_log_bound,
+                        relative_wd,
+                        relative_wd_delta,
+                        relative_wd_max_contraction,
                     )
                 elif warp is not None:
                     update_final, crafted_update = self._compiled_warp_step_1d(
@@ -1239,10 +1413,14 @@ class WarpAINO(Optimizer):
                         beta2,
                         beta3,
                         weight_decay,
+                        lr,
                         eps,
                         step_t,
                         cautious_update,
                         cautious_wd,
+                        relative_wd,
+                        relative_wd_delta,
+                        relative_wd_max_contraction,
                     )
                 else:
                     update_final = self._compiled_step_1d(
@@ -1256,10 +1434,14 @@ class WarpAINO(Optimizer):
                         beta2,
                         beta3,
                         weight_decay,
+                        lr,
                         eps,
                         step_t,
                         cautious_update,
                         cautious_wd,
+                        relative_wd,
+                        relative_wd_delta,
+                        relative_wd_max_contraction,
                     )
 
                 p_fp32.add_(update_final, alpha=-lr)
@@ -1296,6 +1478,9 @@ class WarpAINO(Optimizer):
         meta_wd = group["meta_wd"]
         spectral_bilateral = group["spectral_bilateral"]
         spectral_log_bound = group["spectral_log_bound"]
+        relative_wd = group.get("relative_wd", False)
+        relative_wd_delta = group.get("relative_wd_delta", 1e-3)
+        relative_wd_max_contraction = group.get("relative_wd_max_contraction", 0.99)
 
         params_2d = []
         params_1d = []
@@ -1336,11 +1521,15 @@ class WarpAINO(Optimizer):
                     beta2,
                     beta3,
                     weight_decay,
+                    lr,
                     eps,
                     step_t,
                     cautious_update,
                     cautious_wd,
                     spectral_log_bound,
+                    relative_wd,
+                    relative_wd_delta,
+                    relative_wd_max_contraction,
                 )
             elif warp is not None:
                 update_final, crafted_update = self._compiled_warp_step_1d(
@@ -1355,10 +1544,14 @@ class WarpAINO(Optimizer):
                     beta2,
                     beta3,
                     weight_decay,
+                    lr,
                     eps,
                     step_t,
                     cautious_update,
                     cautious_wd,
+                    relative_wd,
+                    relative_wd_delta,
+                    relative_wd_max_contraction,
                 )
             else:
                 update_final = self._compiled_step_1d(
@@ -1372,10 +1565,14 @@ class WarpAINO(Optimizer):
                     beta2,
                     beta3,
                     weight_decay,
+                    lr,
                     eps,
                     step_t,
                     cautious_update,
                     cautious_wd,
+                    relative_wd,
+                    relative_wd_delta,
+                    relative_wd_max_contraction,
                 )
             p_fp32.add_(update_final, alpha=-lr)
 
@@ -1444,6 +1641,7 @@ class WarpAINO(Optimizer):
                     beta2,
                     beta3,
                     weight_decay,
+                    lr,
                     eps,
                     step_t,
                     sinkhorn_steps,
@@ -1452,7 +1650,10 @@ class WarpAINO(Optimizer):
                     ortho_dtype,
                     spectral_bilateral,
                     spectral_log_bound,
-                )
+                    relative_wd,
+                    relative_wd_delta,
+                    relative_wd_max_contraction,
+                    )
                 meta_list.append((state, crafted_update))
             elif warp is not None:
                 update_final, crafted_update = self._compiled_warp_step_2d(
@@ -1468,13 +1669,17 @@ class WarpAINO(Optimizer):
                     beta2,
                     beta3,
                     weight_decay,
+                    lr,
                     eps,
                     step_t,
                     sinkhorn_steps,
                     cautious_update,
                     cautious_wd,
                     ortho_dtype,
-                )
+                    relative_wd,
+                    relative_wd_delta,
+                    relative_wd_max_contraction,
+                    )
                 meta_list.append((state, crafted_update))
             else:
                 update_final = self._compiled_step_2d(
@@ -1489,13 +1694,17 @@ class WarpAINO(Optimizer):
                     beta2,
                     beta3,
                     weight_decay,
+                    lr,
                     eps,
                     step_t,
                     sinkhorn_steps,
                     cautious_update,
                     cautious_wd,
                     ortho_dtype,
-                )
+                    relative_wd,
+                    relative_wd_delta,
+                    relative_wd_max_contraction,
+                    )
 
             updates_final_list.append(update_final.view_as(p_2d_fp32))
             p_fp32_list.append(p_2d_fp32)
