@@ -1275,13 +1275,21 @@ class WarpAINO(Optimizer):
         relative_wd = group.get("relative_wd", False)
         relative_wd_delta = group.get("relative_wd_delta", 1e-3)
         relative_wd_max_contraction = group.get("relative_wd_max_contraction", 0.99)
-        max_scale = _relative_wd_max_scale(
-            lr, weight_decay, relative_wd_max_contraction
-        )
 
         for p in group["params"]:
             if p.grad is None:
                 continue
+
+            wd_ratio = getattr(p, "weight_decay_ratio", None)
+            if wd_ratio is None:
+                if getattr(p, "is_bias", False) or getattr(p, "is_norm", False) or getattr(p, "is_scalar", False) or getattr(p, "_is_dora_scale", False):
+                    wd_ratio = 0.0
+                else:
+                    wd_ratio = 1.0
+            p_weight_decay = weight_decay * float(wd_ratio)
+            p_max_scale = _relative_wd_max_scale(
+                lr, p_weight_decay, relative_wd_max_contraction
+            )
 
             state = self.state[p]
             state["step"] += 1
@@ -1323,8 +1331,8 @@ class WarpAINO(Optimizer):
                         beta1,
                         beta2,
                         beta3,
-                        weight_decay,
-                        max_scale,
+                        p_weight_decay,
+                        p_max_scale,
                         eps,
                         step_t,
                         sinkhorn_steps,
@@ -1349,8 +1357,8 @@ class WarpAINO(Optimizer):
                         beta1,
                         beta2,
                         beta3,
-                        weight_decay,
-                        max_scale,
+                        p_weight_decay,
+                        p_max_scale,
                         eps,
                         step_t,
                         sinkhorn_steps,
@@ -1372,8 +1380,8 @@ class WarpAINO(Optimizer):
                         beta1,
                         beta2,
                         beta3,
-                        weight_decay,
-                        max_scale,
+                        p_weight_decay,
+                        p_max_scale,
                         eps,
                         step_t,
                         sinkhorn_steps,
@@ -1418,8 +1426,8 @@ class WarpAINO(Optimizer):
                         beta1,
                         beta2,
                         beta3,
-                        weight_decay,
-                        max_scale,
+                        p_weight_decay,
+                        p_max_scale,
                         eps,
                         step_t,
                         cautious_update,
@@ -1440,8 +1448,8 @@ class WarpAINO(Optimizer):
                         beta1,
                         beta2,
                         beta3,
-                        weight_decay,
-                        max_scale,
+                        p_weight_decay,
+                        p_max_scale,
                         eps,
                         step_t,
                         cautious_update,
@@ -1460,8 +1468,8 @@ class WarpAINO(Optimizer):
                         beta1,
                         beta2,
                         beta3,
-                        weight_decay,
-                        max_scale,
+                        p_weight_decay,
+                        p_max_scale,
                         eps,
                         step_t,
                         cautious_update,
@@ -1509,9 +1517,6 @@ class WarpAINO(Optimizer):
         relative_wd = group.get("relative_wd", False)
         relative_wd_delta = group.get("relative_wd_delta", 1e-3)
         relative_wd_max_contraction = group.get("relative_wd_max_contraction", 0.99)
-        max_scale = _relative_wd_max_scale(
-            lr, weight_decay, relative_wd_max_contraction
-        )
 
         params_2d = []
         params_1d = []
@@ -1526,6 +1531,17 @@ class WarpAINO(Optimizer):
 
         # 1. Process 1D fallback parameters
         for p in params_1d:
+            wd_ratio = getattr(p, "weight_decay_ratio", None)
+            if wd_ratio is None:
+                if getattr(p, "is_bias", False) or getattr(p, "is_norm", False) or getattr(p, "is_scalar", False) or getattr(p, "_is_dora_scale", False):
+                    wd_ratio = 0.0
+                else:
+                    wd_ratio = 1.0
+            p_weight_decay = weight_decay * float(wd_ratio)
+            p_max_scale = _relative_wd_max_scale(
+                lr, p_weight_decay, relative_wd_max_contraction
+            )
+
             state = self.state[p]
             state["step"] += 1
             if "step_t" not in state:
@@ -1551,8 +1567,8 @@ class WarpAINO(Optimizer):
                     beta1,
                     beta2,
                     beta3,
-                    weight_decay,
-                    max_scale,
+                    p_weight_decay,
+                    p_max_scale,
                     eps,
                     step_t,
                     cautious_update,
@@ -1573,8 +1589,8 @@ class WarpAINO(Optimizer):
                     beta1,
                     beta2,
                     beta3,
-                    weight_decay,
-                    max_scale,
+                    p_weight_decay,
+                    p_max_scale,
                     eps,
                     step_t,
                     cautious_update,
@@ -1593,8 +1609,8 @@ class WarpAINO(Optimizer):
                     beta1,
                     beta2,
                     beta3,
-                    weight_decay,
-                    max_scale,
+                    p_weight_decay,
+                    p_max_scale,
                     eps,
                     step_t,
                     cautious_update,
@@ -1633,6 +1649,17 @@ class WarpAINO(Optimizer):
         meta_list = []
 
         for p in params_2d:
+            wd_ratio = getattr(p, "weight_decay_ratio", None)
+            if wd_ratio is None:
+                if getattr(p, "is_bias", False) or getattr(p, "is_norm", False) or getattr(p, "is_scalar", False) or getattr(p, "_is_dora_scale", False):
+                    wd_ratio = 0.0
+                else:
+                    wd_ratio = 1.0
+            p_weight_decay = weight_decay * float(wd_ratio)
+            p_max_scale = _relative_wd_max_scale(
+                lr, p_weight_decay, relative_wd_max_contraction
+            )
+
             state = self.state[p]
             state["step"] += 1
             if "step_t" not in state:
@@ -1669,8 +1696,8 @@ class WarpAINO(Optimizer):
                     beta1,
                     beta2,
                     beta3,
-                    weight_decay,
-                    max_scale,
+                    p_weight_decay,
+                    p_max_scale,
                     eps,
                     step_t,
                     sinkhorn_steps,
@@ -1696,8 +1723,8 @@ class WarpAINO(Optimizer):
                     beta1,
                     beta2,
                     beta3,
-                    weight_decay,
-                    max_scale,
+                    p_weight_decay,
+                    p_max_scale,
                     eps,
                     step_t,
                     sinkhorn_steps,
@@ -1720,8 +1747,8 @@ class WarpAINO(Optimizer):
                     beta1,
                     beta2,
                     beta3,
-                    weight_decay,
-                    max_scale,
+                    p_weight_decay,
+                    p_max_scale,
                     eps,
                     step_t,
                     sinkhorn_steps,
