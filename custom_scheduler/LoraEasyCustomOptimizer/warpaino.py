@@ -259,7 +259,7 @@ def _spectral_meta_update(
         scale = 1.0 / prev.norm().square().clamp_min_(1e-12)
 
         log_right = state.get("spectral_log_right")
-        if log_right is None:
+        if log_right is None or log_right.numel() == 0:
             prev_spectrum = torch.fft.fft(prev, dim=0, norm="ortho")
             current_spectrum = torch.fft.fft(update_cur_2d, dim=0, norm="ortho")
             prediction = left_gain[:, None] * prev_spectrum
@@ -293,7 +293,7 @@ def _spectral_meta_update(
         log_left.clamp_(-spectral_log_bound, spectral_log_bound)
         log_left.copy_(0.5 * (log_left + _spectral_mirror(log_left)))
 
-        if log_right is not None:
+        if log_right is not None and log_right.numel() > 0:
             log_right.add_(grad_right, alpha=-meta_lr)
             if meta_wd > 0:
                 log_right.mul_(1.0 - meta_lr * meta_wd)
@@ -1014,7 +1014,7 @@ class WarpAINO(Optimizer):
         update = sign_momentum * (momentum.abs() / denom)
 
         # 6. Apply the full-rank spectral warp before Gram Newton-Schulz.
-        if spectral_bilateral:
+        if spectral_bilateral and spectral_log_right.numel() > 0:
             warped = _spectral_apply(
                 update,
                 spectral_log_left,
@@ -1231,7 +1231,17 @@ class WarpAINO(Optimizer):
                         state["exp_avg_sq"] = torch.zeros_like(p.data, dtype=torch.float32)
                         state["row_var"] = torch.zeros((), device=p.device, dtype=torch.float32)
                         warp_m = p.numel()
-                    if group["meta_lr"] > 0:
+
+                    # Skip warp distortion for 1D vectors, biases, norm layers, scalars, and DoRA scales
+                    is_1d_or_scalar = (
+                        p.ndim < 2
+                        or p.numel() == 1
+                        or getattr(p, "is_scalar", False)
+                        or getattr(p, "is_bias", False)
+                        or getattr(p, "is_norm", False)
+                        or getattr(p, "_is_dora_scale", False)
+                    )
+                    if group["meta_lr"] > 0 and not is_1d_or_scalar:
                         if group["warp_mode"] == "dense":
                             state["warp"] = torch.zeros(
                                 warp_m,
@@ -1243,7 +1253,8 @@ class WarpAINO(Optimizer):
                             state["spectral_log_left"] = torch.zeros(
                                 warp_m, dtype=torch.float32, device=p.device
                             )
-                            if p.ndim >= 2 and group["spectral_bilateral"]:
+                            # Only enable bilateral (right) spectral warp for hidden layers
+                            if p.ndim >= 2 and group["spectral_bilateral"] and getattr(p, "is_hidden", True):
                                 state["spectral_log_right"] = torch.zeros(
                                     w_2d.shape[1],
                                     dtype=torch.float32,
@@ -1311,6 +1322,8 @@ class WarpAINO(Optimizer):
                 g_2d = _reshape_to_2d(grad)
 
                 p_2d_fp32 = p_2d.float() if p.dtype is torch.bfloat16 else p_2d
+                # Adaptive Sinkhorn: 2 iterations for high aspect ratio matrices (e.g. LoRA)
+                p_sinkhorn_steps = 2 if (p_2d.shape[0] / max(p_2d.shape[1], 1) > 32 or p_2d.shape[1] / max(p_2d.shape[0], 1) > 32) else sinkhorn_steps
 
                 if spectral_log_left is not None:
                     spectral_log_right = state.get("spectral_log_right")
@@ -1335,7 +1348,7 @@ class WarpAINO(Optimizer):
                         p_max_scale,
                         eps,
                         step_t,
-                        sinkhorn_steps,
+                        p_sinkhorn_steps,
                         cautious_update,
                         cautious_wd,
                         ortho_dtype,
@@ -1361,7 +1374,7 @@ class WarpAINO(Optimizer):
                         p_max_scale,
                         eps,
                         step_t,
-                        sinkhorn_steps,
+                        p_sinkhorn_steps,
                         cautious_update,
                         cautious_wd,
                         ortho_dtype,
@@ -1384,7 +1397,7 @@ class WarpAINO(Optimizer):
                         p_max_scale,
                         eps,
                         step_t,
-                        sinkhorn_steps,
+                        p_sinkhorn_steps,
                         cautious_update,
                         cautious_wd,
                         ortho_dtype,
@@ -1674,6 +1687,8 @@ class WarpAINO(Optimizer):
             g_2d = _reshape_to_2d(grad)
 
             p_2d_fp32 = p_2d.float() if p.dtype is torch.bfloat16 else p_2d
+            # Adaptive Sinkhorn: 2 iterations for high aspect ratio matrices (e.g. LoRA)
+            p_sinkhorn_steps = 2 if (p_2d.shape[0] / max(p_2d.shape[1], 1) > 32 or p_2d.shape[1] / max(p_2d.shape[0], 1) > 32) else sinkhorn_steps
 
             warp = state.get("warp")
             spectral_log_left = state.get("spectral_log_left")
@@ -1700,7 +1715,7 @@ class WarpAINO(Optimizer):
                     p_max_scale,
                     eps,
                     step_t,
-                    sinkhorn_steps,
+                    p_sinkhorn_steps,
                     cautious_update,
                     cautious_wd,
                     ortho_dtype,
@@ -1727,7 +1742,7 @@ class WarpAINO(Optimizer):
                     p_max_scale,
                     eps,
                     step_t,
-                    sinkhorn_steps,
+                    p_sinkhorn_steps,
                     cautious_update,
                     cautious_wd,
                     ortho_dtype,
@@ -1751,7 +1766,7 @@ class WarpAINO(Optimizer):
                     p_max_scale,
                     eps,
                     step_t,
-                    sinkhorn_steps,
+                    p_sinkhorn_steps,
                     cautious_update,
                     cautious_wd,
                     ortho_dtype,
