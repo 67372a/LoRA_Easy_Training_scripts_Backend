@@ -245,6 +245,40 @@ def _relative_wd_max_scale(
         return float("inf")
 
 
+def _apply_lr_update_(
+    parameter: torch.Tensor,
+    update: torch.Tensor,
+    lr: Union[float, torch.Tensor],
+) -> None:
+    """Apply ``parameter -= lr * update`` without synchronizing CUDA scalars.
+
+    ``Tensor.add_(..., alpha=...)`` requires a Python scalar. Converting a
+    CUDA learning-rate tensor with ``float(lr)`` therefore synchronizes the
+    host with the device. ``addcmul_`` accepts a device scalar and keeps the
+    operation on-device; Python-float learning rates retain the cheaper
+    ``add_`` path.
+    """
+    if isinstance(lr, torch.Tensor):
+        lr_device = lr.to(device=parameter.device, dtype=parameter.dtype)
+        parameter.addcmul_(update, lr_device, value=-1.0)
+    else:
+        parameter.add_(update, alpha=-lr)
+
+
+def _foreach_apply_lr_(
+    parameters: List[torch.Tensor],
+    updates: List[torch.Tensor],
+    lr: Union[float, torch.Tensor],
+) -> None:
+    """Apply a learning rate to a foreach update list without host sync."""
+    if isinstance(lr, torch.Tensor):
+        lr_device = lr.to(device=updates[0].device, dtype=updates[0].dtype)
+        torch._foreach_mul_(updates, lr_device)
+        torch._foreach_add_(parameters, updates, alpha=-1.0)
+    else:
+        torch._foreach_add_(parameters, updates, alpha=-lr)
+
+
 @torch.no_grad()
 def gram_newton_schulz_2step(
     M: torch.Tensor,
@@ -542,6 +576,205 @@ class WarpAINO(Optimizer):
             self._compiled_warp_step_1d = self._WarpAINO_step_core_1d
             self._compiled_spectral_step_2d = self._spectral_step_core_2d
             self._compiled_spectral_step_1d = self._spectral_step_core_1d
+
+    def _run_core_2d(
+        self,
+        p_2d: torch.Tensor,
+        g_2d: torch.Tensor,
+        state: dict,
+        group: dict,
+        p_weight_decay: float,
+        p_max_scale: Union[float, torch.Tensor],
+        step_t: torch.Tensor,
+        sinkhorn_steps: int,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Select and invoke the configured 2D core once.
+
+        Native and foreach stepping share this dispatch. Keeping the mode
+        selection outside the compiled cores preserves static graphs while
+        eliminating duplicate 30-argument call ladders in both callers.
+        """
+        beta1, beta2, beta3 = group["betas"]
+        cautious_update = group["cautious_update"]
+        cautious_wd = group["cautious_wd"]
+        ortho_dtype = group["ortho_dtype"]
+        eps = group["eps"]
+        relative_wd = group.get("relative_wd", False)
+        relative_wd_delta = group.get("relative_wd_delta", 1e-3)
+        spectral_log_left = state.get("spectral_log_left")
+
+        if spectral_log_left is not None:
+            spectral_log_right = state.get("spectral_log_right")
+            if spectral_log_right is None:
+                spectral_log_right = torch.empty(
+                    0, dtype=torch.float32, device=p_2d.device
+                )
+            update_final, crafted_update = self._compiled_spectral_step_2d(
+                p_2d,
+                g_2d,
+                spectral_log_left,
+                spectral_log_right,
+                state["momentum"],
+                state["sign_momentum"],
+                state["exp_avg_sq_row"],
+                state["exp_avg_sq_col"],
+                state["row_var"],
+                beta1,
+                beta2,
+                beta3,
+                p_weight_decay,
+                p_max_scale,
+                eps,
+                step_t,
+                sinkhorn_steps,
+                cautious_update,
+                cautious_wd,
+                ortho_dtype,
+                group["spectral_bilateral"],
+                group["spectral_log_bound"],
+                relative_wd,
+                relative_wd_delta,
+            )
+            return update_final, crafted_update
+
+        warp = state.get("warp")
+        if warp is not None:
+            update_final, crafted_update = self._compiled_warp_step_2d(
+                p_2d,
+                g_2d,
+                warp,
+                state["momentum"],
+                state["sign_momentum"],
+                state["exp_avg_sq_row"],
+                state["exp_avg_sq_col"],
+                state["row_var"],
+                beta1,
+                beta2,
+                beta3,
+                p_weight_decay,
+                p_max_scale,
+                eps,
+                step_t,
+                sinkhorn_steps,
+                cautious_update,
+                cautious_wd,
+                ortho_dtype,
+                relative_wd,
+                relative_wd_delta,
+            )
+            return update_final, crafted_update
+
+        update_final = self._compiled_step_2d(
+            p_2d,
+            g_2d,
+            state["momentum"],
+            state["sign_momentum"],
+            state["exp_avg_sq_row"],
+            state["exp_avg_sq_col"],
+            state["row_var"],
+            beta1,
+            beta2,
+            beta3,
+            p_weight_decay,
+            p_max_scale,
+            eps,
+            step_t,
+            sinkhorn_steps,
+            cautious_update,
+            cautious_wd,
+            ortho_dtype,
+            relative_wd,
+            relative_wd_delta,
+        )
+        return update_final, None
+
+    def _run_core_1d(
+        self,
+        p_data: torch.Tensor,
+        g_data: torch.Tensor,
+        state: dict,
+        group: dict,
+        p_weight_decay: float,
+        p_max_scale: Union[float, torch.Tensor],
+        step_t: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Select and invoke the configured 1D/scalar core once."""
+        beta1, beta2, beta3 = group["betas"]
+        cautious_update = group["cautious_update"]
+        cautious_wd = group["cautious_wd"]
+        eps = group["eps"]
+        relative_wd = group.get("relative_wd", False)
+        relative_wd_delta = group.get("relative_wd_delta", 1e-3)
+        spectral_log_left = state.get("spectral_log_left")
+
+        if spectral_log_left is not None:
+            update_final, crafted_update = self._compiled_spectral_step_1d(
+                p_data,
+                g_data,
+                spectral_log_left,
+                state["momentum"],
+                state["sign_momentum"],
+                state["exp_avg_sq"],
+                state["row_var"],
+                beta1,
+                beta2,
+                beta3,
+                p_weight_decay,
+                p_max_scale,
+                eps,
+                step_t,
+                cautious_update,
+                cautious_wd,
+                group["spectral_log_bound"],
+                relative_wd,
+                relative_wd_delta,
+            )
+            return update_final, crafted_update
+
+        warp = state.get("warp")
+        if warp is not None:
+            update_final, crafted_update = self._compiled_warp_step_1d(
+                p_data,
+                g_data,
+                warp,
+                state["momentum"],
+                state["sign_momentum"],
+                state["exp_avg_sq"],
+                state["row_var"],
+                beta1,
+                beta2,
+                beta3,
+                p_weight_decay,
+                p_max_scale,
+                eps,
+                step_t,
+                cautious_update,
+                cautious_wd,
+                relative_wd,
+                relative_wd_delta,
+            )
+            return update_final, crafted_update
+
+        update_final = self._compiled_step_1d(
+            p_data,
+            g_data,
+            state["momentum"],
+            state["sign_momentum"],
+            state["exp_avg_sq"],
+            state["row_var"],
+            beta1,
+            beta2,
+            beta3,
+            p_weight_decay,
+            p_max_scale,
+            eps,
+            step_t,
+            cautious_update,
+            cautious_wd,
+            relative_wd,
+            relative_wd_delta,
+        )
+        return update_final, None
 
     @staticmethod
     def _aino_step_core_2d(
@@ -1146,7 +1379,6 @@ class WarpAINO(Optimizer):
 
     def _step_native(self, group):
         lr = group["lr"]
-        lr_float = float(lr) if isinstance(lr, torch.Tensor) else float(lr)
         beta1, beta2, beta3 = group["betas"]
         weight_decay = float(group["weight_decay"])
         cautious_update = group["cautious_update"]
@@ -1201,87 +1433,18 @@ class WarpAINO(Optimizer):
                 # Adaptive Sinkhorn: 2 iterations for high aspect ratio matrices (e.g. LoRA)
                 p_sinkhorn_steps = 2 if (p_2d.shape[0] / max(p_2d.shape[1], 1) > 32 or p_2d.shape[1] / max(p_2d.shape[0], 1) > 32) else sinkhorn_steps
 
-                if spectral_log_left is not None:
-                    spectral_log_right = state.get("spectral_log_right")
-                    if spectral_log_right is None:
-                        spectral_log_right = torch.empty(
-                            0, dtype=torch.float32, device=p.device
-                        )
-                    update_final, crafted_update = self._compiled_spectral_step_2d(
-                        p_2d_fp32,
-                        g_2d,
-                        spectral_log_left,
-                        spectral_log_right,
-                        state["momentum"],
-                        state["sign_momentum"],
-                        state["exp_avg_sq_row"],
-                        state["exp_avg_sq_col"],
-                        state["row_var"],
-                        beta1,
-                        beta2,
-                        beta3,
-                        p_weight_decay,
-                        p_max_scale,
-                        eps,
-                        step_t,
-                        p_sinkhorn_steps,
-                        cautious_update,
-                        cautious_wd,
-                        ortho_dtype,
-                        spectral_bilateral,
-                        spectral_log_bound,
-                        relative_wd,
-                        relative_wd_delta,
-                    )
-                elif warp is not None:
-                    update_final, crafted_update = self._compiled_warp_step_2d(
-                        p_2d_fp32,
-                        g_2d,
-                        warp,
-                        state["momentum"],
-                        state["sign_momentum"],
-                        state["exp_avg_sq_row"],
-                        state["exp_avg_sq_col"],
-                        state["row_var"],
-                        beta1,
-                        beta2,
-                        beta3,
-                        p_weight_decay,
-                        p_max_scale,
-                        eps,
-                        step_t,
-                        p_sinkhorn_steps,
-                        cautious_update,
-                        cautious_wd,
-                        ortho_dtype,
-                        relative_wd,
-                        relative_wd_delta,
-                    )
-                else:
-                    update_final = self._compiled_step_2d(
-                        p_2d_fp32,
-                        g_2d,
-                        state["momentum"],
-                        state["sign_momentum"],
-                        state["exp_avg_sq_row"],
-                        state["exp_avg_sq_col"],
-                        state["row_var"],
-                        beta1,
-                        beta2,
-                        beta3,
-                        p_weight_decay,
-                        p_max_scale,
-                        eps,
-                        step_t,
-                        p_sinkhorn_steps,
-                        cautious_update,
-                        cautious_wd,
-                        ortho_dtype,
-                        relative_wd,
-                        relative_wd_delta,
-                    )
+                update_final, crafted_update = self._run_core_2d(
+                    p_2d_fp32,
+                    g_2d,
+                    state,
+                    group,
+                    p_weight_decay,
+                    p_max_scale,
+                    step_t,
+                    p_sinkhorn_steps,
+                )
 
-                p_2d_fp32.add_(update_final, alpha=-lr_float)
+                _apply_lr_update_(p_2d_fp32, update_final, lr)
 
                 if p.dtype is torch.bfloat16:
                     if stochastic_fp:
@@ -1303,71 +1466,17 @@ class WarpAINO(Optimizer):
             else:
                 p_fp32 = p.data.float() if p.dtype is torch.bfloat16 else p.data
 
-                if spectral_log_left is not None:
-                    update_final, crafted_update = self._compiled_spectral_step_1d(
-                        p_fp32,
-                        grad,
-                        spectral_log_left,
-                        state["momentum"],
-                        state["sign_momentum"],
-                        state["exp_avg_sq"],
-                        state["row_var"],
-                        beta1,
-                        beta2,
-                        beta3,
-                        p_weight_decay,
-                        p_max_scale,
-                        eps,
-                        step_t,
-                        cautious_update,
-                        cautious_wd,
-                        spectral_log_bound,
-                        relative_wd,
-                        relative_wd_delta,
-                    )
-                elif warp is not None:
-                    update_final, crafted_update = self._compiled_warp_step_1d(
-                        p_fp32,
-                        grad,
-                        warp,
-                        state["momentum"],
-                        state["sign_momentum"],
-                        state["exp_avg_sq"],
-                        state["row_var"],
-                        beta1,
-                        beta2,
-                        beta3,
-                        p_weight_decay,
-                        p_max_scale,
-                        eps,
-                        step_t,
-                        cautious_update,
-                        cautious_wd,
-                        relative_wd,
-                        relative_wd_delta,
-                    )
-                else:
-                    update_final = self._compiled_step_1d(
-                        p_fp32,
-                        grad,
-                        state["momentum"],
-                        state["sign_momentum"],
-                        state["exp_avg_sq"],
-                        state["row_var"],
-                        beta1,
-                        beta2,
-                        beta3,
-                        p_weight_decay,
-                        p_max_scale,
-                        eps,
-                        step_t,
-                        cautious_update,
-                        cautious_wd,
-                        relative_wd,
-                        relative_wd_delta,
-                    )
+                update_final, crafted_update = self._run_core_1d(
+                    p_fp32,
+                    grad,
+                    state,
+                    group,
+                    p_weight_decay,
+                    p_max_scale,
+                    step_t,
+                )
 
-                p_fp32.add_(update_final, alpha=-lr_float)
+                _apply_lr_update_(p_fp32, update_final, lr)
 
                 if p.dtype is torch.bfloat16:
                     if stochastic_fp:
@@ -1390,7 +1499,6 @@ class WarpAINO(Optimizer):
 
     def _step_foreach(self, group):
         lr = group["lr"]
-        lr_float = float(lr) if isinstance(lr, torch.Tensor) else float(lr)
         beta1, beta2, beta3 = group["betas"]
         weight_decay = float(group["weight_decay"])
         cautious_update = group["cautious_update"]
@@ -1444,70 +1552,16 @@ class WarpAINO(Optimizer):
             p_fp32 = p.data.float() if p.dtype is torch.bfloat16 else p.data
             warp = state.get("warp")
             spectral_log_left = state.get("spectral_log_left")
-            if spectral_log_left is not None:
-                update_final, crafted_update = self._compiled_spectral_step_1d(
-                    p_fp32,
-                    grad,
-                    spectral_log_left,
-                    state["momentum"],
-                    state["sign_momentum"],
-                    state["exp_avg_sq"],
-                    state["row_var"],
-                    beta1,
-                    beta2,
-                    beta3,
-                    p_weight_decay,
-                    p_max_scale,
-                    eps,
-                    step_t,
-                    cautious_update,
-                    cautious_wd,
-                    spectral_log_bound,
-                    relative_wd,
-                    relative_wd_delta,
-                )
-            elif warp is not None:
-                update_final, crafted_update = self._compiled_warp_step_1d(
-                    p_fp32,
-                    grad,
-                    warp,
-                    state["momentum"],
-                    state["sign_momentum"],
-                    state["exp_avg_sq"],
-                    state["row_var"],
-                    beta1,
-                    beta2,
-                    beta3,
-                    p_weight_decay,
-                    p_max_scale,
-                    eps,
-                    step_t,
-                    cautious_update,
-                    cautious_wd,
-                    relative_wd,
-                    relative_wd_delta,
-                )
-            else:
-                update_final = self._compiled_step_1d(
-                    p_fp32,
-                    grad,
-                    state["momentum"],
-                    state["sign_momentum"],
-                    state["exp_avg_sq"],
-                    state["row_var"],
-                    beta1,
-                    beta2,
-                    beta3,
-                    p_weight_decay,
-                    p_max_scale,
-                    eps,
-                    step_t,
-                    cautious_update,
-                    cautious_wd,
-                    relative_wd,
-                    relative_wd_delta,
-                )
-            p_fp32.add_(update_final, alpha=-lr_float)
+            update_final, crafted_update = self._run_core_1d(
+                p_fp32,
+                grad,
+                state,
+                group,
+                p_weight_decay,
+                p_max_scale,
+                step_t,
+            )
+            _apply_lr_update_(p_fp32, update_final, lr)
 
             if p.dtype is torch.bfloat16:
                 if stochastic_fp:
@@ -1568,93 +1622,24 @@ class WarpAINO(Optimizer):
 
             warp = state.get("warp")
             spectral_log_left = state.get("spectral_log_left")
-            if spectral_log_left is not None:
-                spectral_log_right = state.get("spectral_log_right")
-                if spectral_log_right is None:
-                    spectral_log_right = torch.empty(
-                        0, dtype=torch.float32, device=p.device
-                    )
-                update_final, crafted_update = self._compiled_spectral_step_2d(
-                    p_2d_fp32,
-                    g_2d,
-                    spectral_log_left,
-                    spectral_log_right,
-                    state["momentum"],
-                    state["sign_momentum"],
-                    state["exp_avg_sq_row"],
-                    state["exp_avg_sq_col"],
-                    state["row_var"],
-                    beta1,
-                    beta2,
-                    beta3,
-                    p_weight_decay,
-                    p_max_scale,
-                    eps,
-                    step_t,
-                    p_sinkhorn_steps,
-                    cautious_update,
-                    cautious_wd,
-                    ortho_dtype,
-                    spectral_bilateral,
-                    spectral_log_bound,
-                    relative_wd,
-                    relative_wd_delta,
-                    )
+            update_final, crafted_update = self._run_core_2d(
+                p_2d_fp32,
+                g_2d,
+                state,
+                group,
+                p_weight_decay,
+                p_max_scale,
+                step_t,
+                p_sinkhorn_steps,
+            )
+            if crafted_update is not None:
                 meta_list.append((state, crafted_update))
-            elif warp is not None:
-                update_final, crafted_update = self._compiled_warp_step_2d(
-                    p_2d_fp32,
-                    g_2d,
-                    warp,
-                    state["momentum"],
-                    state["sign_momentum"],
-                    state["exp_avg_sq_row"],
-                    state["exp_avg_sq_col"],
-                    state["row_var"],
-                    beta1,
-                    beta2,
-                    beta3,
-                    p_weight_decay,
-                    p_max_scale,
-                    eps,
-                    step_t,
-                    p_sinkhorn_steps,
-                    cautious_update,
-                    cautious_wd,
-                    ortho_dtype,
-                    relative_wd,
-                    relative_wd_delta,
-                    )
-                meta_list.append((state, crafted_update))
-            else:
-                update_final = self._compiled_step_2d(
-                    p_2d_fp32,
-                    g_2d,
-                    state["momentum"],
-                    state["sign_momentum"],
-                    state["exp_avg_sq_row"],
-                    state["exp_avg_sq_col"],
-                    state["row_var"],
-                    beta1,
-                    beta2,
-                    beta3,
-                    p_weight_decay,
-                    p_max_scale,
-                    eps,
-                    step_t,
-                    p_sinkhorn_steps,
-                    cautious_update,
-                    cautious_wd,
-                    ortho_dtype,
-                    relative_wd,
-                    relative_wd_delta,
-                    )
 
             updates_final_list.append(update_final.view_as(p_2d_fp32))
             p_fp32_list.append(p_2d_fp32)
             p_original_list.append(p)
 
-        torch._foreach_add_(p_fp32_list, updates_final_list, alpha=-lr_float)
+        _foreach_apply_lr_(p_fp32_list, updates_final_list, lr)
 
         for p, p_fp32 in zip(p_original_list, p_fp32_list):
             if p.dtype is torch.bfloat16:

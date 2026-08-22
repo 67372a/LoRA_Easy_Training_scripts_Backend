@@ -27,8 +27,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 try:
     from LoraEasyCustomOptimizer.warpaino import (
         WarpAINO,
+        _apply_lr_update_,
         _apply_decoupled_wd,
         _cautious_mask,
+        _foreach_apply_lr_,
         _poly_beta,
         _sinkhorn_normalize,
         _spectral_apply,
@@ -47,8 +49,10 @@ except ImportError:
     _module = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_module)
     WarpAINO = _module.WarpAINO
+    _apply_lr_update_ = _module._apply_lr_update_
     _apply_decoupled_wd = _module._apply_decoupled_wd
     _cautious_mask = _module._cautious_mask
+    _foreach_apply_lr_ = _module._foreach_apply_lr_
     _poly_beta = _module._poly_beta
     _sinkhorn_normalize = _module._sinkhorn_normalize
     _spectral_apply = _module._spectral_apply
@@ -206,6 +210,51 @@ def test_apply_decoupled_wd_zero_wd_is_identity():
         relative_wd=True, relative_wd_delta=1e-3, max_scale=1.0, eps=EPS,
     )
     assert out is update
+
+
+@pytest.mark.parametrize("foreach", [False, True])
+def test_learning_rate_helpers_match_tensor_reference(foreach):
+    """CUDA tensor learning rates are applied without converting to Python.
+
+    This covers the native and foreach paths used by ``step()``. The expected
+    result is formed with device arithmetic, so the test also catches an
+    accidental host scalar conversion in future changes.
+    """
+    _requires_cuda()
+    torch.manual_seed(5)
+    lr = torch.tensor(0.25, device=DEVICE)
+    parameters = [torch.randn(8, device=DEVICE), torch.randn(4, device=DEVICE)]
+    updates = [torch.randn_like(parameter) for parameter in parameters]
+    expected = [parameter - lr * update for parameter, update in zip(parameters, updates)]
+
+    if foreach:
+        _foreach_apply_lr_(parameters, updates, lr)
+    else:
+        for parameter, update in zip(parameters, updates):
+            _apply_lr_update_(parameter, update, lr)
+
+    for parameter, expected_parameter in zip(parameters, expected):
+        torch.testing.assert_close(parameter, expected_parameter)
+
+
+@pytest.mark.parametrize("foreach", [False, True])
+def test_learning_rate_helpers_preserve_python_float_path(foreach):
+    """Python-float learning rates retain the standard optimizer semantics."""
+    _requires_cuda()
+    torch.manual_seed(6)
+    lr = 0.125
+    parameters = [torch.randn(8, device=DEVICE), torch.randn(4, device=DEVICE)]
+    updates = [torch.randn_like(parameter) for parameter in parameters]
+    expected = [parameter - lr * update for parameter, update in zip(parameters, updates)]
+
+    if foreach:
+        _foreach_apply_lr_(parameters, updates, lr)
+    else:
+        for parameter, update in zip(parameters, updates):
+            _apply_lr_update_(parameter, update, lr)
+
+    for parameter, expected_parameter in zip(parameters, expected):
+        torch.testing.assert_close(parameter, expected_parameter)
 
 
 def test_apply_decoupled_wd_pre_mask_rms_reuse_is_exact():
