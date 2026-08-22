@@ -74,7 +74,7 @@ Hyperparameters added over AINOOpt:
         (default: 0.99)
     meta_ema (bool): Use an EMA of crafted updates as the previous input to the
         closure-free warp meta-objective. (default: False)
-    meta_ema_beta (float): Decay for the crafted-update EMA. (default: 0.95)
+    meta_ema_beta (float): Decay for the crafted-update EMA. (default: 0.85)
     nesterov_sign (bool): Use a lookahead sign for the sign-momentum branch.
         (default: False)
     rms_clip (bool): Clamp the post-orthogonalization RMS rescale ratio.
@@ -265,16 +265,9 @@ def _grokfast_filter(
 def _update_meta_history(
     state: dict,
     update_cur_2d: torch.Tensor,
-    meta_ema: bool,
-    meta_ema_beta: float,
 ) -> None:
-    """Store the previous crafted update or update it as an EMA in-place."""
-    previous = state.get("prev_update")
-    if previous is not None and meta_ema:
-        previous.lerp_(update_cur_2d, 1.0 - meta_ema_beta)
-    else:
-        state["prev_update"] = update_cur_2d.clone()
-
+    """Store the previous instantaneous crafted update."""
+    state["prev_update"] = update_cur_2d.clone()
 
 def _apply_decoupled_wd(
     update_final: torch.Tensor,
@@ -490,26 +483,41 @@ def _warp_meta_update(
     meta_lr: float,
     meta_wd: float,
     meta_ema: bool = False,
-    meta_ema_beta: float = 0.95,
+    meta_ema_beta: float = 0.85,
+    stochastic_fp: bool = True,
 ) -> None:
-    """Update the dense residual on the normalized prediction objective.
+    """Update the dense residual on the normalized prediction objective,
 
-    The stored residual is D in P = I + D. It is kept in low precision to
-    reduce optimizer-state memory, but the update is accumulated in FP32
-    before being quantized back to the configured storage dtype.
+    and maintain a low-precision EMA of the warp matrix with stochastic rounding.
     """
     warp = state["warp"]
     prev = state.get("prev_update")
     if prev is not None:
         warp_fp32 = warp.float()
+        # 1. Update instantaneous D on the raw transition (prev -> current)
         R = (prev + warp_fp32 @ prev) - update_cur_2d
         scale = 1.0 / prev.norm().square().clamp_min_(1e-12)
         R_scaled = R * (-meta_lr * scale)
         warp_fp32.addmm_(R_scaled, prev.t())
         if meta_wd > 0:
             warp_fp32.mul_(1.0 - meta_lr * meta_wd)
-        warp.copy_(warp_fp32)
-    _update_meta_history(state, update_cur_2d, meta_ema, meta_ema_beta)
+
+        if warp.dtype is torch.bfloat16 and stochastic_fp:
+            copy_stochastic_(warp, warp_fp32)
+        else:
+            warp.copy_(warp_fp32)
+
+        # 2. Update the shadow EMA matrix (warp_ema)
+        if meta_ema and "warp_ema" in state:
+            warp_ema = state["warp_ema"]
+            warp_ema_fp32 = warp_ema.float()
+            warp_ema_fp32.lerp_(warp_fp32, 1.0 - meta_ema_beta)
+            if warp_ema.dtype is torch.bfloat16 and stochastic_fp:
+                copy_stochastic_(warp_ema, warp_ema_fp32)
+            else:
+                warp_ema.copy_(warp_ema_fp32)
+
+    _update_meta_history(state, update_cur_2d)
 
 
 def _spectral_meta_left_core(
@@ -596,7 +604,7 @@ def _spectral_meta_update(
     meta_wd: float,
     spectral_log_bound: float,
     meta_ema: bool = False,
-    meta_ema_beta: float = 0.95,
+    meta_ema_beta: float = 0.85,
 ) -> None:
     """Eager compatibility wrapper around the tensor-only spectral kernels."""
     prev = state.get("prev_update")
@@ -626,7 +634,15 @@ def _spectral_meta_update(
             )
             log_left.copy_(updated_left)
             log_right.copy_(updated_right)
-    _update_meta_history(state, update_cur_2d, meta_ema, meta_ema_beta)
+
+        # Update spectral log scale EMAs
+        if meta_ema:
+            if "spectral_log_left_ema" in state:
+                state["spectral_log_left_ema"].lerp_(log_left, 1.0 - meta_ema_beta)
+            if log_right is not None and "spectral_log_right_ema" in state:
+                state["spectral_log_right_ema"].lerp_(log_right, 1.0 - meta_ema_beta)
+
+    _update_meta_history(state, update_cur_2d)
 
 
 class WarpAINO(Optimizer):
@@ -665,7 +681,7 @@ class WarpAINO(Optimizer):
         stochastic_fp: bool = True,
         kahan_sum: bool = False,
         meta_ema: bool = False,
-        meta_ema_beta: float = 0.95,
+        meta_ema_beta: float = 0.85,
         nesterov_sign: bool = False,
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
@@ -997,7 +1013,15 @@ class WarpAINO(Optimizer):
                 )
                 log_left.copy_(updated_left)
                 log_right.copy_(updated_right)
-        _update_meta_history(state, update_cur_2d, meta_ema, meta_ema_beta)
+
+            # Update spectral log scale EMAs
+            if meta_ema:
+                if "spectral_log_left_ema" in state:
+                    state["spectral_log_left_ema"].lerp_(log_left, 1.0 - meta_ema_beta)
+                if log_right is not None and "spectral_log_right_ema" in state:
+                    state["spectral_log_right_ema"].lerp_(log_right, 1.0 - meta_ema_beta)
+
+        _update_meta_history(state, update_cur_2d)
 
     def _run_core_2d(
         self,
@@ -1010,12 +1034,6 @@ class WarpAINO(Optimizer):
         step_t: torch.Tensor,
         sinkhorn_steps: int,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Select and invoke the configured 2D core once.
-
-        Native and foreach stepping share this dispatch. Keeping the mode
-        selection outside the compiled cores preserves static graphs while
-        eliminating duplicate 30-argument call ladders in both callers.
-        """
         beta1, beta2, beta3 = group["betas"]
         cautious_update = group["cautious_update"]
         cautious_wd = group["cautious_wd"]
@@ -1023,11 +1041,22 @@ class WarpAINO(Optimizer):
         eps = group["eps"]
         relative_wd = group.get("relative_wd", False)
         relative_wd_delta = group.get("relative_wd_delta", 1e-3)
-        spectral_log_left = state.get("spectral_log_left")
+        meta_ema = group.get("meta_ema", False)
+
+        # Select active spectral log scales (EMA if enabled, else instantaneous)
+        spectral_log_left = (
+            state.get("spectral_log_left_ema")
+            if (meta_ema and "spectral_log_left_ema" in state)
+            else state.get("spectral_log_left")
+        )
         g_2d = _grokfast_filter(state, g_2d, group)
 
         if spectral_log_left is not None:
-            spectral_log_right = state.get("spectral_log_right")
+            spectral_log_right = (
+                state.get("spectral_log_right_ema")
+                if (meta_ema and "spectral_log_right_ema" in state)
+                else state.get("spectral_log_right")
+            )
             if spectral_log_right is None:
                 spectral_log_right = torch.empty(
                     0, dtype=torch.float32, device=p_2d.device
@@ -1063,7 +1092,12 @@ class WarpAINO(Optimizer):
             )
             return update_final, crafted_update
 
-        warp = state.get("warp")
+        # Select active dense warp matrix (EMA if enabled, else instantaneous)
+        warp = (
+            state.get("warp_ema")
+            if (meta_ema and "warp_ema" in state)
+            else state.get("warp")
+        )
         if warp is not None:
             update_final, crafted_update = self._compiled_warp_step_2d(
                 p_2d,
@@ -1130,14 +1164,19 @@ class WarpAINO(Optimizer):
         p_max_scale: Union[float, torch.Tensor],
         step_t: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Select and invoke the configured 1D/scalar core once."""
         beta1, beta2, beta3 = group["betas"]
         cautious_update = group["cautious_update"]
         cautious_wd = group["cautious_wd"]
         eps = group["eps"]
         relative_wd = group.get("relative_wd", False)
         relative_wd_delta = group.get("relative_wd_delta", 1e-3)
-        spectral_log_left = state.get("spectral_log_left")
+        meta_ema = group.get("meta_ema", False)
+
+        spectral_log_left = (
+            state.get("spectral_log_left_ema")
+            if (meta_ema and "spectral_log_left_ema" in state)
+            else state.get("spectral_log_left")
+        )
         g_data = _grokfast_filter(state, g_data, group)
 
         if spectral_log_left is not None:
@@ -1167,7 +1206,11 @@ class WarpAINO(Optimizer):
             )
             return update_final, crafted_update
 
-        warp = state.get("warp")
+        warp = (
+            state.get("warp_ema")
+            if (meta_ema and "warp_ema" in state)
+            else state.get("warp")
+        )
         if warp is not None:
             update_final, crafted_update = self._compiled_warp_step_1d(
                 p_data,
@@ -1217,7 +1260,6 @@ class WarpAINO(Optimizer):
             group["rms_clip_max"],
         )
         return update_final, None
-
     @staticmethod
     def _aino_step_core_2d(
         p_2d: torch.Tensor,
@@ -1860,10 +1902,21 @@ class WarpAINO(Optimizer):
                                 dtype=group["warp_dtype"],
                                 device=p.device,
                             )
+                            if group["meta_ema"]:
+                                state["warp_ema"] = torch.zeros(
+                                    warp_m,
+                                    warp_m,
+                                    dtype=group["warp_dtype"],
+                                    device=p.device,
+                                )
                         else:
                             state["spectral_log_left"] = torch.zeros(
                                 warp_m, dtype=torch.float32, device=p.device
                             )
+                            if group["meta_ema"]:
+                                state["spectral_log_left_ema"] = torch.zeros(
+                                    warp_m, dtype=torch.float32, device=p.device
+                                )
                             # Only enable bilateral (right) spectral warp for hidden layers
                             if p.ndim >= 2 and group["spectral_bilateral"] and getattr(p, "is_hidden", True):
                                 state["spectral_log_right"] = torch.zeros(
@@ -1871,6 +1924,12 @@ class WarpAINO(Optimizer):
                                     dtype=torch.float32,
                                     device=p.device,
                                 )
+                                if group["meta_ema"]:
+                                    state["spectral_log_right_ema"] = torch.zeros(
+                                        w_2d.shape[1],
+                                        dtype=torch.float32,
+                                        device=p.device,
+                                    )
 
             if self._foreach:
                 self._step_foreach(group)
@@ -1974,6 +2033,7 @@ class WarpAINO(Optimizer):
                         meta_wd,
                         meta_ema,
                         meta_ema_beta,
+                        stochastic_fp=stochastic_fp,
                     )
 
             else:
@@ -2012,6 +2072,7 @@ class WarpAINO(Optimizer):
                         meta_wd,
                         meta_ema,
                         meta_ema_beta,
+                        stochastic_fp=stochastic_fp,
                     )
 
     def _step_foreach(self, group):
@@ -2104,6 +2165,7 @@ class WarpAINO(Optimizer):
                     meta_wd,
                     meta_ema,
                     meta_ema_beta,
+                    stochastic_fp=stochastic_fp,
                 )
 
         # 2. Process 2D+ parameters
@@ -2194,4 +2256,5 @@ class WarpAINO(Optimizer):
                     meta_wd,
                     meta_ema,
                     meta_ema_beta,
+                    stochastic_fp=stochastic_fp,
                 )
