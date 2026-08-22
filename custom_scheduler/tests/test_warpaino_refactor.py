@@ -956,6 +956,37 @@ def test_all_optional_features_smoke_cuda(foreach):
     assert "prev_update" in optimizer.state[lin.weight]
 
 
+@pytest.mark.parametrize("warp_mode", ["dense", "spectral"])
+def test_one_dimensional_parameters_use_vector_warp_state(warp_mode):
+    """Unannotated 1D parameters allocate and execute their vector warp."""
+    _requires_cuda()
+    torch.manual_seed(37)
+    parameter = torch.nn.Parameter(torch.randn(16, device=DEVICE))
+    optimizer = WarpAINO(
+        [parameter],
+        lr=1e-3,
+        meta_lr=1e-2,
+        meta_ema=True,
+        warp_mode=warp_mode,
+        spectral_bilateral=True,
+    )
+
+    for _ in range(2):
+        parameter.grad = torch.randn_like(parameter)
+        optimizer.step()
+
+    state = optimizer.state[parameter]
+    assert "prev_update" in state
+    assert state["prev_update"].shape == (parameter.numel(), 1)
+    assert "warp_ema" not in state
+    assert "spectral_log_left_ema" not in state
+    if warp_mode == "dense":
+        assert state["warp"].shape == (parameter.numel(), parameter.numel())
+    else:
+        assert state["spectral_log_left"].shape == (parameter.numel(),)
+    assert torch.isfinite(parameter).all()
+
+
 def test_all_optional_features_compile_step_cuda():
     """Optional core features trace successfully with compiled stepping."""
     _requires_cuda()

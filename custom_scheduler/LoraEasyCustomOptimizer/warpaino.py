@@ -6,7 +6,7 @@ Based on AINOOpt, with the WarpAdam (arXiv:2409.04244) learnable distortion
 matrix P = I + D inserted after the crafted update, immediately before
 Gram Newton-Schulz orthogonalization:
 
-    g_norm        = Sinkhorn(g)               (RMS row/col norm for 1D)
+    g_norm        = Sinkhorn(g)               (RMS row/col norm for 2D+)
     update        = AINO(update machinery)
     update_warped = update + D @ update
 
@@ -28,12 +28,12 @@ applied to. The norm normalization makes the meta-dynamics scale-invariant
 keeping P near the identity anchor.
 
 D is zero-initialized so P = I exactly and WarpAINO is bitwise-identical to
-AINOOpt until the dense warp learns (the first step is exactly AINOOpt).
+AINOOpt until the warp learns (the first step is exactly AINOOpt).
 meta_lr=0 disables the warp entirely (plain AINOOpt).
 
 The dense residual is shaped (m, m), where m is the mixing dimension
 (number of rows after 2D reshape for >= 2D tensors, the full size for
-1D/0D tensors). ``warp_mode="spectral"`` instead uses a full-rank,
+1D vectors). ``warp_mode="spectral"`` instead uses a full-rank,
 symmetric-circulant warp represented by bounded log-frequency scales and
 applied with FFTs. Spectral 2D+ warps can independently mix the row and
 column dimensions without storing dense matrices. Spectral log-scales are
@@ -45,10 +45,11 @@ Hyperparameters added over AINOOpt:
     meta_wd (float): Damping on D toward 0 (identity anchor).
         (default: 1e-2)
     warp_mode (str): ``"dense"`` for the original dense residual or
-        ``"spectral"`` for the FFT-based full-rank warp. (default: "dense")
+        ``"spectral"`` for the FFT-based full-rank warp. (default: "spectral")
     spectral_bilateral (bool): In spectral mode, independently warp both
-        dimensions of 2D+ updates. Vector and scalar parameters always use
-        the left/vector warp only. (default: True)
+        dimensions of 2D+ updates. 1D vectors use the left/vector warp only;
+        scalar, bias, norm, and DoRA-scale parameters do not use a warp.
+        (default: True)
     spectral_log_bound (float): Absolute bound on spectral log-scales. Gains
         are constrained to ``[exp(-bound), exp(bound)]``. (default: 1.0)
     warp_dtype (torch.dtype): Storage dtype for D. FP16, BF16, and FP32 are
@@ -72,9 +73,11 @@ Hyperparameters added over AINOOpt:
         guaranteeing the discrete update factor ``(1 - lr * weight_decay * scale)``
         remains strictly non-negative and preventing sign-flipping overshoots.
         (default: 0.99)
-    meta_ema (bool): Use an EMA of crafted updates as the previous input to the
-        closure-free warp meta-objective. (default: False)
-    meta_ema_beta (float): Decay for the crafted-update EMA. (default: 0.85)
+    meta_ema (bool): Use a separate state buffer containing an EMA of crafted
+        updates as the previous input to the closure-free warp meta-objective.
+        The learned warp itself remains the instantaneous state. (default: False)
+    meta_ema_beta (float): Decay for the separate crafted-update state EMA.
+        (default: 0.85)
     nesterov_sign (bool): Use a lookahead sign for the sign-momentum branch.
         (default: False)
     rms_clip (bool): Clamp the post-orthogonalization RMS rescale ratio.
@@ -265,9 +268,23 @@ def _grokfast_filter(
 def _update_meta_history(
     state: dict,
     update_cur_2d: torch.Tensor,
+    meta_ema: bool = False,
+    meta_ema_beta: float = 0.85,
 ) -> None:
-    """Store the previous instantaneous crafted update."""
-    state["prev_update"] = update_cur_2d.clone()
+    """Store the previous crafted update, optionally using a state EMA.
+
+    ``prev_update`` is deliberately kept separate from the learned warp state.
+    Reusing the existing tensor for the EMA avoids an allocation on every
+    optimizer step and makes the meta-objective use the smoothed transition
+    history without smoothing the operator that is applied to the update.
+    """
+    previous = state.get("prev_update")
+    if previous is None or previous.shape != update_cur_2d.shape:
+        state["prev_update"] = update_cur_2d.clone()
+    elif meta_ema:
+        previous.lerp_(update_cur_2d, 1.0 - meta_ema_beta)
+    else:
+        previous.copy_(update_cur_2d)
 
 def _apply_decoupled_wd(
     update_final: torch.Tensor,
@@ -486,16 +503,19 @@ def _warp_meta_update(
     meta_ema_beta: float = 0.85,
     stochastic_fp: bool = True,
 ) -> None:
-    """Update the dense residual on the normalized prediction objective,
+    """Update the dense residual and its crafted-update history.
 
-    and maintain a low-precision EMA of the warp matrix with stochastic rounding.
+    The learned residual remains instantaneous; when enabled, ``meta_ema``
+    smooths only the separate ``prev_update`` state used by the next
+    prediction-loss step.
     """
     warp = state["warp"]
     prev = state.get("prev_update")
     if prev is not None:
         warp_fp32 = warp.float()
         # 1. Update instantaneous D on the raw transition (prev -> current)
-        R = (prev + warp_fp32 @ prev) - update_cur_2d
+        R = torch.addmm(-update_cur_2d, warp_fp32, prev)
+        R.add_(prev)
         scale = 1.0 / prev.norm().square().clamp_min_(1e-12)
         R_scaled = R * (-meta_lr * scale)
         warp_fp32.addmm_(R_scaled, prev.t())
@@ -507,17 +527,7 @@ def _warp_meta_update(
         else:
             warp.copy_(warp_fp32)
 
-        # 2. Update the shadow EMA matrix (warp_ema)
-        if meta_ema and "warp_ema" in state:
-            warp_ema = state["warp_ema"]
-            warp_ema_fp32 = warp_ema.float()
-            warp_ema_fp32.lerp_(warp_fp32, 1.0 - meta_ema_beta)
-            if warp_ema.dtype is torch.bfloat16 and stochastic_fp:
-                copy_stochastic_(warp_ema, warp_ema_fp32)
-            else:
-                warp_ema.copy_(warp_ema_fp32)
-
-    _update_meta_history(state, update_cur_2d)
+    _update_meta_history(state, update_cur_2d, meta_ema, meta_ema_beta)
 
 
 def _spectral_meta_left_core(
@@ -596,54 +606,173 @@ def _spectral_meta_bilateral_core(
     )
 
 
-@torch.no_grad()
-def _spectral_meta_update(
-    state: dict,
-    update_cur_2d: torch.Tensor,
-    meta_lr: float,
-    meta_wd: float,
-    spectral_log_bound: float,
-    meta_ema: bool = False,
-    meta_ema_beta: float = 0.85,
-) -> None:
-    """Eager compatibility wrapper around the tensor-only spectral kernels."""
-    prev = state.get("prev_update")
-    if prev is not None:
-        log_left = state["spectral_log_left"]
-        log_right = state.get("spectral_log_right")
-        if log_right is None or log_right.numel() == 0:
-            log_left.copy_(
-                _spectral_meta_left_core(
-                    log_left,
-                    prev,
-                    update_cur_2d,
-                    meta_lr,
-                    meta_wd,
-                    spectral_log_bound,
-                )
-            )
-        else:
-            updated_left, updated_right = _spectral_meta_bilateral_core(
-                log_left,
-                log_right,
-                prev,
-                update_cur_2d,
-                meta_lr,
-                meta_wd,
-                spectral_log_bound,
-            )
-            log_left.copy_(updated_left)
-            log_right.copy_(updated_right)
+def _prepare_aino_update_2d(
+    g_2d: torch.Tensor,
+    momentum: torch.Tensor,
+    sign_momentum: torch.Tensor,
+    exp_avg_sq_row: torch.Tensor,
+    exp_avg_sq_col: torch.Tensor,
+    beta1: float,
+    beta2: float,
+    eps: float,
+    step_t: torch.Tensor,
+    sinkhorn_steps: int,
+    nesterov_sign: bool,
+) -> torch.Tensor:
+    """Run the shared 2D AINO tracking and return its crafted update."""
+    g_norm = _sinkhorn_normalize(g_2d, sinkhorn_steps, eps)
+    poly_beta1 = _poly_beta(beta1, step_t)
+    poly_beta2 = _poly_beta(beta2, step_t)
 
-        # Update spectral log scale EMAs
-        if meta_ema:
-            if "spectral_log_left_ema" in state:
-                state["spectral_log_left_ema"].lerp_(log_left, 1.0 - meta_ema_beta)
-            if log_right is not None and "spectral_log_right_ema" in state:
-                state["spectral_log_right_ema"].lerp_(log_right, 1.0 - meta_ema_beta)
+    g_sign = g_norm.sign()
+    sign_momentum.lerp_(g_sign, 1.0 - beta1)
 
-    _update_meta_history(state, update_cur_2d)
+    diff_sq = (g_norm - momentum).pow(2)
+    exp_avg_sq_row.lerp_(diff_sq.mean(dim=-1, keepdim=True), 1.0 - poly_beta2)
+    exp_avg_sq_col.lerp_(diff_sq.mean(dim=-2, keepdim=True), 1.0 - poly_beta2)
 
+    r_factor = (exp_avg_sq_row + eps).sqrt()
+    c_factor = (
+        (exp_avg_sq_col + eps)
+        / (exp_avg_sq_col.mean(dim=-1, keepdim=True) + eps)
+    ).sqrt()
+    denom = r_factor * c_factor
+
+    momentum.lerp_(g_norm, 1.0 - poly_beta1)
+    sign_for_update = _select_sign_momentum(
+        sign_momentum, g_sign, beta1, nesterov_sign
+    )
+    return sign_for_update * (momentum.abs() / denom)
+
+
+def _prepare_aino_update_1d(
+    g_data: torch.Tensor,
+    momentum: torch.Tensor,
+    sign_momentum: torch.Tensor,
+    exp_avg_sq: torch.Tensor,
+    beta1: float,
+    beta2: float,
+    eps: float,
+    step_t: torch.Tensor,
+    nesterov_sign: bool,
+) -> torch.Tensor:
+    """Run the shared 1D AINO tracking and return its crafted update."""
+    grad_rms = torch.sqrt(g_data.pow(2).mean() + eps)
+    g_norm = g_data / grad_rms
+    poly_beta1 = _poly_beta(beta1, step_t)
+    poly_beta2 = _poly_beta(beta2, step_t)
+
+    g_sign = g_norm.sign()
+    sign_momentum.lerp_(g_sign, 1.0 - beta1)
+
+    diff_sq = (g_norm - momentum).pow(2)
+    exp_avg_sq.lerp_(diff_sq, 1.0 - poly_beta2)
+    denom = exp_avg_sq.sqrt().clamp_min_(eps)
+
+    momentum.lerp_(g_norm, 1.0 - poly_beta1)
+    sign_for_update = _select_sign_momentum(
+        sign_momentum, g_sign, beta1, nesterov_sign
+    )
+    return sign_for_update * (momentum.abs() / denom)
+
+
+def _finalize_aino_update_2d(
+    p_2d: torch.Tensor,
+    g_2d: torch.Tensor,
+    update_warped: torch.Tensor,
+    row_var: torch.Tensor,
+    beta3: float,
+    weight_decay: float,
+    max_scale: float,
+    eps: float,
+    step_t: torch.Tensor,
+    cautious_update: bool,
+    cautious_wd: bool,
+    ortho_dtype: torch.dtype,
+    relative_wd: bool,
+    relative_wd_delta: float,
+    rms_clip: bool,
+    rms_clip_max: float,
+) -> torch.Tensor:
+    """Orthogonalize, normalize, and apply the shared 2D post-processing."""
+    poly_beta3 = _poly_beta(beta3, step_t)
+    O = gram_newton_schulz_2step(
+        update_warped, eps=1e-7, ortho_dtype=ortho_dtype
+    )
+
+    row_sq = O.pow(2).mean(dim=-1)
+    row_var.lerp_(row_sq, 1.0 - poly_beta3)
+    O_norm = O / torch.sqrt(row_var.clamp_min(eps).unsqueeze(-1))
+
+    target_rms = torch.sqrt(update_warped.pow(2).mean() + eps)
+    current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
+    rescale = target_rms / (current_rms + eps)
+    if rms_clip:
+        rescale = torch.clamp_max(rescale, rms_clip_max)
+    update_final = O_norm * rescale
+
+    if cautious_update:
+        update_final = _cautious_mask(update_final, g_2d)
+
+    return _apply_decoupled_wd(
+        update_final,
+        p_2d,
+        weight_decay,
+        cautious_wd,
+        relative_wd,
+        relative_wd_delta,
+        max_scale,
+        eps,
+        cautious_update=cautious_update,
+        pre_mask_rms=target_rms,
+    )
+
+
+def _finalize_aino_update_1d(
+    p_data: torch.Tensor,
+    g_data: torch.Tensor,
+    update_warped: torch.Tensor,
+    row_var: torch.Tensor,
+    beta3: float,
+    weight_decay: float,
+    max_scale: float,
+    eps: float,
+    step_t: torch.Tensor,
+    cautious_update: bool,
+    cautious_wd: bool,
+    relative_wd: bool,
+    relative_wd_delta: float,
+    rms_clip: bool,
+    rms_clip_max: float,
+) -> torch.Tensor:
+    """Normalize and apply the shared 1D post-processing."""
+    poly_beta3 = _poly_beta(beta3, step_t)
+    var_sq = update_warped.pow(2).mean()
+    row_var.lerp_(var_sq, 1.0 - poly_beta3)
+    O_norm = update_warped / torch.sqrt(row_var.clamp_min(eps))
+
+    target_rms = torch.sqrt(update_warped.pow(2).mean() + eps)
+    current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
+    rescale = target_rms / (current_rms + eps)
+    if rms_clip:
+        rescale = torch.clamp_max(rescale, rms_clip_max)
+    update_final = O_norm * rescale
+
+    if cautious_update:
+        update_final = _cautious_mask(update_final, g_data)
+
+    return _apply_decoupled_wd(
+        update_final,
+        p_data,
+        weight_decay,
+        cautious_wd,
+        relative_wd,
+        relative_wd_delta,
+        max_scale,
+        eps,
+        cautious_update=cautious_update,
+        pre_mask_rms=target_rms,
+    )
 
 class WarpAINO(Optimizer):
     """AINO optimizer with a dense or spectral WarpAdam-style crafted-update warp.
@@ -651,7 +780,7 @@ class WarpAINO(Optimizer):
     The Sinkhorn-normalized gradient first enters the ordinary AINO sign,
     innovation, and value-momentum machinery. The resulting crafted update is
     then linearly warped by an identity-anchored operator immediately before
-    orthogonalization. The default dense mode uses:
+    orthogonalization. The dense mode uses:
 
         update_warped = update + D @ update,   D = 0
 
@@ -660,11 +789,15 @@ class WarpAINO(Optimizer):
     operators on the row and column dimensions.
 
     D is zero-initialized so P = I exactly and WarpAINO is exactly AINOOpt
-    until the dense residual learns. After each step, D is updated with one
-    SGD step (no closure required) on the
+    until the residual learns. After each step, D is updated with one SGD step
+    (no closure required) on the
     one-step-ahead prediction loss of the crafted update process
     ||P @ u_{t-1} - u_t||^2 / ||u_{t-1}||^2; meta_wd damps D back toward
     0. meta_lr=0 disables the warp (plain AINOOpt).
+
+    With ``meta_ema=True``, a separate ``prev_update`` state buffer stores an
+    EMA of crafted updates for the prediction target. The learned warp itself
+    is never replaced by an EMA.
 
     The dense residual is stored in ``warp_dtype`` and promoted to FP32 for
     matrix multiplication and meta-updates.
@@ -1014,14 +1147,7 @@ class WarpAINO(Optimizer):
                 log_left.copy_(updated_left)
                 log_right.copy_(updated_right)
 
-            # Update spectral log scale EMAs
-            if meta_ema:
-                if "spectral_log_left_ema" in state:
-                    state["spectral_log_left_ema"].lerp_(log_left, 1.0 - meta_ema_beta)
-                if log_right is not None and "spectral_log_right_ema" in state:
-                    state["spectral_log_right_ema"].lerp_(log_right, 1.0 - meta_ema_beta)
-
-        _update_meta_history(state, update_cur_2d)
+        _update_meta_history(state, update_cur_2d, meta_ema, meta_ema_beta)
 
     def _run_core_2d(
         self,
@@ -1041,22 +1167,11 @@ class WarpAINO(Optimizer):
         eps = group["eps"]
         relative_wd = group.get("relative_wd", False)
         relative_wd_delta = group.get("relative_wd_delta", 1e-3)
-        meta_ema = group.get("meta_ema", False)
-
-        # Select active spectral log scales (EMA if enabled, else instantaneous)
-        spectral_log_left = (
-            state.get("spectral_log_left_ema")
-            if (meta_ema and "spectral_log_left_ema" in state)
-            else state.get("spectral_log_left")
-        )
+        spectral_log_left = state.get("spectral_log_left")
         g_2d = _grokfast_filter(state, g_2d, group)
 
         if spectral_log_left is not None:
-            spectral_log_right = (
-                state.get("spectral_log_right_ema")
-                if (meta_ema and "spectral_log_right_ema" in state)
-                else state.get("spectral_log_right")
-            )
+            spectral_log_right = state.get("spectral_log_right")
             if spectral_log_right is None:
                 spectral_log_right = torch.empty(
                     0, dtype=torch.float32, device=p_2d.device
@@ -1092,12 +1207,7 @@ class WarpAINO(Optimizer):
             )
             return update_final, crafted_update
 
-        # Select active dense warp matrix (EMA if enabled, else instantaneous)
-        warp = (
-            state.get("warp_ema")
-            if (meta_ema and "warp_ema" in state)
-            else state.get("warp")
-        )
+        warp = state.get("warp")
         if warp is not None:
             update_final, crafted_update = self._compiled_warp_step_2d(
                 p_2d,
@@ -1170,13 +1280,7 @@ class WarpAINO(Optimizer):
         eps = group["eps"]
         relative_wd = group.get("relative_wd", False)
         relative_wd_delta = group.get("relative_wd_delta", 1e-3)
-        meta_ema = group.get("meta_ema", False)
-
-        spectral_log_left = (
-            state.get("spectral_log_left_ema")
-            if (meta_ema and "spectral_log_left_ema" in state)
-            else state.get("spectral_log_left")
-        )
+        spectral_log_left = state.get("spectral_log_left")
         g_data = _grokfast_filter(state, g_data, group)
 
         if spectral_log_left is not None:
@@ -1206,11 +1310,7 @@ class WarpAINO(Optimizer):
             )
             return update_final, crafted_update
 
-        warp = (
-            state.get("warp_ema")
-            if (meta_ema and "warp_ema" in state)
-            else state.get("warp")
-        )
+        warp = state.get("warp")
         if warp is not None:
             update_final, crafted_update = self._compiled_warp_step_1d(
                 p_data,
@@ -1286,74 +1386,38 @@ class WarpAINO(Optimizer):
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
     ) -> torch.Tensor:
-        """Core 2D+ update step compilable by torch.compile (plain AINOOpt,
-        used when the warp is disabled)."""
-        # 1. Sinkhorn normalization for 2D+ parameters
-        g_norm = _sinkhorn_normalize(g_2d, sinkhorn_steps, eps)
-
-        # Compute poly-beta values for beta1, beta2, and beta3
-        poly_beta1 = _poly_beta(beta1, step_t)
-        poly_beta2 = _poly_beta(beta2, step_t)
-        poly_beta3 = _poly_beta(beta3, step_t)
-
-        # 2. Track gradient sign momentum using beta1
-        g_sign = g_norm.sign()
-        sign_momentum.lerp_(g_sign, 1.0 - beta1)
-
-        # 3. Track CAME-style factorized row & column squared innovation using poly_beta2
-        diff_sq = (g_norm - momentum).pow(2)
-        exp_avg_sq_row.lerp_(diff_sq.mean(dim=-1, keepdim=True), 1.0 - poly_beta2)
-        exp_avg_sq_col.lerp_(diff_sq.mean(dim=-2, keepdim=True), 1.0 - poly_beta2)
-
-        # Construct factorized denominator
-        r_factor = (exp_avg_sq_row + eps).sqrt()
-        c_factor = ((exp_avg_sq_col + eps) / (exp_avg_sq_col.mean(dim=-1, keepdim=True) + eps)).sqrt()
-        denom = r_factor * c_factor
-
-        # 4. Update tracked value momentum using poly_beta1
-        momentum.lerp_(g_norm, 1.0 - poly_beta1)
-
-        # 5. Craft update: apply tracked sign to absolute value of (momentum / denom)
-        sign_for_update = _select_sign_momentum(
-            sign_momentum, g_sign, beta1, nesterov_sign
+        """Plain AINO 2D core sharing tracking and post-processing helpers."""
+        update = _prepare_aino_update_2d(
+            g_2d,
+            momentum,
+            sign_momentum,
+            exp_avg_sq_row,
+            exp_avg_sq_col,
+            beta1,
+            beta2,
+            eps,
+            step_t,
+            sinkhorn_steps,
+            nesterov_sign,
         )
-        update = sign_for_update * (momentum.abs() / denom)
-
-        # 6. Orthogonalize update using 2-step Gram Newton-Schulz
-        O = gram_newton_schulz_2step(update, eps=1e-7, ortho_dtype=ortho_dtype)
-
-        # 7. Track row-wise variance using poly_beta3 & normalize using updated tracked row-wise variance
-        row_sq = O.pow(2).mean(dim=-1)
-        row_var.lerp_(row_sq, 1.0 - poly_beta3)
-        O_norm = O / torch.sqrt(row_var.clamp_min(eps).unsqueeze(-1))
-
-        # 8. Rescale back to update's RMS norm
-        target_rms = torch.sqrt(update.pow(2).mean() + eps)
-        current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
-        rescale = target_rms / (current_rms + eps)
-        if rms_clip:
-            rescale = torch.clamp_max(rescale, rms_clip_max)
-        update_final = O_norm * rescale
-
-        # 9. Cautious updates
-        if cautious_update:
-            update_final = _cautious_mask(update_final, g_2d)
-
-        # Decoupled weight decay (absolute or RMS-relative)
-        update_final = _apply_decoupled_wd(
-            update_final,
+        return _finalize_aino_update_2d(
             p_2d,
+            g_2d,
+            update,
+            row_var,
+            beta3,
             weight_decay,
-            cautious_wd,
-            relative_wd,
-            relative_wd_delta,
             max_scale,
             eps,
-            cautious_update=cautious_update,
-            pre_mask_rms=target_rms,
+            step_t,
+            cautious_update,
+            cautious_wd,
+            ortho_dtype,
+            relative_wd,
+            relative_wd_delta,
+            rms_clip,
+            rms_clip_max,
         )
-
-        return update_final
 
     @staticmethod
     def _aino_step_core_1d(
@@ -1378,70 +1442,35 @@ class WarpAINO(Optimizer):
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
     ) -> torch.Tensor:
-        """Core 1D/0D update step compilable by torch.compile (plain AINOOpt,
-        used when the warp is disabled)."""
-        # 1. RMS normalize gradient for 1D/0D parameters
-        grad_rms = torch.sqrt(g_data.pow(2).mean() + eps)
-        g_norm = g_data / grad_rms
-
-        # Compute poly-beta values for beta1, beta2 and beta3
-        poly_beta1 = _poly_beta(beta1, step_t)
-        poly_beta2 = _poly_beta(beta2, step_t)
-        poly_beta3 = _poly_beta(beta3, step_t)
-
-        # 2. Track gradient sign momentum using beta1
-        g_sign = g_norm.sign()
-        sign_momentum.lerp_(g_sign, 1.0 - beta1)
-
-        # 3. Track squared innovation relative to un-updated momentum using poly_beta2
-        diff_sq = (g_norm - momentum).pow(2)
-        exp_avg_sq.lerp_(diff_sq, 1.0 - poly_beta2)
-        denom = exp_avg_sq.sqrt().clamp_min_(eps)
-
-        # 4. Update tracked value momentum using poly_beta1
-        momentum.lerp_(g_norm, 1.0 - poly_beta1)
-
-        # 5. Craft update: apply tracked sign to absolute value of (momentum / denom)
-        sign_for_update = _select_sign_momentum(
-            sign_momentum, g_sign, beta1, nesterov_sign
+        """Plain AINO 1D core sharing tracking and post-processing helpers."""
+        update = _prepare_aino_update_1d(
+            g_data,
+            momentum,
+            sign_momentum,
+            exp_avg_sq,
+            beta1,
+            beta2,
+            eps,
+            step_t,
+            nesterov_sign,
         )
-        update = sign_for_update * (momentum.abs() / denom)
-
-        # 6. Skip orthogonalization for 1D/0D parameters
-        O = update
-
-        # 7. Track variance using poly_beta3 & normalize
-        var_sq = O.pow(2).mean()
-        row_var.lerp_(var_sq, 1.0 - poly_beta3)
-        O_norm = O / torch.sqrt(row_var.clamp_min(eps))
-
-        # 8. Rescale back to update's RMS norm
-        target_rms = torch.sqrt(update.pow(2).mean() + eps)
-        current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
-        rescale = target_rms / (current_rms + eps)
-        if rms_clip:
-            rescale = torch.clamp_max(rescale, rms_clip_max)
-        update_final = O_norm * rescale
-
-        # 9. Cautious updates
-        if cautious_update:
-            update_final = _cautious_mask(update_final, g_data)
-
-        # Decoupled weight decay (absolute or RMS-relative)
-        update_final = _apply_decoupled_wd(
-            update_final,
+        return _finalize_aino_update_1d(
             p_data,
+            g_data,
+            update,
+            row_var,
+            beta3,
             weight_decay,
+            max_scale,
+            eps,
+            step_t,
+            cautious_update,
             cautious_wd,
             relative_wd,
             relative_wd_delta,
-            max_scale,
-            eps,
-            cautious_update=cautious_update,
-            pre_mask_rms=target_rms,
+            rms_clip,
+            rms_clip_max,
         )
-
-        return update_final
 
     @staticmethod
     def _WarpAINO_step_core_2d(
@@ -1470,73 +1499,39 @@ class WarpAINO(Optimizer):
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Core 2D+ step with P applied to the crafted update before NS."""
-        # 1. Sinkhorn normalization for 2D+ parameters
-        g_norm = _sinkhorn_normalize(g_2d, sinkhorn_steps, eps)
-
-        # Compute poly-beta values for beta1, beta2, and beta3
-        poly_beta1 = _poly_beta(beta1, step_t)
-        poly_beta2 = _poly_beta(beta2, step_t)
-        poly_beta3 = _poly_beta(beta3, step_t)
-
-        # 2. Track gradient sign momentum using beta1
-        g_sign = g_norm.sign()
-        sign_momentum.lerp_(g_sign, 1.0 - beta1)
-
-        # 3. Track CAME-style factorized row & column squared innovation using poly_beta2
-        diff_sq = (g_norm - momentum).pow(2)
-        exp_avg_sq_row.lerp_(diff_sq.mean(dim=-1, keepdim=True), 1.0 - poly_beta2)
-        exp_avg_sq_col.lerp_(diff_sq.mean(dim=-2, keepdim=True), 1.0 - poly_beta2)
-
-        # Construct factorized denominator
-        r_factor = (exp_avg_sq_row + eps).sqrt()
-        c_factor = ((exp_avg_sq_col + eps) / (exp_avg_sq_col.mean(dim=-1, keepdim=True) + eps)).sqrt()
-        denom = r_factor * c_factor
-
-        # 4. Update tracked value momentum using poly_beta1
-        momentum.lerp_(g_norm, 1.0 - poly_beta1)
-
-        # 5. Craft update: apply tracked sign to absolute value of (momentum / denom)
-        sign_for_update = _select_sign_momentum(
-            sign_momentum, g_sign, beta1, nesterov_sign
+        """Dense-warp 2D core using the shared AINO core stages."""
+        update = _prepare_aino_update_2d(
+            g_2d,
+            momentum,
+            sign_momentum,
+            exp_avg_sq_row,
+            exp_avg_sq_col,
+            beta1,
+            beta2,
+            eps,
+            step_t,
+            sinkhorn_steps,
+            nesterov_sign,
         )
-        update = sign_for_update * (momentum.abs() / denom)
-
-        # 6. Warp the crafted update before 2-step Gram Newton-Schulz
-        update_warped = update + warp.float() @ update
-        O = gram_newton_schulz_2step(update_warped, eps=1e-7, ortho_dtype=ortho_dtype)
-
-        # 7. Track row-wise variance using poly_beta3 & normalize using updated tracked row-wise variance
-        row_sq = O.pow(2).mean(dim=-1)
-        row_var.lerp_(row_sq, 1.0 - poly_beta3)
-        O_norm = O / torch.sqrt(row_var.clamp_min(eps).unsqueeze(-1))
-
-        # 8. Rescale back to update's RMS norm
-        target_rms = torch.sqrt(update_warped.pow(2).mean() + eps)
-        current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
-        rescale = target_rms / (current_rms + eps)
-        if rms_clip:
-            rescale = torch.clamp_max(rescale, rms_clip_max)
-        update_final = O_norm * rescale
-
-        # 9. Cautious updates (masked against the original gradient)
-        if cautious_update:
-            update_final = _cautious_mask(update_final, g_2d)
-
-        # Decoupled weight decay (absolute or RMS-relative)
-        update_final = _apply_decoupled_wd(
-            update_final,
+        update_warped = torch.addmm(update, warp.float(), update)
+        update_final = _finalize_aino_update_2d(
             p_2d,
+            g_2d,
+            update_warped,
+            row_var,
+            beta3,
             weight_decay,
-            cautious_wd,
-            relative_wd,
-            relative_wd_delta,
             max_scale,
             eps,
-            cautious_update=cautious_update,
-            pre_mask_rms=target_rms,
+            step_t,
+            cautious_update,
+            cautious_wd,
+            ortho_dtype,
+            relative_wd,
+            relative_wd_delta,
+            rms_clip,
+            rms_clip_max,
         )
-
         return update_final, update
 
     @staticmethod
@@ -1563,69 +1558,37 @@ class WarpAINO(Optimizer):
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Core 1D/0D step with P applied to the crafted update before NS."""
-        # 1. RMS normalize gradient for 1D/0D parameters
-        grad_rms = torch.sqrt(g_data.pow(2).mean() + eps)
-        g_norm = g_data / grad_rms
-
-        # Compute poly-beta values for beta1, beta2 and beta3
-        poly_beta1 = _poly_beta(beta1, step_t)
-        poly_beta2 = _poly_beta(beta2, step_t)
-        poly_beta3 = _poly_beta(beta3, step_t)
-
-        # 2. Track gradient sign momentum using beta1
-        g_sign = g_norm.sign()
-        sign_momentum.lerp_(g_sign, 1.0 - beta1)
-
-        # 3. Track squared innovation relative to un-updated momentum using poly_beta2
-        diff_sq = (g_norm - momentum).pow(2)
-        exp_avg_sq.lerp_(diff_sq, 1.0 - poly_beta2)
-        denom = exp_avg_sq.sqrt().clamp_min_(eps)
-
-        # 4. Update tracked value momentum using poly_beta1
-        momentum.lerp_(g_norm, 1.0 - poly_beta1)
-
-        # 5. Craft update: apply tracked sign to absolute value of (momentum / denom)
-        sign_for_update = _select_sign_momentum(
-            sign_momentum, g_sign, beta1, nesterov_sign
+        """Dense-warp 1D core using the shared AINO core stages."""
+        update = _prepare_aino_update_1d(
+            g_data,
+            momentum,
+            sign_momentum,
+            exp_avg_sq,
+            beta1,
+            beta2,
+            eps,
+            step_t,
+            nesterov_sign,
         )
-        update = sign_for_update * (momentum.abs() / denom)
-
-        # 6. Warp the crafted update before the (skipped) orthogonalization
         update_2d = update.reshape(-1, 1)
-        O = (update_2d + warp.float() @ update_2d).reshape(update.shape)
-
-        # 7. Track variance using poly_beta3 & normalize
-        var_sq = O.pow(2).mean()
-        row_var.lerp_(var_sq, 1.0 - poly_beta3)
-        O_norm = O / torch.sqrt(row_var.clamp_min(eps))
-
-        # 8. Rescale back to update's RMS norm
-        target_rms = torch.sqrt(O.pow(2).mean() + eps)
-        current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
-        rescale = target_rms / (current_rms + eps)
-        if rms_clip:
-            rescale = torch.clamp_max(rescale, rms_clip_max)
-        update_final = O_norm * rescale
-
-        # 9. Cautious updates (masked against the original gradient)
-        if cautious_update:
-            update_final = _cautious_mask(update_final, g_data)
-
-        # Decoupled weight decay (absolute or RMS-relative)
-        update_final = _apply_decoupled_wd(
-            update_final,
+        update_warped = torch.addmm(update_2d, warp.float(), update_2d).reshape_as(update)
+        update_final = _finalize_aino_update_1d(
             p_data,
+            g_data,
+            update_warped,
+            row_var,
+            beta3,
             weight_decay,
+            max_scale,
+            eps,
+            step_t,
+            cautious_update,
             cautious_wd,
             relative_wd,
             relative_wd_delta,
-            max_scale,
-            eps,
-            cautious_update=cautious_update,
-            pre_mask_rms=target_rms,
+            rms_clip,
+            rms_clip_max,
         )
-
         return update_final, update
 
     @staticmethod
@@ -1658,87 +1621,50 @@ class WarpAINO(Optimizer):
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Core 2D+ step with a full-rank FFT spectral warp."""
-        # 1. Sinkhorn normalization for 2D+ parameters
-        g_norm = _sinkhorn_normalize(g_2d, sinkhorn_steps, eps)
-
-        # Compute poly-beta values for beta1, beta2, and beta3
-        poly_beta1 = _poly_beta(beta1, step_t)
-        poly_beta2 = _poly_beta(beta2, step_t)
-        poly_beta3 = _poly_beta(beta3, step_t)
-
-        # 2. Track gradient sign momentum using beta1
-        g_sign = g_norm.sign()
-        sign_momentum.lerp_(g_sign, 1.0 - beta1)
-
-        # 3. Track factorized squared innovation using poly_beta2
-        diff_sq = (g_norm - momentum).pow(2)
-        exp_avg_sq_row.lerp_(diff_sq.mean(dim=-1, keepdim=True), 1.0 - poly_beta2)
-        exp_avg_sq_col.lerp_(diff_sq.mean(dim=-2, keepdim=True), 1.0 - poly_beta2)
-
-        r_factor = (exp_avg_sq_row + eps).sqrt()
-        c_factor = (
-            (exp_avg_sq_col + eps)
-            / (exp_avg_sq_col.mean(dim=-1, keepdim=True) + eps)
-        ).sqrt()
-        denom = r_factor * c_factor
-
-        # 4. Update tracked value momentum using poly_beta1
-        momentum.lerp_(g_norm, 1.0 - poly_beta1)
-
-        # 5. Craft update
-        sign_for_update = _select_sign_momentum(
-            sign_momentum, g_sign, beta1, nesterov_sign
+        """Spectral-warp 2D core using the shared AINO core stages."""
+        update = _prepare_aino_update_2d(
+            g_2d,
+            momentum,
+            sign_momentum,
+            exp_avg_sq_row,
+            exp_avg_sq_col,
+            beta1,
+            beta2,
+            eps,
+            step_t,
+            sinkhorn_steps,
+            nesterov_sign,
         )
-        update = sign_for_update * (momentum.abs() / denom)
-
-        # 6. Apply the full-rank spectral warp before Gram Newton-Schulz.
         if spectral_bilateral and spectral_log_right.numel() > 0:
-            warped = _spectral_apply(
+            update_warped = _spectral_apply(
                 update,
                 spectral_log_left,
                 spectral_log_right,
                 spectral_log_bound,
             )
         else:
-            warped = _spectral_apply(
+            update_warped = _spectral_apply(
                 update, spectral_log_left, None, spectral_log_bound
             )
-        update_warped = torch.where(step_t <= 1.0, update, warped)
-        O = gram_newton_schulz_2step(
-            update_warped, eps=1e-7, ortho_dtype=ortho_dtype
-        )
-
-        # 7. Track row-wise variance
-        row_sq = O.pow(2).mean(dim=-1)
-        row_var.lerp_(row_sq, 1.0 - poly_beta3)
-        O_norm = O / torch.sqrt(row_var.clamp_min(eps).unsqueeze(-1))
-
-        # 8. Rescale back to the warped update's RMS norm
-        target_rms = torch.sqrt(update_warped.pow(2).mean() + eps)
-        current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
-        rescale = target_rms / (current_rms + eps)
-        if rms_clip:
-            rescale = torch.clamp_max(rescale, rms_clip_max)
-        update_final = O_norm * rescale
-
-        # 9. Cautious updates against the original gradient
-        if cautious_update:
-            update_final = _cautious_mask(update_final, g_2d)
-
-        update_final = _apply_decoupled_wd(
-            update_final,
+        update_warped = torch.where(step_t <= 1.0, update, update_warped)
+        update_final = _finalize_aino_update_2d(
             p_2d,
+            g_2d,
+            update_warped,
+            row_var,
+            beta3,
             weight_decay,
-            cautious_wd,
-            relative_wd,
-            relative_wd_delta,
             max_scale,
             eps,
-            cautious_update=cautious_update,
-            pre_mask_rms=target_rms,
+            step_t,
+            cautious_update,
+            cautious_wd,
+            ortho_dtype,
+            relative_wd,
+            relative_wd_delta,
+            rms_clip,
+            rms_clip_max,
         )
-
         return update_final, update
 
     @staticmethod
@@ -1766,71 +1692,40 @@ class WarpAINO(Optimizer):
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Core 1D/0D step with a full-rank FFT spectral warp."""
-        # 1. RMS normalize gradient for 1D/0D parameters
-        grad_rms = torch.sqrt(g_data.pow(2).mean() + eps)
-        g_norm = g_data / grad_rms
-
-        # Compute poly-beta values for beta1, beta2, and beta3
-        poly_beta1 = _poly_beta(beta1, step_t)
-        poly_beta2 = _poly_beta(beta2, step_t)
-        poly_beta3 = _poly_beta(beta3, step_t)
-
-        # 2. Track gradient sign momentum using beta1
-        g_sign = g_norm.sign()
-        sign_momentum.lerp_(g_sign, 1.0 - beta1)
-
-        # 3. Track squared innovation relative to un-updated momentum
-        diff_sq = (g_norm - momentum).pow(2)
-        exp_avg_sq.lerp_(diff_sq, 1.0 - poly_beta2)
-        denom = exp_avg_sq.sqrt().clamp_min_(eps)
-
-        # 4. Update tracked value momentum using poly_beta1
-        momentum.lerp_(g_norm, 1.0 - poly_beta1)
-
-        # 5. Craft update
-        sign_for_update = _select_sign_momentum(
-            sign_momentum, g_sign, beta1, nesterov_sign
+        """Spectral-warp 1D core using the shared AINO core stages."""
+        update = _prepare_aino_update_1d(
+            g_data,
+            momentum,
+            sign_momentum,
+            exp_avg_sq,
+            beta1,
+            beta2,
+            eps,
+            step_t,
+            nesterov_sign,
         )
-        update = sign_for_update * (momentum.abs() / denom)
-
-        # 6. Apply the spectral warp to the vector dimension
         update_2d = update.reshape(-1, 1)
-        warped = _spectral_apply(
+        update_warped = _spectral_apply(
             update_2d, spectral_log_left, None, spectral_log_bound
         )
-        O = torch.where(step_t <= 1.0, update_2d, warped).reshape(update.shape)
-
-        # 7. Track variance
-        var_sq = O.pow(2).mean()
-        row_var.lerp_(var_sq, 1.0 - poly_beta3)
-        O_norm = O / torch.sqrt(row_var.clamp_min(eps))
-
-        # 8. Rescale back to the warped update's RMS norm
-        target_rms = torch.sqrt(O.pow(2).mean() + eps)
-        current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
-        rescale = target_rms / (current_rms + eps)
-        if rms_clip:
-            rescale = torch.clamp_max(rescale, rms_clip_max)
-        update_final = O_norm * rescale
-
-        # 9. Cautious updates against the original gradient
-        if cautious_update:
-            update_final = _cautious_mask(update_final, g_data)
-
-        update_final = _apply_decoupled_wd(
-            update_final,
+        update_warped = torch.where(step_t <= 1.0, update_2d, update_warped).reshape_as(update)
+        update_final = _finalize_aino_update_1d(
             p_data,
+            g_data,
+            update_warped,
+            row_var,
+            beta3,
             weight_decay,
+            max_scale,
+            eps,
+            step_t,
+            cautious_update,
             cautious_wd,
             relative_wd,
             relative_wd_delta,
-            max_scale,
-            eps,
-            cautious_update=cautious_update,
-            pre_mask_rms=target_rms,
+            rms_clip,
+            rms_clip_max,
         )
-
         return update_final, update
 
     @torch.no_grad()
@@ -1885,16 +1780,16 @@ class WarpAINO(Optimizer):
                             p.data, dtype=torch.float32
                         )
 
-                    # Skip warp distortion for 1D vectors, biases, norm layers, scalars, and DoRA scales
-                    is_1d_or_scalar = (
-                        p.ndim < 2
-                        or p.numel() == 1
+                    # Skip warp distortion for biases, norm layers, scalars, and DoRA scales.
+                    # Ordinary 1D vectors intentionally use the vector/left warp.
+                    is_scalar_or_excluded = (
+                        p.numel() == 1
                         or getattr(p, "is_scalar", False)
                         or getattr(p, "is_bias", False)
                         or getattr(p, "is_norm", False)
                         or getattr(p, "_is_dora_scale", False)
                     )
-                    if group["meta_lr"] > 0 and not is_1d_or_scalar:
+                    if group["meta_lr"] > 0 and not is_scalar_or_excluded:
                         if group["warp_mode"] == "dense":
                             state["warp"] = torch.zeros(
                                 warp_m,
@@ -1902,21 +1797,10 @@ class WarpAINO(Optimizer):
                                 dtype=group["warp_dtype"],
                                 device=p.device,
                             )
-                            if group["meta_ema"]:
-                                state["warp_ema"] = torch.zeros(
-                                    warp_m,
-                                    warp_m,
-                                    dtype=group["warp_dtype"],
-                                    device=p.device,
-                                )
                         else:
                             state["spectral_log_left"] = torch.zeros(
                                 warp_m, dtype=torch.float32, device=p.device
                             )
-                            if group["meta_ema"]:
-                                state["spectral_log_left_ema"] = torch.zeros(
-                                    warp_m, dtype=torch.float32, device=p.device
-                                )
                             # Only enable bilateral (right) spectral warp for hidden layers
                             if p.ndim >= 2 and group["spectral_bilateral"] and getattr(p, "is_hidden", True):
                                 state["spectral_log_right"] = torch.zeros(
@@ -1924,12 +1808,6 @@ class WarpAINO(Optimizer):
                                     dtype=torch.float32,
                                     device=p.device,
                                 )
-                                if group["meta_ema"]:
-                                    state["spectral_log_right_ema"] = torch.zeros(
-                                        w_2d.shape[1],
-                                        dtype=torch.float32,
-                                        device=p.device,
-                                    )
 
             if self._foreach:
                 self._step_foreach(group)
