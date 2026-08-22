@@ -31,10 +31,13 @@ try:
         _apply_decoupled_wd,
         _cautious_mask,
         _foreach_apply_lr_,
+        _grokfast_filter,
         _poly_beta,
+        _select_sign_momentum,
         _sinkhorn_normalize,
         _spectral_apply,
         _spectral_log_gain,
+        _update_meta_history,
         gram_newton_schulz_2step,
     )
 except ImportError:
@@ -54,10 +57,13 @@ except ImportError:
     _apply_decoupled_wd = _module._apply_decoupled_wd
     _cautious_mask = _module._cautious_mask
     _foreach_apply_lr_ = _module._foreach_apply_lr_
+    _grokfast_filter = _module._grokfast_filter
     _poly_beta = _module._poly_beta
+    _select_sign_momentum = _module._select_sign_momentum
     _sinkhorn_normalize = _module._sinkhorn_normalize
     _spectral_apply = _module._spectral_apply
     _spectral_log_gain = _module._spectral_log_gain
+    _update_meta_history = _module._update_meta_history
     gram_newton_schulz_2step = _module.gram_newton_schulz_2step
 
 DEVICE = "cuda"
@@ -810,6 +816,172 @@ def test_fp16_rounding_compensation_is_disabled_by_default(foreach):
     assert state.get("param_compensation") is None
 
 
+def test_meta_ema_reuses_previous_update_buffer():
+    """The EMA target updates the existing previous-update buffer in-place."""
+    _requires_cuda()
+    previous = torch.randn(8, 4, device=DEVICE)
+    current = torch.randn(8, 4, device=DEVICE)
+    state = {"prev_update": previous.clone()}
+    previous_reference = state["prev_update"]
+    beta = 0.75
+    expected = beta * previous_reference.clone() + (1.0 - beta) * current
+
+    _update_meta_history(state, current, meta_ema=True, meta_ema_beta=beta)
+
+    assert state["prev_update"] is previous_reference
+    torch.testing.assert_close(state["prev_update"], expected)
+
+
+def test_meta_ema_disabled_preserves_latest_update_semantics():
+    """Disabled EMA stores the current update directly, as in legacy behavior."""
+    _requires_cuda()
+    current = torch.randn(8, 4, device=DEVICE)
+    state = {"prev_update": torch.randn(8, 4, device=DEVICE)}
+    _update_meta_history(state, current, meta_ema=False, meta_ema_beta=0.98)
+    torch.testing.assert_close(state["prev_update"], current)
+    assert state["prev_update"] is not current
+
+
+def test_nesterov_sign_momentum_changes_lookahead_direction():
+    """Nesterov sign mode can look ahead of a still-negative sign EMA."""
+    _requires_cuda()
+    sign_momentum = torch.full((16,), -0.05, device=DEVICE)
+    g_sign = torch.ones(16, device=DEVICE)
+    ordinary = _select_sign_momentum(sign_momentum, g_sign, 0.9, False)
+    nesterov = _select_sign_momentum(sign_momentum, g_sign, 0.9, True)
+
+    assert (ordinary < 0).all()
+    assert (nesterov > 0).all()
+
+
+def test_grokfast_filter_matches_first_step_formula():
+    """GrokFast updates the EMA before adding its amplified slow component."""
+    _requires_cuda()
+    gradient = torch.ones(16, device=DEVICE)
+    state = {"step": 1}
+    group = {
+        "grokfast": True,
+        "grokfast_after_step": 0,
+        "grokfast_alpha": 0.75,
+        "grokfast_lamb": 2.0,
+    }
+
+    filtered = _grokfast_filter(state, gradient, group)
+
+    expected_ema = torch.full_like(gradient, 0.25)
+    expected = gradient + 2.0 * expected_ema
+    torch.testing.assert_close(state["grokfast_ema"], expected_ema)
+    torch.testing.assert_close(filtered, expected)
+
+
+def test_grokfast_after_step_keeps_filter_inactive():
+    """The after-step gate avoids allocating or updating GrokFast state early."""
+    _requires_cuda()
+    gradient = torch.randn(16, device=DEVICE)
+    state = {"step": 2}
+    group = {
+        "grokfast": True,
+        "grokfast_after_step": 2,
+        "grokfast_alpha": 0.98,
+        "grokfast_lamb": 2.0,
+    }
+
+    filtered = _grokfast_filter(state, gradient, group)
+
+    assert filtered is gradient
+    assert "grokfast_ema" not in state
+
+
+def test_rms_clip_limits_rescale_ratio():
+    """RMS clipping limits pathological post-orthogonalization amplification."""
+    _requires_cuda()
+    p = torch.randn(8, 8, device=DEVICE)
+    g = torch.randn(8, 8, device=DEVICE)
+    step_t = torch.tensor(2.0, device=DEVICE)
+
+    def run(rms_clip):
+        momentum = torch.zeros_like(p)
+        sign_momentum = torch.zeros_like(p)
+        row = torch.zeros(8, 1, device=DEVICE)
+        col = torch.zeros(1, 8, device=DEVICE)
+        row_var = torch.full((8,), 1e6, device=DEVICE)
+        return WarpAINO._aino_step_core_2d(
+            p, g, momentum, sign_momentum, row, col, row_var,
+            beta1=0.95, beta2=0.95, beta3=0.999,
+            weight_decay=0.0, max_scale=float("inf"), eps=1e-16,
+            step_t=step_t, sinkhorn_steps=2, cautious_update=False,
+            cautious_wd=False, ortho_dtype=torch.bfloat16,
+            rms_clip=rms_clip, rms_clip_max=0.5,
+        )
+
+    unclipped = run(False)
+    clipped = run(True)
+    assert torch.isfinite(clipped).all()
+    assert clipped.norm() < unclipped.norm()
+
+
+@pytest.mark.parametrize("foreach", [False, True])
+def test_all_optional_features_smoke_cuda(foreach):
+    """All requested techniques compose through the normal optimizer path."""
+    _requires_cuda()
+    torch.manual_seed(35)
+    lin = torch.nn.Linear(8, 4, device=DEVICE)
+    vector = torch.nn.Parameter(torch.randn(6, device=DEVICE))
+    optimizer = WarpAINO(
+        list(lin.parameters()) + [vector],
+        lr=1e-3,
+        meta_lr=1e-2,
+        meta_ema=True,
+        meta_ema_beta=0.98,
+        nesterov_sign=True,
+        rms_clip=True,
+        rms_clip_max=10.0,
+        grokfast=True,
+        grokfast_alpha=0.98,
+        grokfast_lamb=2.0,
+        foreach=foreach,
+        warp_mode="spectral",
+    )
+
+    for _ in range(3):
+        loss = lin(torch.randn(4, 8, device=DEVICE)).square().mean()
+        loss = loss + vector.square().mean()
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+    for parameter in list(lin.parameters()) + [vector]:
+        assert torch.isfinite(parameter).all()
+    assert "grokfast_ema" in optimizer.state[lin.weight]
+    assert "prev_update" in optimizer.state[lin.weight]
+
+
+def test_all_optional_features_compile_step_cuda():
+    """Optional core features trace successfully with compiled stepping."""
+    _requires_cuda()
+    torch.manual_seed(36)
+    lin = torch.nn.Linear(8, 4, device=DEVICE)
+    optimizer = WarpAINO(
+        list(lin.parameters()),
+        lr=1e-3,
+        meta_lr=1e-2,
+        meta_ema=True,
+        nesterov_sign=True,
+        rms_clip=True,
+        rms_clip_max=10.0,
+        grokfast=True,
+        compile_step=True,
+        warp_mode="spectral",
+    )
+
+    for _ in range(2):
+        lin(torch.randn(4, 8, device=DEVICE)).square().mean().backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+    assert torch.isfinite(lin.weight).all()
+
+
 @pytest.mark.parametrize("bilateral", [False, True])
 @pytest.mark.parametrize("shape", [(7, 6), (8, 5)])
 def test_spectral_rfft_matches_full_fft_reference(bilateral, shape):
@@ -864,6 +1036,12 @@ def test_spectral_rfft_matches_full_fft_reference(bilateral, shape):
         {"relative_wd_delta": -1.0},
         {"relative_wd_max_contraction": 0.0},
         {"relative_wd_max_contraction": 1.1},
+        {"meta_ema_beta": 1.0},
+        {"nesterov_sign": 1},
+        {"rms_clip_max": 0.0},
+        {"grokfast": 1},
+        {"grokfast_alpha": 1.0},
+        {"grokfast_after_step": -1},
     ],
 )
 def test_constructor_rejects_invalid_options_cuda(kwargs):
