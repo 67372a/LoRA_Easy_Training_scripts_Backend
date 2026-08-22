@@ -79,6 +79,11 @@ Hyperparameters added over AINOOpt:
         (default: 0.85)
     nesterov_sign (bool): Use a lookahead sign for the sign-momentum branch.
         (default: False)
+    nesterov_value (bool): Use a lookahead value momentum for the update
+        magnitude branch. (default: False)
+    came_confidence (bool): Apply CAME-style factorized confidence modulation
+        to 2D+ crafted updates. The existing beta3 controls its residual EMA.
+        (default: False)
     rms_clip (bool): Clamp the post-orthogonalization RMS rescale ratio.
         (default: False)
     rms_clip_max (float): Maximum allowed ``target_rms / current_rms`` ratio.
@@ -617,11 +622,17 @@ def _prepare_aino_update_2d(
     step_t: torch.Tensor,
     sinkhorn_steps: int,
     nesterov_sign: bool,
+    beta3: float,
+    nesterov_value: bool,
+    came_confidence: bool,
+    exp_avg_res_row: torch.Tensor,
+    exp_avg_res_col: torch.Tensor,
 ) -> torch.Tensor:
-    """Run the shared 2D AINO tracking and return its crafted update."""
+    """Run shared 2D AINO tracking and optional CAME confidence modulation."""
     g_norm = _sinkhorn_normalize(g_2d, sinkhorn_steps, eps)
     poly_beta1 = _poly_beta(beta1, step_t)
     poly_beta2 = _poly_beta(beta2, step_t)
+    poly_beta3 = _poly_beta(beta3, step_t)
 
     g_sign = g_norm.sign()
     sign_momentum.lerp_(g_sign, 1.0 - beta1)
@@ -638,10 +649,34 @@ def _prepare_aino_update_2d(
     denom = r_factor * c_factor
 
     momentum.lerp_(g_norm, 1.0 - poly_beta1)
+    value_for_update = momentum
+    if nesterov_value:
+        value_for_update = beta1 * momentum + (1.0 - beta1) * g_norm
     sign_for_update = _select_sign_momentum(
         sign_momentum, g_sign, beta1, nesterov_sign
     )
-    return sign_for_update * (momentum.abs() / denom)
+    update = sign_for_update * (value_for_update.abs() / denom)
+
+    if came_confidence:
+        # CAME-style residual confidence: compare the pre-momentum
+        # preconditioned gradient with the value momentum. Stable transitions
+        # receive more weight, while high-residual transitions are damped.
+        preconditioned = g_norm / denom
+        residual = (preconditioned - momentum).pow(2).add_(eps)
+        exp_avg_res_row.lerp_(
+            residual.mean(dim=-1, keepdim=True), 1.0 - poly_beta3
+        )
+        exp_avg_res_col.lerp_(
+            residual.mean(dim=-2, keepdim=True), 1.0 - poly_beta3
+        )
+        r_confidence = (
+            exp_avg_res_row
+            / (exp_avg_res_row.mean(dim=-2, keepdim=True) + eps)
+        ).rsqrt()
+        c_confidence = (exp_avg_res_col + eps).rsqrt()
+        update = update * r_confidence * c_confidence
+
+    return update
 
 
 def _prepare_aino_update_1d(
@@ -654,8 +689,9 @@ def _prepare_aino_update_1d(
     eps: float,
     step_t: torch.Tensor,
     nesterov_sign: bool,
+    nesterov_value: bool,
 ) -> torch.Tensor:
-    """Run the shared 1D AINO tracking and return its crafted update."""
+    """Run shared 1D AINO tracking and optional value-momentum lookahead."""
     grad_rms = torch.sqrt(g_data.pow(2).mean() + eps)
     g_norm = g_data / grad_rms
     poly_beta1 = _poly_beta(beta1, step_t)
@@ -669,10 +705,13 @@ def _prepare_aino_update_1d(
     denom = exp_avg_sq.sqrt().clamp_min_(eps)
 
     momentum.lerp_(g_norm, 1.0 - poly_beta1)
+    value_for_update = momentum
+    if nesterov_value:
+        value_for_update = beta1 * momentum + (1.0 - beta1) * g_norm
     sign_for_update = _select_sign_momentum(
         sign_momentum, g_sign, beta1, nesterov_sign
     )
-    return sign_for_update * (momentum.abs() / denom)
+    return sign_for_update * (value_for_update.abs() / denom)
 
 
 def _finalize_aino_update_2d(
@@ -798,6 +837,10 @@ class WarpAINO(Optimizer):
     EMA of crafted updates for the prediction target. The learned warp itself
     is never replaced by an EMA.
 
+    ``nesterov_value`` optionally applies a lookahead to the value-momentum
+    magnitude, while ``came_confidence`` adds CAME-style factorized residual
+    confidence modulation before the warp.
+
     The dense residual is stored in ``warp_dtype`` and promoted to FP32 for
     matrix multiplication and meta-updates.
     """
@@ -815,6 +858,8 @@ class WarpAINO(Optimizer):
         meta_ema: bool = False,
         meta_ema_beta: float = 0.85,
         nesterov_sign: bool = False,
+        nesterov_value: bool = False,
+        came_confidence: bool = False,
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
         grokfast: bool = False,
@@ -906,6 +951,8 @@ class WarpAINO(Optimizer):
             ("kahan_sum", kahan_sum),
             ("meta_ema", meta_ema),
             ("nesterov_sign", nesterov_sign),
+            ("nesterov_value", nesterov_value),
+            ("came_confidence", came_confidence),
             ("rms_clip", rms_clip),
             ("grokfast", grokfast),
         ):
@@ -993,6 +1040,8 @@ class WarpAINO(Optimizer):
             meta_ema=meta_ema,
             meta_ema_beta=meta_ema_beta,
             nesterov_sign=nesterov_sign,
+            nesterov_value=nesterov_value,
+            came_confidence=came_confidence,
             rms_clip=rms_clip,
             rms_clip_max=rms_clip_max,
             grokfast=grokfast,
@@ -1151,6 +1200,10 @@ class WarpAINO(Optimizer):
         eps = group["eps"]
         relative_wd = group.get("relative_wd", False)
         relative_wd_delta = group.get("relative_wd_delta", 1e-3)
+        nesterov_value = group["nesterov_value"]
+        came_confidence = group["came_confidence"]
+        exp_avg_res_row = state.get("exp_avg_res_row", state["exp_avg_sq_row"])
+        exp_avg_res_col = state.get("exp_avg_res_col", state["exp_avg_sq_col"])
         spectral_log_left = state.get("spectral_log_left")
         g_2d = _grokfast_filter(state, g_2d, group)
 
@@ -1188,6 +1241,10 @@ class WarpAINO(Optimizer):
                 group["nesterov_sign"],
                 group["rms_clip"],
                 group["rms_clip_max"],
+                nesterov_value,
+                came_confidence,
+                exp_avg_res_row,
+                exp_avg_res_col,
             )
             return update_final, crafted_update
 
@@ -1218,6 +1275,10 @@ class WarpAINO(Optimizer):
                 group["nesterov_sign"],
                 group["rms_clip"],
                 group["rms_clip_max"],
+                nesterov_value,
+                came_confidence,
+                exp_avg_res_row,
+                exp_avg_res_col,
             )
             return update_final, crafted_update
 
@@ -1245,6 +1306,10 @@ class WarpAINO(Optimizer):
             group["nesterov_sign"],
             group["rms_clip"],
             group["rms_clip_max"],
+            nesterov_value,
+            came_confidence,
+            exp_avg_res_row,
+            exp_avg_res_col,
         )
         return update_final, None
 
@@ -1281,6 +1346,7 @@ class WarpAINO(Optimizer):
             group["nesterov_sign"],
             group["rms_clip"],
             group["rms_clip_max"],
+            group["nesterov_value"],
         )
         return update_final, None
     @staticmethod
@@ -1308,8 +1374,16 @@ class WarpAINO(Optimizer):
         nesterov_sign: bool = False,
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
+        nesterov_value: bool = False,
+        came_confidence: bool = False,
+        exp_avg_res_row: Optional[torch.Tensor] = None,
+        exp_avg_res_col: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Plain AINO 2D core sharing tracking and post-processing helpers."""
+        if exp_avg_res_row is None:
+            exp_avg_res_row = exp_avg_sq_row
+        if exp_avg_res_col is None:
+            exp_avg_res_col = exp_avg_sq_col
         update = _prepare_aino_update_2d(
             g_2d,
             momentum,
@@ -1322,6 +1396,11 @@ class WarpAINO(Optimizer):
             step_t,
             sinkhorn_steps,
             nesterov_sign,
+            beta3,
+            nesterov_value,
+            came_confidence,
+            exp_avg_res_row,
+            exp_avg_res_col,
         )
         return _finalize_aino_update_2d(
             p_2d,
@@ -1364,6 +1443,7 @@ class WarpAINO(Optimizer):
         nesterov_sign: bool = False,
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
+        nesterov_value: bool = False,
     ) -> torch.Tensor:
         """Plain AINO 1D core sharing tracking and post-processing helpers."""
         update = _prepare_aino_update_1d(
@@ -1376,6 +1456,7 @@ class WarpAINO(Optimizer):
             eps,
             step_t,
             nesterov_sign,
+            nesterov_value,
         )
         return _finalize_aino_update_1d(
             p_data,
@@ -1421,8 +1502,16 @@ class WarpAINO(Optimizer):
         nesterov_sign: bool = False,
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
+        nesterov_value: bool = False,
+        came_confidence: bool = False,
+        exp_avg_res_row: Optional[torch.Tensor] = None,
+        exp_avg_res_col: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Dense-warp 2D core using the shared AINO core stages."""
+        if exp_avg_res_row is None:
+            exp_avg_res_row = exp_avg_sq_row
+        if exp_avg_res_col is None:
+            exp_avg_res_col = exp_avg_sq_col
         update = _prepare_aino_update_2d(
             g_2d,
             momentum,
@@ -1435,6 +1524,11 @@ class WarpAINO(Optimizer):
             step_t,
             sinkhorn_steps,
             nesterov_sign,
+            beta3,
+            nesterov_value,
+            came_confidence,
+            exp_avg_res_row,
+            exp_avg_res_col,
         )
         update_warped = torch.addmm(update, warp.float(), update)
         update_final = _finalize_aino_update_2d(
@@ -1486,8 +1580,16 @@ class WarpAINO(Optimizer):
         nesterov_sign: bool = False,
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
+        nesterov_value: bool = False,
+        came_confidence: bool = False,
+        exp_avg_res_row: Optional[torch.Tensor] = None,
+        exp_avg_res_col: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Spectral-warp 2D core using the shared AINO core stages."""
+        if exp_avg_res_row is None:
+            exp_avg_res_row = exp_avg_sq_row
+        if exp_avg_res_col is None:
+            exp_avg_res_col = exp_avg_sq_col
         update = _prepare_aino_update_2d(
             g_2d,
             momentum,
@@ -1500,6 +1602,11 @@ class WarpAINO(Optimizer):
             step_t,
             sinkhorn_steps,
             nesterov_sign,
+            beta3,
+            nesterov_value,
+            came_confidence,
+            exp_avg_res_row,
+            exp_avg_res_col,
         )
         if spectral_bilateral and spectral_log_right.numel() > 0:
             update_warped = _spectral_apply(
@@ -1572,6 +1679,13 @@ class WarpAINO(Optimizer):
                         state["exp_avg_sq_row"] = torch.zeros((m, 1), device=p.device, dtype=torch.float32)
                         state["exp_avg_sq_col"] = torch.zeros((1, n), device=p.device, dtype=torch.float32)
                         state["row_var"] = torch.zeros(m, device=p.device, dtype=torch.float32)
+                        if group["came_confidence"]:
+                            state["exp_avg_res_row"] = torch.zeros(
+                                (m, 1), device=p.device, dtype=torch.float32
+                            )
+                            state["exp_avg_res_col"] = torch.zeros(
+                                (1, n), device=p.device, dtype=torch.float32
+                            )
                         warp_m = m
                     else:
                         state["momentum"] = torch.zeros_like(p.data, dtype=torch.float32)

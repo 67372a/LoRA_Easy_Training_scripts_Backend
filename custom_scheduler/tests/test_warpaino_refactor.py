@@ -636,6 +636,32 @@ def test_1d_core_matches_reference(relative_wd):
         torch.testing.assert_close(s_new[k], s_ref[k], msg=f"state mismatch: {k}")
 
 
+def test_nesterov_value_changes_plain_1d_update():
+    """Value lookahead changes only the crafted magnitude path."""
+    _requires_cuda()
+    base = _make_1d_state(16, seed=22)
+    kwargs = dict(
+        beta1=BETAS[0], beta2=BETAS[1], beta3=BETAS[2],
+        weight_decay=0.0, max_scale=float("inf"), eps=EPS,
+        step_t=torch.tensor(4.0, device=DEVICE),
+        cautious_update=False, cautious_wd=False,
+    )
+
+    ordinary = WarpAINO._aino_step_core_1d(
+        base["p"].clone(), base["g"].clone(), base["momentum"].clone(),
+        base["sign_momentum"].clone(), base["exp_avg_sq"].clone(),
+        base["row_var"].clone(), **kwargs,
+    )
+    lookahead = WarpAINO._aino_step_core_1d(
+        base["p"].clone(), base["g"].clone(), base["momentum"].clone(),
+        base["sign_momentum"].clone(), base["exp_avg_sq"].clone(),
+        base["row_var"].clone(), nesterov_value=True, **kwargs,
+    )
+
+    assert torch.isfinite(lookahead).all()
+    assert not torch.equal(ordinary, lookahead)
+
+
 # ---------------------------------------------------------------------------
 # Full-optimizer smoke tests (all dispatch paths through the shared helpers)
 # ---------------------------------------------------------------------------
@@ -955,6 +981,36 @@ def test_one_dimensional_parameters_do_not_allocate_warp_state(foreach):
     assert torch.isfinite(parameter).all()
 
 
+@pytest.mark.parametrize("foreach", [False, True])
+@pytest.mark.parametrize("warp_mode", ["dense", "spectral"])
+def test_nesterov_value_and_came_confidence_options_cuda(foreach, warp_mode):
+    """Value lookahead and factorized CAME confidence compose with both warps."""
+    _requires_cuda()
+    torch.manual_seed(38)
+    parameter = torch.nn.Parameter(torch.randn(8, 6, device=DEVICE))
+    optimizer = WarpAINO(
+        [parameter],
+        lr=1e-3,
+        meta_lr=1e-2,
+        nesterov_value=True,
+        came_confidence=True,
+        warp_mode=warp_mode,
+        foreach=foreach,
+    )
+
+    for _ in range(3):
+        parameter.grad = torch.randn_like(parameter)
+        optimizer.step()
+
+    state = optimizer.state[parameter]
+    assert state["exp_avg_res_row"].shape == (8, 1)
+    assert state["exp_avg_res_col"].shape == (1, 6)
+    assert torch.isfinite(state["exp_avg_res_row"]).all()
+    assert torch.isfinite(state["exp_avg_res_col"]).all()
+    assert state["exp_avg_res_row"].std() > 0
+    assert torch.isfinite(parameter).all()
+
+
 def test_all_optional_features_compile_step_cuda():
     """Optional core features trace successfully with compiled stepping."""
     _requires_cuda()
@@ -966,6 +1022,8 @@ def test_all_optional_features_compile_step_cuda():
         meta_lr=1e-2,
         meta_ema=True,
         nesterov_sign=True,
+        nesterov_value=True,
+        came_confidence=True,
         rms_clip=True,
         rms_clip_max=10.0,
         grokfast=True,
