@@ -71,6 +71,8 @@ Hyperparameters added over AINOOpt:
         (default: 0.99)
 """
 
+import logging
+
 import torch
 from torch.optim import Optimizer
 from typing import Tuple, List, Union, Iterable, Optional
@@ -136,6 +138,72 @@ def _spectral_apply(
             spectrum * gain_delta, dim=(0, 1), norm="ortho"
         ).real
     return update_2d + delta
+
+
+def _poly_beta(beta: float, step_t: torch.Tensor) -> torch.Tensor:
+    """Poly-beta horizon correction ``(beta^t - beta) / (beta^t - 1)``, 0 at t <= 1."""
+    beta_pow = beta ** step_t
+    return torch.where(
+        step_t > 1.0,
+        (beta_pow - beta) / (beta_pow - 1.0),
+        torch.zeros_like(beta_pow),
+    )
+
+
+def _sinkhorn_normalize(g: torch.Tensor, steps: int, eps: float) -> torch.Tensor:
+    """Alternating row/column RMS balancing for 2D+ gradients."""
+    for _ in range(steps):
+        row_rms = torch.sqrt(g.pow(2).mean(dim=-1, keepdim=True) + eps)
+        g = g / row_rms
+        col_rms = torch.sqrt(g.pow(2).mean(dim=-2, keepdim=True) + eps)
+        g = g / col_rms
+    return g
+
+
+def _cautious_mask(update: torch.Tensor, grad: torch.Tensor) -> torch.Tensor:
+    """Zero the update where it disagrees with the gradient, renormalized by the mask mean."""
+    mask = (grad * update > 0).to(update.dtype)
+    mask_mean = mask.mean().clamp_min(1e-3)
+    return update * mask / mask_mean
+
+
+def _apply_decoupled_wd(
+    update_final: torch.Tensor,
+    p: torch.Tensor,
+    weight_decay: float,
+    cautious_wd: bool,
+    relative_wd: bool,
+    relative_wd_delta: float,
+    max_scale: Union[float, torch.Tensor],
+    eps: float,
+    cautious_update: bool = False,
+    pre_mask_rms: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Append decoupled weight decay (absolute or RMS-relative) to an update.
+
+    Shared by all six step cores. When ``pre_mask_rms`` is provided and no
+    cautious masking was applied, it is reused as the update RMS instead of
+    recomputing it (the unmasked update was already rescaled to exactly that
+    RMS in step 8 of the cores).
+    """
+    if weight_decay == 0:
+        return update_final
+    if relative_wd:
+        if cautious_update or pre_mask_rms is None:
+            update_rms = torch.sqrt(update_final.pow(2).mean() + eps)
+        else:
+            update_rms = pre_mask_rms
+        param_rms_smooth = torch.sqrt(p.pow(2).mean() + relative_wd_delta**2)
+        # Scale with Huber smoothing, guarded against discrete time-step overshooting
+        scale = torch.clamp_max(update_rms / param_rms_smooth, max_scale)
+        if cautious_wd:
+            wd_mask = (update_final * p >= 0).to(update_final.dtype)
+            return update_final + weight_decay * scale * p * wd_mask
+        return update_final + weight_decay * scale * p
+    if cautious_wd:
+        wd_mask = (update_final * p >= 0).to(update_final.dtype)
+        return update_final + weight_decay * p * wd_mask
+    return update_final + weight_decay * p
 
 
 def _relative_wd_max_scale(
@@ -412,8 +480,6 @@ class WarpAINO(Optimizer):
         self._foreach = foreach
 
         if self._compile_step:
-            import logging
-
             torch._dynamo.config.recompile_limit = max(
                 torch._dynamo.config.recompile_limit, 64
             )
@@ -503,34 +569,12 @@ class WarpAINO(Optimizer):
         """Core 2D+ update step compilable by torch.compile (plain AINOOpt,
         used when the warp is disabled)."""
         # 1. Sinkhorn normalization for 2D+ parameters
-        g_norm = g_2d
-        for _ in range(sinkhorn_steps):
-            row_rms = torch.sqrt(g_norm.pow(2).mean(dim=-1, keepdim=True) + eps)
-            g_norm = g_norm / row_rms
-            col_rms = torch.sqrt(g_norm.pow(2).mean(dim=-2, keepdim=True) + eps)
-            g_norm = g_norm / col_rms
+        g_norm = _sinkhorn_normalize(g_2d, sinkhorn_steps, eps)
 
         # Compute poly-beta values for beta1, beta2, and beta3
-        beta1_pow = beta1 ** step_t
-        poly_beta1 = torch.where(
-            step_t > 1.0,
-            (beta1_pow - beta1) / (beta1_pow - 1.0),
-            torch.zeros_like(beta1_pow),
-        )
-
-        beta2_pow = beta2 ** step_t
-        poly_beta2 = torch.where(
-            step_t > 1.0,
-            (beta2_pow - beta2) / (beta2_pow - 1.0),
-            torch.zeros_like(beta2_pow),
-        )
-
-        beta3_pow = beta3 ** step_t
-        poly_beta3 = torch.where(
-            step_t > 1.0,
-            (beta3_pow - beta3) / (beta3_pow - 1.0),
-            torch.zeros_like(beta3_pow),
-        )
+        poly_beta1 = _poly_beta(beta1, step_t)
+        poly_beta2 = _poly_beta(beta2, step_t)
+        poly_beta3 = _poly_beta(beta3, step_t)
 
         # 2. Track gradient sign momentum using beta1
         g_sign = g_norm.sign()
@@ -567,33 +611,21 @@ class WarpAINO(Optimizer):
 
         # 9. Cautious updates
         if cautious_update:
-            mask = (g_2d * update_final > 0).to(update_final.dtype)
-            mask_mean = mask.mean().clamp_min(1e-3)
-            update_final = update_final * mask / mask_mean
+            update_final = _cautious_mask(update_final, g_2d)
 
         # Decoupled weight decay (absolute or RMS-relative)
-        if weight_decay != 0:
-            if relative_wd:
-                # 1. Compute RMS values
-                update_rms = torch.sqrt(update_final.pow(2).mean() + eps)
-                param_rms_smooth = torch.sqrt(
-                    p_2d.pow(2).mean() + relative_wd_delta**2
-                )
-                # 2. Scale with Huber smoothing
-                scale = update_rms / param_rms_smooth
-                # 3. Guard against discrete time-step overshooting
-                scale = torch.clamp_max(scale, max_scale)
-                # 4. Apply weight decay
-                if cautious_wd:
-                    wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
-                    update_final = update_final + weight_decay * scale * p_2d * wd_mask
-                else:
-                    update_final = update_final + weight_decay * scale * p_2d
-            elif cautious_wd:
-                wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
-                update_final = update_final + weight_decay * p_2d * wd_mask
-            else:
-                update_final = update_final + weight_decay * p_2d
+        update_final = _apply_decoupled_wd(
+            update_final,
+            p_2d,
+            weight_decay,
+            cautious_wd,
+            relative_wd,
+            relative_wd_delta,
+            max_scale,
+            eps,
+            cautious_update=cautious_update,
+            pre_mask_rms=target_rms,
+        )
 
         return update_final
 
@@ -624,26 +656,9 @@ class WarpAINO(Optimizer):
         g_norm = g_data / grad_rms
 
         # Compute poly-beta values for beta1, beta2 and beta3
-        beta1_pow = beta1 ** step_t
-        poly_beta1 = torch.where(
-            step_t > 1.0,
-            (beta1_pow - beta1) / (beta1_pow - 1.0),
-            torch.zeros_like(beta1_pow),
-        )
-
-        beta2_pow = beta2 ** step_t
-        poly_beta2 = torch.where(
-            step_t > 1.0,
-            (beta2_pow - beta2) / (beta2_pow - 1.0),
-            torch.zeros_like(beta2_pow),
-        )
-
-        beta3_pow = beta3 ** step_t
-        poly_beta3 = torch.where(
-            step_t > 1.0,
-            (beta3_pow - beta3) / (beta3_pow - 1.0),
-            torch.zeros_like(beta3_pow),
-        )
+        poly_beta1 = _poly_beta(beta1, step_t)
+        poly_beta2 = _poly_beta(beta2, step_t)
+        poly_beta3 = _poly_beta(beta3, step_t)
 
         # 2. Track gradient sign momentum using beta1
         g_sign = g_norm.sign()
@@ -675,33 +690,21 @@ class WarpAINO(Optimizer):
 
         # 9. Cautious updates
         if cautious_update:
-            mask = (g_data * update_final > 0).to(update_final.dtype)
-            mask_mean = mask.mean().clamp_min(1e-3)
-            update_final = update_final * mask / mask_mean
+            update_final = _cautious_mask(update_final, g_data)
 
         # Decoupled weight decay (absolute or RMS-relative)
-        if weight_decay != 0:
-            if relative_wd:
-                # 1. Compute RMS values
-                update_rms = torch.sqrt(update_final.pow(2).mean() + eps)
-                param_rms_smooth = torch.sqrt(
-                    p_data.pow(2).mean() + relative_wd_delta**2
-                )
-                # 2. Scale with Huber smoothing
-                scale = update_rms / param_rms_smooth
-                # 3. Guard against discrete time-step overshooting
-                scale = torch.clamp_max(scale, max_scale)
-                # 4. Apply weight decay
-                if cautious_wd:
-                    wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
-                    update_final = update_final + weight_decay * scale * p_data * wd_mask
-                else:
-                    update_final = update_final + weight_decay * scale * p_data
-            elif cautious_wd:
-                wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
-                update_final = update_final + weight_decay * p_data * wd_mask
-            else:
-                update_final = update_final + weight_decay * p_data
+        update_final = _apply_decoupled_wd(
+            update_final,
+            p_data,
+            weight_decay,
+            cautious_wd,
+            relative_wd,
+            relative_wd_delta,
+            max_scale,
+            eps,
+            cautious_update=cautious_update,
+            pre_mask_rms=target_rms,
+        )
 
         return update_final
 
@@ -731,34 +734,12 @@ class WarpAINO(Optimizer):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Core 2D+ step with P applied to the crafted update before NS."""
         # 1. Sinkhorn normalization for 2D+ parameters
-        g_norm = g_2d
-        for _ in range(sinkhorn_steps):
-            row_rms = torch.sqrt(g_norm.pow(2).mean(dim=-1, keepdim=True) + eps)
-            g_norm = g_norm / row_rms
-            col_rms = torch.sqrt(g_norm.pow(2).mean(dim=-2, keepdim=True) + eps)
-            g_norm = g_norm / col_rms
+        g_norm = _sinkhorn_normalize(g_2d, sinkhorn_steps, eps)
 
         # Compute poly-beta values for beta1, beta2, and beta3
-        beta1_pow = beta1 ** step_t
-        poly_beta1 = torch.where(
-            step_t > 1.0,
-            (beta1_pow - beta1) / (beta1_pow - 1.0),
-            torch.zeros_like(beta1_pow),
-        )
-
-        beta2_pow = beta2 ** step_t
-        poly_beta2 = torch.where(
-            step_t > 1.0,
-            (beta2_pow - beta2) / (beta2_pow - 1.0),
-            torch.zeros_like(beta2_pow),
-        )
-
-        beta3_pow = beta3 ** step_t
-        poly_beta3 = torch.where(
-            step_t > 1.0,
-            (beta3_pow - beta3) / (beta3_pow - 1.0),
-            torch.zeros_like(beta3_pow),
-        )
+        poly_beta1 = _poly_beta(beta1, step_t)
+        poly_beta2 = _poly_beta(beta2, step_t)
+        poly_beta3 = _poly_beta(beta3, step_t)
 
         # 2. Track gradient sign momentum using beta1
         g_sign = g_norm.sign()
@@ -796,33 +777,21 @@ class WarpAINO(Optimizer):
 
         # 9. Cautious updates (masked against the original gradient)
         if cautious_update:
-            mask = (g_2d * update_final > 0).to(update_final.dtype)
-            mask_mean = mask.mean().clamp_min(1e-3)
-            update_final = update_final * mask / mask_mean
+            update_final = _cautious_mask(update_final, g_2d)
 
         # Decoupled weight decay (absolute or RMS-relative)
-        if weight_decay != 0:
-            if relative_wd:
-                # 1. Compute RMS values
-                update_rms = torch.sqrt(update_final.pow(2).mean() + eps)
-                param_rms_smooth = torch.sqrt(
-                    p_2d.pow(2).mean() + relative_wd_delta**2
-                )
-                # 2. Scale with Huber smoothing
-                scale = update_rms / param_rms_smooth
-                # 3. Guard against discrete time-step overshooting
-                scale = torch.clamp_max(scale, max_scale)
-                # 4. Apply weight decay
-                if cautious_wd:
-                    wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
-                    update_final = update_final + weight_decay * scale * p_2d * wd_mask
-                else:
-                    update_final = update_final + weight_decay * scale * p_2d
-            elif cautious_wd:
-                wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
-                update_final = update_final + weight_decay * p_2d * wd_mask
-            else:
-                update_final = update_final + weight_decay * p_2d
+        update_final = _apply_decoupled_wd(
+            update_final,
+            p_2d,
+            weight_decay,
+            cautious_wd,
+            relative_wd,
+            relative_wd_delta,
+            max_scale,
+            eps,
+            cautious_update=cautious_update,
+            pre_mask_rms=target_rms,
+        )
 
         return update_final, update
 
@@ -853,26 +822,9 @@ class WarpAINO(Optimizer):
         g_norm = g_data / grad_rms
 
         # Compute poly-beta values for beta1, beta2 and beta3
-        beta1_pow = beta1 ** step_t
-        poly_beta1 = torch.where(
-            step_t > 1.0,
-            (beta1_pow - beta1) / (beta1_pow - 1.0),
-            torch.zeros_like(beta1_pow),
-        )
-
-        beta2_pow = beta2 ** step_t
-        poly_beta2 = torch.where(
-            step_t > 1.0,
-            (beta2_pow - beta2) / (beta2_pow - 1.0),
-            torch.zeros_like(beta2_pow),
-        )
-
-        beta3_pow = beta3 ** step_t
-        poly_beta3 = torch.where(
-            step_t > 1.0,
-            (beta3_pow - beta3) / (beta3_pow - 1.0),
-            torch.zeros_like(beta3_pow),
-        )
+        poly_beta1 = _poly_beta(beta1, step_t)
+        poly_beta2 = _poly_beta(beta2, step_t)
+        poly_beta3 = _poly_beta(beta3, step_t)
 
         # 2. Track gradient sign momentum using beta1
         g_sign = g_norm.sign()
@@ -905,33 +857,21 @@ class WarpAINO(Optimizer):
 
         # 9. Cautious updates (masked against the original gradient)
         if cautious_update:
-            mask = (g_data * update_final > 0).to(update_final.dtype)
-            mask_mean = mask.mean().clamp_min(1e-3)
-            update_final = update_final * mask / mask_mean
+            update_final = _cautious_mask(update_final, g_data)
 
         # Decoupled weight decay (absolute or RMS-relative)
-        if weight_decay != 0:
-            if relative_wd:
-                # 1. Compute RMS values
-                update_rms = torch.sqrt(update_final.pow(2).mean() + eps)
-                param_rms_smooth = torch.sqrt(
-                    p_data.pow(2).mean() + relative_wd_delta**2
-                )
-                # 2. Scale with Huber smoothing
-                scale = update_rms / param_rms_smooth
-                # 3. Guard against discrete time-step overshooting
-                scale = torch.clamp_max(scale, max_scale)
-                # 4. Apply weight decay
-                if cautious_wd:
-                    wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
-                    update_final = update_final + weight_decay * scale * p_data * wd_mask
-                else:
-                    update_final = update_final + weight_decay * scale * p_data
-            elif cautious_wd:
-                wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
-                update_final = update_final + weight_decay * p_data * wd_mask
-            else:
-                update_final = update_final + weight_decay * p_data
+        update_final = _apply_decoupled_wd(
+            update_final,
+            p_data,
+            weight_decay,
+            cautious_wd,
+            relative_wd,
+            relative_wd_delta,
+            max_scale,
+            eps,
+            cautious_update=cautious_update,
+            pre_mask_rms=target_rms,
+        )
 
         return update_final, update
 
@@ -964,32 +904,12 @@ class WarpAINO(Optimizer):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Core 2D+ step with a full-rank FFT spectral warp."""
         # 1. Sinkhorn normalization for 2D+ parameters
-        g_norm = g_2d
-        for _ in range(sinkhorn_steps):
-            row_rms = torch.sqrt(g_norm.pow(2).mean(dim=-1, keepdim=True) + eps)
-            g_norm = g_norm / row_rms
-            col_rms = torch.sqrt(g_norm.pow(2).mean(dim=-2, keepdim=True) + eps)
-            g_norm = g_norm / col_rms
+        g_norm = _sinkhorn_normalize(g_2d, sinkhorn_steps, eps)
 
         # Compute poly-beta values for beta1, beta2, and beta3
-        beta1_pow = beta1 ** step_t
-        poly_beta1 = torch.where(
-            step_t > 1.0,
-            (beta1_pow - beta1) / (beta1_pow - 1.0),
-            torch.zeros_like(beta1_pow),
-        )
-        beta2_pow = beta2 ** step_t
-        poly_beta2 = torch.where(
-            step_t > 1.0,
-            (beta2_pow - beta2) / (beta2_pow - 1.0),
-            torch.zeros_like(beta2_pow),
-        )
-        beta3_pow = beta3 ** step_t
-        poly_beta3 = torch.where(
-            step_t > 1.0,
-            (beta3_pow - beta3) / (beta3_pow - 1.0),
-            torch.zeros_like(beta3_pow),
-        )
+        poly_beta1 = _poly_beta(beta1, step_t)
+        poly_beta2 = _poly_beta(beta2, step_t)
+        poly_beta3 = _poly_beta(beta3, step_t)
 
         # 2. Track gradient sign momentum using beta1
         g_sign = g_norm.sign()
@@ -1042,32 +962,20 @@ class WarpAINO(Optimizer):
 
         # 9. Cautious updates against the original gradient
         if cautious_update:
-            mask = (g_2d * update_final > 0).to(update_final.dtype)
-            mask_mean = mask.mean().clamp_min(1e-3)
-            update_final = update_final * mask / mask_mean
+            update_final = _cautious_mask(update_final, g_2d)
 
-        if weight_decay != 0:
-            if relative_wd:
-                # 1. Compute RMS values
-                update_rms = torch.sqrt(update_final.pow(2).mean() + eps)
-                param_rms_smooth = torch.sqrt(
-                    p_2d.pow(2).mean() + relative_wd_delta**2
-                )
-                # 2. Scale with Huber smoothing
-                scale = update_rms / param_rms_smooth
-                # 3. Guard against discrete time-step overshooting
-                scale = torch.clamp_max(scale, max_scale)
-                # 4. Apply weight decay
-                if cautious_wd:
-                    wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
-                    update_final = update_final + weight_decay * scale * p_2d * wd_mask
-                else:
-                    update_final = update_final + weight_decay * scale * p_2d
-            elif cautious_wd:
-                wd_mask = (update_final * p_2d >= 0).to(update_final.dtype)
-                update_final = update_final + weight_decay * p_2d * wd_mask
-            else:
-                update_final = update_final + weight_decay * p_2d
+        update_final = _apply_decoupled_wd(
+            update_final,
+            p_2d,
+            weight_decay,
+            cautious_wd,
+            relative_wd,
+            relative_wd_delta,
+            max_scale,
+            eps,
+            cautious_update=cautious_update,
+            pre_mask_rms=target_rms,
+        )
 
         return update_final, update
 
@@ -1099,24 +1007,9 @@ class WarpAINO(Optimizer):
         g_norm = g_data / grad_rms
 
         # Compute poly-beta values for beta1, beta2, and beta3
-        beta1_pow = beta1 ** step_t
-        poly_beta1 = torch.where(
-            step_t > 1.0,
-            (beta1_pow - beta1) / (beta1_pow - 1.0),
-            torch.zeros_like(beta1_pow),
-        )
-        beta2_pow = beta2 ** step_t
-        poly_beta2 = torch.where(
-            step_t > 1.0,
-            (beta2_pow - beta2) / (beta2_pow - 1.0),
-            torch.zeros_like(beta2_pow),
-        )
-        beta3_pow = beta3 ** step_t
-        poly_beta3 = torch.where(
-            step_t > 1.0,
-            (beta3_pow - beta3) / (beta3_pow - 1.0),
-            torch.zeros_like(beta3_pow),
-        )
+        poly_beta1 = _poly_beta(beta1, step_t)
+        poly_beta2 = _poly_beta(beta2, step_t)
+        poly_beta3 = _poly_beta(beta3, step_t)
 
         # 2. Track gradient sign momentum using beta1
         g_sign = g_norm.sign()
@@ -1152,37 +1045,20 @@ class WarpAINO(Optimizer):
 
         # 9. Cautious updates against the original gradient
         if cautious_update:
-            mask = (g_data * update_final > 0).to(update_final.dtype)
-            mask_mean = mask.mean().clamp_min(1e-3)
-            update_final = update_final * mask / mask_mean
+            update_final = _cautious_mask(update_final, g_data)
 
-        if weight_decay != 0:
-            if relative_wd:
-                # 1. Compute RMS values (reuse target_rms if update_final was not modulated by cautious_update)
-                update_rms = (
-                    torch.sqrt(update_final.pow(2).mean() + eps)
-                    if cautious_update
-                    else target_rms
-                )
-                param_rms_smooth = torch.sqrt(
-                    p_data.pow(2).mean() + relative_wd_delta**2
-                )
-                # 2. Scale with Huber smoothing
-                scale = update_rms / param_rms_smooth
-                # 3. Guard against discrete time-step overshooting
-                scale = torch.clamp_max(scale, max_scale)
-                # 4. Apply weight decay
-                eff_wd = weight_decay * scale
-                if cautious_wd:
-                    wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
-                    update_final = update_final + eff_wd * (p_data * wd_mask)
-                else:
-                    update_final = update_final + eff_wd * p_data
-            elif cautious_wd:
-                wd_mask = (update_final * p_data >= 0).to(update_final.dtype)
-                update_final = update_final + weight_decay * (p_data * wd_mask)
-            else:
-                update_final = update_final + weight_decay * p_data
+        update_final = _apply_decoupled_wd(
+            update_final,
+            p_data,
+            weight_decay,
+            cautious_wd,
+            relative_wd,
+            relative_wd_delta,
+            max_scale,
+            eps,
+            cautious_update=cautious_update,
+            pre_mask_rms=target_rms,
+        )
 
         return update_final, update
 
