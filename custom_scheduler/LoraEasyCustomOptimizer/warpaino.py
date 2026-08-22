@@ -53,6 +53,9 @@ Hyperparameters added over AINOOpt:
         are constrained to ``[exp(-bound), exp(bound)]``. (default: 1.0)
     warp_dtype (torch.dtype): Storage dtype for D. FP16, BF16, and FP32 are
         supported; BF16 is the default.
+    kahan_sum (bool): Keep an FP32 rounding-error compensation buffer for
+        FP16/BF16 parameters. This avoids storing a duplicate FP32 parameter;
+        disabled by default.
     relative_wd (bool): If True, weight decay is RMS-relative: the p_data
         term is scaled to ``weight_decay`` times the RMS of the (cautious-
         masked) crafted update, i.e. ``wd = weight_decay * (rms_update /
@@ -279,6 +282,62 @@ def _foreach_apply_lr_(
         torch._foreach_add_(parameters, updates, alpha=-lr)
 
 
+def _get_fp32_work(
+    state: dict,
+    parameter: torch.Tensor,
+    kahan_sum: bool,
+) -> torch.Tensor:
+    """Create an FP32 work tensor corrected by low-precision rounding error.
+
+    The parameter itself remains the only stored parameter value. The
+    compensation is the difference between the exact FP32 result and the
+    value representable by the parameter dtype; it is not a second FP32
+    parameter copy.
+    """
+    if parameter.dtype not in (torch.float16, torch.bfloat16) or not kahan_sum:
+        return parameter.data
+
+    compensation = state.get("param_compensation")
+    if compensation is None or compensation.shape != parameter.shape:
+        compensation = torch.zeros_like(parameter, dtype=torch.float32)
+        state["param_compensation"] = compensation
+    elif compensation.dtype is not torch.float32 or compensation.device != parameter.device:
+        compensation = compensation.to(device=parameter.device, dtype=torch.float32)
+        state["param_compensation"] = compensation
+
+    work = parameter.data.float()
+    work.add_(compensation)
+    return work
+
+
+def _writeback_fp32_work_(
+    parameter: torch.Tensor,
+    work: torch.Tensor,
+    state: dict,
+    stochastic_fp: bool,
+    kahan_sum: bool,
+) -> None:
+    """Round FP32 work into the parameter and save only its rounding error."""
+    if not kahan_sum:
+        if parameter.dtype is torch.bfloat16 and stochastic_fp:
+            copy_stochastic_(parameter.data, work)
+        else:
+            parameter.data.copy_(work)
+        return
+
+    if parameter.dtype is torch.bfloat16 and stochastic_fp:
+        copy_stochastic_(parameter.data, work)
+        rounded = parameter.data.float()
+    else:
+        # FP16 has no BF16-style cheap stochastic-rounding implementation.
+        rounded = work.to(parameter.dtype).float()
+        parameter.data.copy_(rounded)
+
+    # Kahan-style compensation: next step starts from rounded + (exact -
+    # rounded), without keeping a second FP32 copy of the parameter.
+    state["param_compensation"].copy_(work - rounded)
+
+
 @torch.no_grad()
 def gram_newton_schulz_2step(
     M: torch.Tensor,
@@ -439,6 +498,7 @@ class WarpAINO(Optimizer):
         cautious_update: bool = True,
         cautious_wd: bool = True,
         stochastic_fp: bool = True,
+        kahan_sum: bool = False,
         compile_step: bool = False,
         foreach: bool = False,
         sinkhorn_steps: int = 5,
@@ -487,6 +547,8 @@ class WarpAINO(Optimizer):
             )
         if not isinstance(relative_wd, bool):
             raise ValueError(f"relative_wd must be bool, got {relative_wd}")
+        if not isinstance(kahan_sum, bool):
+            raise ValueError(f"kahan_sum must be bool, got {kahan_sum}")
 
         defaults = dict(
             lr=lr,
@@ -495,6 +557,7 @@ class WarpAINO(Optimizer):
             cautious_update=cautious_update,
             cautious_wd=cautious_wd,
             stochastic_fp=stochastic_fp,
+            kahan_sum=kahan_sum,
             sinkhorn_steps=sinkhorn_steps,
             ortho_dtype=ortho_dtype,
             eps=eps,
@@ -1309,6 +1372,7 @@ class WarpAINO(Optimizer):
             cautious_update = group["cautious_update"]
             cautious_wd = group["cautious_wd"]
             stochastic_fp = group["stochastic_fp"]
+            kahan_sum = group.get("kahan_sum", False)
             sinkhorn_steps = group["sinkhorn_steps"]
             ortho_dtype = group["ortho_dtype"]
             eps = group["eps"]
@@ -1340,6 +1404,11 @@ class WarpAINO(Optimizer):
                         state["exp_avg_sq"] = torch.zeros_like(p.data, dtype=torch.float32)
                         state["row_var"] = torch.zeros((), device=p.device, dtype=torch.float32)
                         warp_m = p.numel()
+
+                    if kahan_sum and p.dtype in (torch.float16, torch.bfloat16):
+                        state["param_compensation"] = torch.zeros_like(
+                            p.data, dtype=torch.float32
+                        )
 
                     # Skip warp distortion for 1D vectors, biases, norm layers, scalars, and DoRA scales
                     is_1d_or_scalar = (
@@ -1384,6 +1453,7 @@ class WarpAINO(Optimizer):
         cautious_update = group["cautious_update"]
         cautious_wd = group["cautious_wd"]
         stochastic_fp = group["stochastic_fp"]
+        kahan_sum = group.get("kahan_sum", False)
         sinkhorn_steps = group["sinkhorn_steps"]
         ortho_dtype = group["ortho_dtype"]
         eps = group["eps"]
@@ -1429,7 +1499,7 @@ class WarpAINO(Optimizer):
                 p_2d = _reshape_to_2d(p.data)
                 g_2d = _reshape_to_2d(grad)
 
-                p_2d_fp32 = p_2d.float() if p.dtype is torch.bfloat16 else p_2d
+                p_2d_fp32 = _reshape_to_2d(_get_fp32_work(state, p, kahan_sum))
                 # Adaptive Sinkhorn: 2 iterations for high aspect ratio matrices (e.g. LoRA)
                 p_sinkhorn_steps = 2 if (p_2d.shape[0] / max(p_2d.shape[1], 1) > 32 or p_2d.shape[1] / max(p_2d.shape[0], 1) > 32) else sinkhorn_steps
 
@@ -1446,11 +1516,10 @@ class WarpAINO(Optimizer):
 
                 _apply_lr_update_(p_2d_fp32, update_final, lr)
 
-                if p.dtype is torch.bfloat16:
-                    if stochastic_fp:
-                        copy_stochastic_(p.data, p_2d_fp32.view_as(p.data))
-                    else:
-                        p.data.copy_(p_2d_fp32.view_as(p.data))
+                if p.dtype in (torch.float16, torch.bfloat16):
+                    _writeback_fp32_work_(
+                        p, p_2d_fp32.view_as(p.data), state, stochastic_fp, kahan_sum
+                    )
 
                 if spectral_log_left is not None:
                     _spectral_meta_update(
@@ -1464,7 +1533,7 @@ class WarpAINO(Optimizer):
                     _warp_meta_update(state, crafted_update, meta_lr, meta_wd)
 
             else:
-                p_fp32 = p.data.float() if p.dtype is torch.bfloat16 else p.data
+                p_fp32 = _get_fp32_work(state, p, kahan_sum)
 
                 update_final, crafted_update = self._run_core_1d(
                     p_fp32,
@@ -1478,11 +1547,8 @@ class WarpAINO(Optimizer):
 
                 _apply_lr_update_(p_fp32, update_final, lr)
 
-                if p.dtype is torch.bfloat16:
-                    if stochastic_fp:
-                        copy_stochastic_(p.data, p_fp32)
-                    else:
-                        p.data.copy_(p_fp32)
+                if p.dtype in (torch.float16, torch.bfloat16):
+                    _writeback_fp32_work_(p, p_fp32, state, stochastic_fp, kahan_sum)
 
                 if spectral_log_left is not None:
                     _spectral_meta_update(
@@ -1504,6 +1570,7 @@ class WarpAINO(Optimizer):
         cautious_update = group["cautious_update"]
         cautious_wd = group["cautious_wd"]
         stochastic_fp = group["stochastic_fp"]
+        kahan_sum = group.get("kahan_sum", False)
         sinkhorn_steps = group["sinkhorn_steps"]
         ortho_dtype = group["ortho_dtype"]
         eps = group["eps"]
@@ -1549,7 +1616,7 @@ class WarpAINO(Optimizer):
 
             grad = p.grad.data.float() if p.grad.data.dtype in (torch.bfloat16, torch.float16) else p.grad.data
 
-            p_fp32 = p.data.float() if p.dtype is torch.bfloat16 else p.data
+            p_fp32 = _get_fp32_work(state, p, kahan_sum)
             warp = state.get("warp")
             spectral_log_left = state.get("spectral_log_left")
             update_final, crafted_update = self._run_core_1d(
@@ -1563,11 +1630,8 @@ class WarpAINO(Optimizer):
             )
             _apply_lr_update_(p_fp32, update_final, lr)
 
-            if p.dtype is torch.bfloat16:
-                if stochastic_fp:
-                    copy_stochastic_(p.data, p_fp32)
-                else:
-                    p.data.copy_(p_fp32)
+            if p.dtype in (torch.float16, torch.bfloat16):
+                _writeback_fp32_work_(p, p_fp32, state, stochastic_fp, kahan_sum)
 
             if spectral_log_left is not None:
                 _spectral_meta_update(
@@ -1616,7 +1680,7 @@ class WarpAINO(Optimizer):
             p_2d = _reshape_to_2d(p.data)
             g_2d = _reshape_to_2d(grad)
 
-            p_2d_fp32 = p_2d.float() if p.dtype is torch.bfloat16 else p_2d
+            p_2d_fp32 = _reshape_to_2d(_get_fp32_work(state, p, kahan_sum))
             # Adaptive Sinkhorn: 2 iterations for high aspect ratio matrices (e.g. LoRA)
             p_sinkhorn_steps = 2 if (p_2d.shape[0] / max(p_2d.shape[1], 1) > 32 or p_2d.shape[1] / max(p_2d.shape[0], 1) > 32) else sinkhorn_steps
 
@@ -1642,12 +1706,14 @@ class WarpAINO(Optimizer):
         _foreach_apply_lr_(p_fp32_list, updates_final_list, lr)
 
         for p, p_fp32 in zip(p_original_list, p_fp32_list):
-            if p.dtype is torch.bfloat16:
-                p_reshaped = p_fp32.view_as(p.data)
-                if stochastic_fp:
-                    copy_stochastic_(p.data, p_reshaped)
-                else:
-                    p.data.copy_(p_reshaped)
+            if p.dtype in (torch.float16, torch.bfloat16):
+                _writeback_fp32_work_(
+                    p,
+                    p_fp32.view_as(p.data),
+                    self.state[p],
+                    stochastic_fp,
+                    kahan_sum,
+                )
 
         for state, crafted_update in meta_list:
             if "spectral_log_left" in state:

@@ -748,3 +748,61 @@ def test_full_optimizer_compile_step_tensor_lr_cuda():
 
     assert torch.isfinite(lin.weight).all()
     assert torch.isfinite(lin.bias).all()
+
+
+@pytest.mark.parametrize("foreach", [False, True])
+@pytest.mark.parametrize("shape", [(16,), (4, 4)])
+def test_fp16_parameters_use_rounding_compensation_cuda(foreach, shape):
+    """Small FP16 updates accumulate through rounding compensation.
+
+    A one-step update at this learning rate is below the FP16 spacing near
+    one, so the public parameter remains unchanged while its FP32 Kahan-style
+    compensation records the lost rounding error. This exercises both
+    dimensionality paths and both optimizer dispatch modes without storing a
+    duplicate FP32 parameter.
+    """
+    _requires_cuda()
+    torch.manual_seed(33)
+    parameter = torch.nn.Parameter(torch.ones(shape, device=DEVICE, dtype=torch.float16))
+    initial = parameter.detach().float().clone()
+    optimizer = WarpAINO(
+        [parameter],
+        lr=1e-5,
+        weight_decay=0.0,
+        meta_lr=0.0,
+        kahan_sum=True,
+        foreach=foreach,
+    )
+
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+
+    state = optimizer.state[parameter]
+    assert "master_param" not in state
+    compensation = state["param_compensation"]
+    assert compensation.dtype is torch.float32
+    assert compensation.device == parameter.device
+    torch.testing.assert_close(parameter.float(), initial)
+    assert torch.any(compensation != 0)
+
+
+@pytest.mark.parametrize("foreach", [False, True])
+def test_fp16_rounding_compensation_is_disabled_by_default(foreach):
+    """The default configuration does not allocate compensation state."""
+    _requires_cuda()
+    parameter = torch.nn.Parameter(
+        torch.ones(16, device=DEVICE, dtype=torch.float16)
+    )
+    optimizer = WarpAINO(
+        [parameter],
+        lr=1e-5,
+        weight_decay=0.0,
+        meta_lr=0.0,
+        foreach=foreach,
+    )
+
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+
+    state = optimizer.state[parameter]
+    assert state.get("param_compensation") is None
