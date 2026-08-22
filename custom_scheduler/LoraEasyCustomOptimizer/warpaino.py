@@ -31,9 +31,9 @@ D is zero-initialized so P = I exactly and WarpAINO is bitwise-identical to
 AINOOpt until the warp learns (the first step is exactly AINOOpt).
 meta_lr=0 disables the warp entirely (plain AINOOpt).
 
-The dense residual is shaped (m, m), where m is the mixing dimension
-(number of rows after 2D reshape for >= 2D tensors, the full size for
-1D vectors). ``warp_mode="spectral"`` instead uses a full-rank,
+The dense residual is shaped (m, m), where m is the number of rows after
+2D reshape for 2D+ tensors. 1D parameters use the plain AINO path.
+``warp_mode="spectral"`` instead uses a full-rank,
 symmetric-circulant warp represented by bounded log-frequency scales and
 applied with FFTs. Spectral 2D+ warps can independently mix the row and
 column dimensions without storing dense matrices. Spectral log-scales are
@@ -47,9 +47,8 @@ Hyperparameters added over AINOOpt:
     warp_mode (str): ``"dense"`` for the original dense residual or
         ``"spectral"`` for the FFT-based full-rank warp. (default: "spectral")
     spectral_bilateral (bool): In spectral mode, independently warp both
-        dimensions of 2D+ updates. 1D vectors use the left/vector warp only;
-        scalar, bias, norm, and DoRA-scale parameters do not use a warp.
-        (default: True)
+        dimensions of 2D+ updates. 1D parameters, scalars, biases, norm, and
+        DoRA-scale parameters do not use a warp. (default: True)
     spectral_log_bound (float): Absolute bound on spectral log-scales. Gains
         are constrained to ``[exp(-bound), exp(bound)]``. (default: 1.0)
     warp_dtype (torch.dtype): Storage dtype for D. FP16, BF16, and FP32 are
@@ -777,7 +776,7 @@ def _finalize_aino_update_1d(
 class WarpAINO(Optimizer):
     """AINO optimizer with a dense or spectral WarpAdam-style crafted-update warp.
 
-    The Sinkhorn-normalized gradient first enters the ordinary AINO sign,
+    The Sinkhorn-normalized gradient for 2D+ parameters first enters the ordinary AINO sign,
     innovation, and value-momentum machinery. The resulting crafted update is
     then linearly warped by an identity-anchored operator immediately before
     orthogonalization. The dense mode uses:
@@ -1038,11 +1037,6 @@ class WarpAINO(Optimizer):
                     fullgraph=True,
                     dynamic=False,
                 )
-                self._compiled_warp_step_1d = torch.compile(
-                    self._WarpAINO_step_core_1d,
-                    fullgraph=True,
-                    dynamic=False,
-                )
             except Exception as e:
                 logging.warning(
                     f"torch.compile failed for AINO/dense cores: {e}. "
@@ -1051,16 +1045,10 @@ class WarpAINO(Optimizer):
                 self._compiled_step_2d = self._aino_step_core_2d
                 self._compiled_step_1d = self._aino_step_core_1d
                 self._compiled_warp_step_2d = self._WarpAINO_step_core_2d
-                self._compiled_warp_step_1d = self._WarpAINO_step_core_1d
             if warp_mode == "spectral":
                 try:
                     self._compiled_spectral_step_2d = torch.compile(
                         self._spectral_step_core_2d,
-                        fullgraph=True,
-                        dynamic=False,
-                    )
-                    self._compiled_spectral_step_1d = torch.compile(
-                        self._spectral_step_core_1d,
                         fullgraph=True,
                         dynamic=False,
                     )
@@ -1070,10 +1058,8 @@ class WarpAINO(Optimizer):
                         "Falling back to uncompiled spectral cores."
                     )
                     self._compiled_spectral_step_2d = self._spectral_step_core_2d
-                    self._compiled_spectral_step_1d = self._spectral_step_core_1d
             else:
                 self._compiled_spectral_step_2d = self._spectral_step_core_2d
-                self._compiled_spectral_step_1d = self._spectral_step_core_1d
 
             if warp_mode == "spectral":
                 try:
@@ -1101,9 +1087,7 @@ class WarpAINO(Optimizer):
             self._compiled_step_2d = self._aino_step_core_2d
             self._compiled_step_1d = self._aino_step_core_1d
             self._compiled_warp_step_2d = self._WarpAINO_step_core_2d
-            self._compiled_warp_step_1d = self._WarpAINO_step_core_1d
             self._compiled_spectral_step_2d = self._spectral_step_core_2d
-            self._compiled_spectral_step_1d = self._spectral_step_core_1d
             self._compiled_spectral_meta_left = _spectral_meta_left_core
             self._compiled_spectral_meta_bilateral = _spectral_meta_bilateral_core
 
@@ -1275,68 +1259,7 @@ class WarpAINO(Optimizer):
         step_t: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         beta1, beta2, beta3 = group["betas"]
-        cautious_update = group["cautious_update"]
-        cautious_wd = group["cautious_wd"]
-        eps = group["eps"]
-        relative_wd = group.get("relative_wd", False)
-        relative_wd_delta = group.get("relative_wd_delta", 1e-3)
-        spectral_log_left = state.get("spectral_log_left")
         g_data = _grokfast_filter(state, g_data, group)
-
-        if spectral_log_left is not None:
-            update_final, crafted_update = self._compiled_spectral_step_1d(
-                p_data,
-                g_data,
-                spectral_log_left,
-                state["momentum"],
-                state["sign_momentum"],
-                state["exp_avg_sq"],
-                state["row_var"],
-                beta1,
-                beta2,
-                beta3,
-                p_weight_decay,
-                p_max_scale,
-                eps,
-                step_t,
-                cautious_update,
-                cautious_wd,
-                group["spectral_log_bound"],
-                relative_wd,
-                relative_wd_delta,
-                group["nesterov_sign"],
-                group["rms_clip"],
-                group["rms_clip_max"],
-            )
-            return update_final, crafted_update
-
-        warp = state.get("warp")
-        if warp is not None:
-            update_final, crafted_update = self._compiled_warp_step_1d(
-                p_data,
-                g_data,
-                warp,
-                state["momentum"],
-                state["sign_momentum"],
-                state["exp_avg_sq"],
-                state["row_var"],
-                beta1,
-                beta2,
-                beta3,
-                p_weight_decay,
-                p_max_scale,
-                eps,
-                step_t,
-                cautious_update,
-                cautious_wd,
-                relative_wd,
-                relative_wd_delta,
-                group["nesterov_sign"],
-                group["rms_clip"],
-                group["rms_clip_max"],
-            )
-            return update_final, crafted_update
-
         update_final = self._compiled_step_1d(
             p_data,
             g_data,
@@ -1349,12 +1272,12 @@ class WarpAINO(Optimizer):
             beta3,
             p_weight_decay,
             p_max_scale,
-            eps,
+            group["eps"],
             step_t,
-            cautious_update,
-            cautious_wd,
-            relative_wd,
-            relative_wd_delta,
+            group["cautious_update"],
+            group["cautious_wd"],
+            group.get("relative_wd", False),
+            group.get("relative_wd_delta", 1e-3),
             group["nesterov_sign"],
             group["rms_clip"],
             group["rms_clip_max"],
@@ -1535,63 +1458,6 @@ class WarpAINO(Optimizer):
         return update_final, update
 
     @staticmethod
-    def _WarpAINO_step_core_1d(
-        p_data: torch.Tensor,
-        g_data: torch.Tensor,
-        warp: torch.Tensor,
-        momentum: torch.Tensor,
-        sign_momentum: torch.Tensor,
-        exp_avg_sq: torch.Tensor,
-        row_var: torch.Tensor,
-        beta1: float,
-        beta2: float,
-        beta3: float,
-        weight_decay: float,
-        max_scale: float,
-        eps: float,
-        step_t: torch.Tensor,
-        cautious_update: bool,
-        cautious_wd: bool,
-        relative_wd: bool = False,
-        relative_wd_delta: float = 1e-3,
-        nesterov_sign: bool = False,
-        rms_clip: bool = False,
-        rms_clip_max: float = 10.0,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Dense-warp 1D core using the shared AINO core stages."""
-        update = _prepare_aino_update_1d(
-            g_data,
-            momentum,
-            sign_momentum,
-            exp_avg_sq,
-            beta1,
-            beta2,
-            eps,
-            step_t,
-            nesterov_sign,
-        )
-        update_2d = update.reshape(-1, 1)
-        update_warped = torch.addmm(update_2d, warp.float(), update_2d).reshape_as(update)
-        update_final = _finalize_aino_update_1d(
-            p_data,
-            g_data,
-            update_warped,
-            row_var,
-            beta3,
-            weight_decay,
-            max_scale,
-            eps,
-            step_t,
-            cautious_update,
-            cautious_wd,
-            relative_wd,
-            relative_wd_delta,
-            rms_clip,
-            rms_clip_max,
-        )
-        return update_final, update
-
-    @staticmethod
     def _spectral_step_core_2d(
         p_2d: torch.Tensor,
         g_2d: torch.Tensor,
@@ -1667,67 +1533,6 @@ class WarpAINO(Optimizer):
         )
         return update_final, update
 
-    @staticmethod
-    def _spectral_step_core_1d(
-        p_data: torch.Tensor,
-        g_data: torch.Tensor,
-        spectral_log_left: torch.Tensor,
-        momentum: torch.Tensor,
-        sign_momentum: torch.Tensor,
-        exp_avg_sq: torch.Tensor,
-        row_var: torch.Tensor,
-        beta1: float,
-        beta2: float,
-        beta3: float,
-        weight_decay: float,
-        max_scale: float,
-        eps: float,
-        step_t: torch.Tensor,
-        cautious_update: bool,
-        cautious_wd: bool,
-        spectral_log_bound: float,
-        relative_wd: bool = False,
-        relative_wd_delta: float = 1e-3,
-        nesterov_sign: bool = False,
-        rms_clip: bool = False,
-        rms_clip_max: float = 10.0,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Spectral-warp 1D core using the shared AINO core stages."""
-        update = _prepare_aino_update_1d(
-            g_data,
-            momentum,
-            sign_momentum,
-            exp_avg_sq,
-            beta1,
-            beta2,
-            eps,
-            step_t,
-            nesterov_sign,
-        )
-        update_2d = update.reshape(-1, 1)
-        update_warped = _spectral_apply(
-            update_2d, spectral_log_left, None, spectral_log_bound
-        )
-        update_warped = torch.where(step_t <= 1.0, update_2d, update_warped).reshape_as(update)
-        update_final = _finalize_aino_update_1d(
-            p_data,
-            g_data,
-            update_warped,
-            row_var,
-            beta3,
-            weight_decay,
-            max_scale,
-            eps,
-            step_t,
-            cautious_update,
-            cautious_wd,
-            relative_wd,
-            relative_wd_delta,
-            rms_clip,
-            rms_clip_max,
-        )
-        return update_final, update
-
     @torch.no_grad()
     def step(self, closure=None):
         loss = None
@@ -1773,23 +1578,20 @@ class WarpAINO(Optimizer):
                         state["sign_momentum"] = torch.zeros_like(p.data, dtype=torch.float32)
                         state["exp_avg_sq"] = torch.zeros_like(p.data, dtype=torch.float32)
                         state["row_var"] = torch.zeros((), device=p.device, dtype=torch.float32)
-                        warp_m = p.numel()
 
                     if kahan_sum and p.dtype in (torch.float16, torch.bfloat16):
                         state["param_compensation"] = torch.zeros_like(
                             p.data, dtype=torch.float32
                         )
 
-                    # Skip warp distortion for biases, norm layers, scalars, and DoRA scales.
-                    # Ordinary 1D vectors intentionally use the vector/left warp.
-                    is_scalar_or_excluded = (
-                        p.numel() == 1
-                        or getattr(p, "is_scalar", False)
+                    # Warp only matrix-like parameters. Biases, norm layers,
+                    # scalars, and DoRA scales remain on the plain 1D path.
+                    if group["meta_lr"] > 0 and p.ndim >= 2 and p.numel() > 1 and not (
+                        getattr(p, "is_scalar", False)
                         or getattr(p, "is_bias", False)
                         or getattr(p, "is_norm", False)
                         or getattr(p, "_is_dora_scale", False)
-                    )
-                    if group["meta_lr"] > 0 and not is_scalar_or_excluded:
+                    ):
                         if group["warp_mode"] == "dense":
                             state["warp"] = torch.zeros(
                                 warp_m,
@@ -1802,7 +1604,7 @@ class WarpAINO(Optimizer):
                                 warp_m, dtype=torch.float32, device=p.device
                             )
                             # Only enable bilateral (right) spectral warp for hidden layers
-                            if p.ndim >= 2 and group["spectral_bilateral"] and getattr(p, "is_hidden", True):
+                            if group["spectral_bilateral"] and getattr(p, "is_hidden", True):
                                 state["spectral_log_right"] = torch.zeros(
                                     w_2d.shape[1],
                                     dtype=torch.float32,
@@ -1932,26 +1734,6 @@ class WarpAINO(Optimizer):
                 if p.dtype in (torch.float16, torch.bfloat16):
                     _writeback_fp32_work_(p, p_fp32, state, stochastic_fp, kahan_sum)
 
-                if spectral_log_left is not None:
-                    self._run_spectral_meta_update(
-                        state,
-                        crafted_update.reshape(-1, 1),
-                        meta_lr,
-                        meta_wd,
-                        spectral_log_bound,
-                        meta_ema,
-                        meta_ema_beta,
-                    )
-                elif warp is not None:
-                    _warp_meta_update(
-                        state,
-                        crafted_update.reshape(-1, 1),
-                        meta_lr,
-                        meta_wd,
-                        meta_ema,
-                        meta_ema_beta,
-                        stochastic_fp=stochastic_fp,
-                    )
 
     def _step_foreach(self, group):
         lr = group["lr"]
@@ -2009,8 +1791,6 @@ class WarpAINO(Optimizer):
             grad = p.grad.data.float() if p.grad.data.dtype in (torch.bfloat16, torch.float16) else p.grad.data
 
             p_fp32 = _get_fp32_work(state, p, kahan_sum)
-            warp = state.get("warp")
-            spectral_log_left = state.get("spectral_log_left")
             update_final, crafted_update = self._run_core_1d(
                 p_fp32,
                 grad,
@@ -2025,26 +1805,6 @@ class WarpAINO(Optimizer):
             if p.dtype in (torch.float16, torch.bfloat16):
                 _writeback_fp32_work_(p, p_fp32, state, stochastic_fp, kahan_sum)
 
-            if spectral_log_left is not None:
-                self._run_spectral_meta_update(
-                    state,
-                    crafted_update.reshape(-1, 1),
-                    meta_lr,
-                    meta_wd,
-                    spectral_log_bound,
-                    meta_ema,
-                    meta_ema_beta,
-                )
-            elif warp is not None:
-                _warp_meta_update(
-                    state,
-                    crafted_update.reshape(-1, 1),
-                    meta_lr,
-                    meta_wd,
-                    meta_ema,
-                    meta_ema_beta,
-                    stochastic_fp=stochastic_fp,
-                )
 
         # 2. Process 2D+ parameters
         if not params_2d:

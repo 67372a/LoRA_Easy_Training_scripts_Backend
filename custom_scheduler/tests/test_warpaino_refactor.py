@@ -1,7 +1,7 @@
 """Regression tests for the WarpAINO core deduplication refactor.
 
-The six step cores (``_aino_step_core_{2d,1d}``, ``_WarpAINO_step_core_{2d,1d}``,
-``_spectral_step_core_{2d,1d}``) previously each contained an inline copy of:
+The four public step cores (plain and warped 2D cores plus the plain 1D core)
+previously contained inline copies of:
 
 * the poly-beta horizon correction,
 * the Sinkhorn row/col RMS normalization loop,
@@ -606,15 +606,11 @@ def _make_1d_state(n, seed):
     )
 
 
-@pytest.mark.parametrize("mode", ["plain", "dense", "spectral"])
 @pytest.mark.parametrize("relative_wd", [False, True])
-def test_1d_cores_match_reference(mode, relative_wd):
-    """All three refactored 1D cores match the pre-refactor implementation."""
+def test_1d_core_matches_reference(relative_wd):
+    """The refactored plain 1D core matches the pre-refactor implementation."""
     _requires_cuda()
     base = _make_1d_state(16, seed=20)
-    torch.manual_seed(21)
-    warp = (torch.randn(16, 16, device=DEVICE) * 0.05).to(torch.bfloat16)
-    log_left = torch.randn(16, device=DEVICE) * 0.3
     step_t = torch.tensor(4.0, device=DEVICE)
     kwargs = dict(
         beta1=BETAS[0], beta2=BETAS[1], beta3=BETAS[2],
@@ -624,39 +620,18 @@ def test_1d_cores_match_reference(mode, relative_wd):
     )
 
     s_ref = _clone_state(base)
-    extra = {}
-    if mode == "dense":
-        extra["warp"] = warp
-    elif mode == "spectral":
-        extra["spectral_log_left"] = log_left
-        extra["spectral_log_bound"] = 1.0
-    ref_out, ref_update = _reference_1d_core(
+    ref_out, _ = _reference_1d_core(
         s_ref["p"], s_ref["g"], s_ref["momentum"], s_ref["sign_momentum"],
-        s_ref["exp_avg_sq"], s_ref["row_var"], **extra, **kwargs,
+        s_ref["exp_avg_sq"], s_ref["row_var"], **kwargs,
     )
 
     s_new = _clone_state(base)
-    if mode == "plain":
-        # The plain core returns a single tensor (no crafted update is needed
-        # without a warp meta-objective).
-        new_out = WarpAINO._aino_step_core_1d(
-            s_new["p"], s_new["g"], s_new["momentum"], s_new["sign_momentum"],
-            s_new["exp_avg_sq"], s_new["row_var"], **kwargs,
-        )
-        new_update = ref_update
-    elif mode == "dense":
-        new_out, new_update = WarpAINO._WarpAINO_step_core_1d(
-            s_new["p"], s_new["g"], warp, s_new["momentum"], s_new["sign_momentum"],
-            s_new["exp_avg_sq"], s_new["row_var"], **kwargs,
-        )
-    else:
-        new_out, new_update = WarpAINO._spectral_step_core_1d(
-            s_new["p"], s_new["g"], log_left, s_new["momentum"], s_new["sign_momentum"],
-            s_new["exp_avg_sq"], s_new["row_var"], spectral_log_bound=1.0, **kwargs,
-        )
+    new_out = WarpAINO._aino_step_core_1d(
+        s_new["p"], s_new["g"], s_new["momentum"], s_new["sign_momentum"],
+        s_new["exp_avg_sq"], s_new["row_var"], **kwargs,
+    )
 
     torch.testing.assert_close(new_out, ref_out)
-    torch.testing.assert_close(new_update, ref_update)
     for k in ("momentum", "sign_momentum", "exp_avg_sq", "row_var"):
         torch.testing.assert_close(s_new[k], s_ref[k], msg=f"state mismatch: {k}")
 
@@ -956,34 +931,27 @@ def test_all_optional_features_smoke_cuda(foreach):
     assert "prev_update" in optimizer.state[lin.weight]
 
 
-@pytest.mark.parametrize("warp_mode", ["dense", "spectral"])
-def test_one_dimensional_parameters_use_vector_warp_state(warp_mode):
-    """Unannotated 1D parameters allocate and execute their vector warp."""
+@pytest.mark.parametrize("foreach", [False, True])
+def test_one_dimensional_parameters_do_not_allocate_warp_state(foreach):
+    """1D parameters always use the plain AINO path."""
     _requires_cuda()
-    torch.manual_seed(37)
     parameter = torch.nn.Parameter(torch.randn(16, device=DEVICE))
     optimizer = WarpAINO(
         [parameter],
         lr=1e-3,
         meta_lr=1e-2,
         meta_ema=True,
-        warp_mode=warp_mode,
-        spectral_bilateral=True,
+        warp_mode="spectral",
+        foreach=foreach,
     )
 
-    for _ in range(2):
-        parameter.grad = torch.randn_like(parameter)
-        optimizer.step()
+    parameter.grad = torch.randn_like(parameter)
+    optimizer.step()
 
     state = optimizer.state[parameter]
-    assert "prev_update" in state
-    assert state["prev_update"].shape == (parameter.numel(), 1)
-    assert "warp_ema" not in state
-    assert "spectral_log_left_ema" not in state
-    if warp_mode == "dense":
-        assert state["warp"].shape == (parameter.numel(), parameter.numel())
-    else:
-        assert state["spectral_log_left"].shape == (parameter.numel(),)
+    assert "warp" not in state
+    assert "spectral_log_left" not in state
+    assert "prev_update" not in state
     assert torch.isfinite(parameter).all()
 
 
