@@ -75,6 +75,8 @@ Hyperparameters added over AINOOpt:
 """
 
 import logging
+import math
+from numbers import Real
 
 import torch
 from torch.optim import Optimizer
@@ -120,6 +122,42 @@ def _spectral_log_gain(
     return log_scale.clamp(-log_bound, log_bound).exp()
 
 
+def _spectral_rfft_log_gain(
+    log_scale: torch.Tensor,
+    log_bound: float,
+) -> torch.Tensor:
+    """Return the positive-frequency gains needed by a real FFT."""
+    log_scale = 0.5 * (log_scale + _spectral_mirror(log_scale))
+    positive = log_scale[: log_scale.shape[0] // 2 + 1]
+    return positive.clamp(-log_bound, log_bound).exp()
+
+
+def _spectral_rfft_weights(
+    length: int,
+    positive_spectrum: torch.Tensor,
+) -> torch.Tensor:
+    """Return multiplicities for reconstructing a full real-FFT loss."""
+    weights = torch.ones_like(positive_spectrum)
+    if length > 2:
+        if length % 2 == 0:
+            weights[1:-1].mul_(2.0)
+        else:
+            weights[1:].mul_(2.0)
+    return weights
+
+
+def _spectral_expand_rfft_gradient(
+    positive_gradient: torch.Tensor,
+    length: int,
+) -> torch.Tensor:
+    """Expand a positive-frequency gradient to the full symmetric state."""
+    if length % 2 == 0:
+        mirrored = positive_gradient[1:-1].flip(0)
+    else:
+        mirrored = positive_gradient[1:].flip(0)
+    return torch.cat((positive_gradient, mirrored))
+
+
 def _spectral_apply(
     update_2d: torch.Tensor,
     spectral_log_left: torch.Tensor,
@@ -127,18 +165,25 @@ def _spectral_apply(
     spectral_log_bound: float,
 ) -> torch.Tensor:
     """Apply a full-rank symmetric-circulant warp using orthonormal FFTs."""
-    left_gain = _spectral_log_gain(spectral_log_left, spectral_log_bound)
     if spectral_log_right is None:
-        spectrum = torch.fft.fft(update_2d, dim=0, norm="ortho")
-        delta = torch.fft.ifft(
-            spectrum * (left_gain[:, None] - 1.0), dim=0, norm="ortho"
+        left_gain = _spectral_rfft_log_gain(spectral_log_left, spectral_log_bound)
+        spectrum = torch.fft.rfft(update_2d, dim=0, norm="ortho")
+        delta = torch.fft.irfft(
+            spectrum * (left_gain[:, None] - 1.0),
+            n=update_2d.shape[0],
+            dim=0,
+            norm="ortho",
         ).real
     else:
-        right_gain = _spectral_log_gain(spectral_log_right, spectral_log_bound)
-        spectrum = torch.fft.fft2(update_2d, dim=(0, 1), norm="ortho")
+        left_gain = _spectral_log_gain(spectral_log_left, spectral_log_bound)
+        right_gain = _spectral_rfft_log_gain(spectral_log_right, spectral_log_bound)
+        spectrum = torch.fft.rfft2(update_2d, dim=(0, 1), norm="ortho")
         gain_delta = left_gain[:, None] * right_gain[None, :] - 1.0
-        delta = torch.fft.ifft2(
-            spectrum * gain_delta, dim=(0, 1), norm="ortho"
+        delta = torch.fft.irfft2(
+            spectrum * gain_delta,
+            s=update_2d.shape,
+            dim=(0, 1),
+            norm="ortho",
         ).real
     return update_2d + delta
 
@@ -400,8 +445,84 @@ def _warp_meta_update(
         warp_fp32.addmm_(R_scaled, prev.t())
         if meta_wd > 0:
             warp_fp32.mul_(1.0 - meta_lr * meta_wd)
-        warp.copy_(warp_fp32.to(warp.dtype))
+        warp.copy_(warp_fp32)
     state["prev_update"] = update_cur_2d.clone()
+
+
+def _spectral_meta_left_core(
+    log_left: torch.Tensor,
+    prev: torch.Tensor,
+    current: torch.Tensor,
+    meta_lr: float,
+    meta_wd: float,
+    spectral_log_bound: float,
+) -> torch.Tensor:
+    """Tensor-only left spectral meta-update suitable for ``torch.compile``."""
+    left_gain = _spectral_rfft_log_gain(log_left, spectral_log_bound)
+    prev_spectrum = torch.fft.rfft(prev, dim=0, norm="ortho")
+    current_spectrum = torch.fft.rfft(current, dim=0, norm="ortho")
+    residual = left_gain[:, None] * prev_spectrum - current_spectrum
+    grad_positive = left_gain * torch.real(
+        torch.conj(residual) * prev_spectrum
+    ).sum(dim=1)
+    grad_positive = grad_positive * _spectral_rfft_weights(
+        prev.shape[0], left_gain
+    )
+    grad_positive = grad_positive / prev.norm().square().clamp_min_(1e-12)
+    grad = _spectral_expand_rfft_gradient(grad_positive, log_left.shape[0])
+
+    updated = log_left - meta_lr * grad
+    if meta_wd > 0:
+        updated = updated * (1.0 - meta_lr * meta_wd)
+    updated = updated.clamp(-spectral_log_bound, spectral_log_bound)
+    return 0.5 * (updated + _spectral_mirror(updated))
+
+
+def _spectral_meta_bilateral_core(
+    log_left: torch.Tensor,
+    log_right: torch.Tensor,
+    prev: torch.Tensor,
+    current: torch.Tensor,
+    meta_lr: float,
+    meta_wd: float,
+    spectral_log_bound: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Tensor-only bilateral spectral meta-update suitable for compilation."""
+    left_gain = _spectral_log_gain(log_left, spectral_log_bound)
+    right_gain = _spectral_rfft_log_gain(log_right, spectral_log_bound)
+    right_weights = _spectral_rfft_weights(prev.shape[1], right_gain)
+    prev_spectrum = torch.fft.rfft2(prev, dim=(0, 1), norm="ortho")
+    current_spectrum = torch.fft.rfft2(current, dim=(0, 1), norm="ortho")
+    base_left = prev_spectrum * right_gain[None, :]
+    residual = left_gain[:, None] * base_left - current_spectrum
+
+    grad_left = left_gain * torch.real(
+        torch.conj(residual) * base_left * right_weights[None, :]
+    ).sum(dim=1)
+    base_right = prev_spectrum * left_gain[:, None]
+    grad_right_positive = right_gain * torch.real(
+        torch.conj(residual) * base_right
+    ).sum(dim=0)
+    grad_right_positive = grad_right_positive * right_weights
+
+    scale = 1.0 / prev.norm().square().clamp_min_(1e-12)
+    grad_left = grad_left * scale
+    grad_right = _spectral_expand_rfft_gradient(
+        grad_right_positive * scale, log_right.shape[0]
+    )
+
+    updated_left = log_left - meta_lr * grad_left
+    updated_right = log_right - meta_lr * grad_right
+    if meta_wd > 0:
+        damping = 1.0 - meta_lr * meta_wd
+        updated_left = updated_left * damping
+        updated_right = updated_right * damping
+    updated_left = updated_left.clamp(-spectral_log_bound, spectral_log_bound)
+    updated_right = updated_right.clamp(-spectral_log_bound, spectral_log_bound)
+    return (
+        0.5 * (updated_left + _spectral_mirror(updated_left)),
+        0.5 * (updated_right + _spectral_mirror(updated_right)),
+    )
 
 
 @torch.no_grad()
@@ -412,55 +533,34 @@ def _spectral_meta_update(
     meta_wd: float,
     spectral_log_bound: float,
 ) -> None:
-    """Update FFT log-scales on the normalized prediction objective."""
+    """Eager compatibility wrapper around the tensor-only spectral kernels."""
     prev = state.get("prev_update")
     if prev is not None:
         log_left = state["spectral_log_left"]
-        left_gain = _spectral_log_gain(log_left, spectral_log_bound)
-        scale = 1.0 / prev.norm().square().clamp_min_(1e-12)
-
         log_right = state.get("spectral_log_right")
         if log_right is None or log_right.numel() == 0:
-            prev_spectrum = torch.fft.fft(prev, dim=0, norm="ortho")
-            current_spectrum = torch.fft.fft(update_cur_2d, dim=0, norm="ortho")
-            prediction = left_gain[:, None] * prev_spectrum
-            residual = prediction - current_spectrum
-            grad_left = left_gain * torch.real(
-                torch.conj(residual) * prev_spectrum
-            ).sum(dim=1)
-            grad_left.mul_(scale)
-        else:
-            right_gain = _spectral_log_gain(log_right, spectral_log_bound)
-            prev_spectrum = torch.fft.fft2(prev, dim=(0, 1), norm="ortho")
-            current_spectrum = torch.fft.fft2(
-                update_cur_2d, dim=(0, 1), norm="ortho"
+            log_left.copy_(
+                _spectral_meta_left_core(
+                    log_left,
+                    prev,
+                    update_cur_2d,
+                    meta_lr,
+                    meta_wd,
+                    spectral_log_bound,
+                )
             )
-            base_left = prev_spectrum * right_gain[None, :]
-            prediction = left_gain[:, None] * base_left
-            residual = prediction - current_spectrum
-            grad_left = left_gain * torch.real(
-                torch.conj(residual) * base_left
-            ).sum(dim=1)
-            base_right = prev_spectrum * left_gain[:, None]
-            grad_right = right_gain * torch.real(
-                torch.conj(residual) * base_right
-            ).sum(dim=0)
-            grad_left.mul_(scale)
-            grad_right.mul_(scale)
-
-        log_left.add_(grad_left, alpha=-meta_lr)
-        if meta_wd > 0:
-            log_left.mul_(1.0 - meta_lr * meta_wd)
-        log_left.clamp_(-spectral_log_bound, spectral_log_bound)
-        log_left.copy_(0.5 * (log_left + _spectral_mirror(log_left)))
-
-        if log_right is not None and log_right.numel() > 0:
-            log_right.add_(grad_right, alpha=-meta_lr)
-            if meta_wd > 0:
-                log_right.mul_(1.0 - meta_lr * meta_wd)
-            log_right.clamp_(-spectral_log_bound, spectral_log_bound)
-            log_right.copy_(0.5 * (log_right + _spectral_mirror(log_right)))
-
+        else:
+            updated_left, updated_right = _spectral_meta_bilateral_core(
+                log_left,
+                log_right,
+                prev,
+                update_cur_2d,
+                meta_lr,
+                meta_wd,
+                spectral_log_bound,
+            )
+            log_left.copy_(updated_left)
+            log_right.copy_(updated_right)
     state["prev_update"] = update_cur_2d.clone()
 
 
@@ -492,7 +592,7 @@ class WarpAINO(Optimizer):
     def __init__(
         self,
         params,
-        lr: float = 0.0001,
+        lr: Union[float, torch.Tensor] = 0.0001,
         betas: Tuple[float, float, float] = (0.95, 0.95, 0.999),
         weight_decay: float = 0.0,
         cautious_update: bool = True,
@@ -514,29 +614,93 @@ class WarpAINO(Optimizer):
         relative_wd_delta: float = 1e-3,
         relative_wd_max_contraction: float = 0.99,
     ):
-        if lr < 0.0:
+        if isinstance(lr, torch.Tensor):
+            if lr.ndim != 0 or not lr.is_floating_point():
+                raise ValueError(
+                    "lr tensor must be a single floating-point value, "
+                    f"got shape={tuple(lr.shape)}, dtype={lr.dtype}"
+                )
+            # Construction-time validation may synchronize once for a CUDA
+            # scalar; the per-step path remains entirely device-side.
+            lr_value = float(lr.detach().item())
+            if not math.isfinite(lr_value) or lr_value < 0.0:
+                raise ValueError(f"Invalid learning rate: {lr_value}")
+        elif (
+            isinstance(lr, bool)
+            or not isinstance(lr, Real)
+            or not math.isfinite(float(lr))
+            or lr < 0.0
+        ):
             raise ValueError(f"Invalid learning rate: {lr}")
-        if len(betas) != 3:
+
+        if not isinstance(betas, (tuple, list)) or len(betas) != 3:
             raise ValueError(f"betas must be a 3-tuple of floats, got {betas}")
-        if not 0.0 <= betas[0] < 1.0:
-            raise ValueError(f"Invalid beta parameter at index 0 (beta1): {betas[0]}")
-        if not 0.0 <= betas[1] < 1.0:
-            raise ValueError(f"Invalid beta parameter at index 1 (beta2): {betas[1]}")
-        if not 0.0 <= betas[2] < 1.0:
-            raise ValueError(f"Invalid beta parameter at index 2 (beta3): {betas[2]}")
-        if weight_decay < 0.0:
+        for index, beta in enumerate(betas):
+            if (
+                isinstance(beta, bool)
+                or not isinstance(beta, Real)
+                or not math.isfinite(float(beta))
+                or not 0.0 <= beta < 1.0
+            ):
+                raise ValueError(
+                    f"Invalid beta parameter at index {index} (beta{index + 1}): {beta}"
+                )
+        if (
+            isinstance(weight_decay, bool)
+            or not isinstance(weight_decay, Real)
+            or not math.isfinite(float(weight_decay))
+            or weight_decay < 0.0
+        ):
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
-        if eps < 0.0:
+        if (
+            isinstance(eps, bool)
+            or not isinstance(eps, Real)
+            or not math.isfinite(float(eps))
+            or eps < 0.0
+        ):
             raise ValueError(f"Invalid eps value: {eps}")
-        if meta_lr < 0.0:
+        if (
+            isinstance(meta_lr, bool)
+            or not isinstance(meta_lr, Real)
+            or not math.isfinite(float(meta_lr))
+            or meta_lr < 0.0
+        ):
             raise ValueError(f"Invalid meta_lr value: {meta_lr}")
-        if meta_wd < 0.0:
+        if (
+            isinstance(meta_wd, bool)
+            or not isinstance(meta_wd, Real)
+            or not math.isfinite(float(meta_wd))
+            or meta_wd < 0.0
+        ):
             raise ValueError(f"Invalid meta_wd value: {meta_wd}")
+        for name, value in (
+            ("cautious_update", cautious_update),
+            ("cautious_wd", cautious_wd),
+            ("stochastic_fp", stochastic_fp),
+            ("compile_step", compile_step),
+            ("foreach", foreach),
+            ("spectral_bilateral", spectral_bilateral),
+            ("relative_wd", relative_wd),
+            ("kahan_sum", kahan_sum),
+        ):
+            if not isinstance(value, bool):
+                raise ValueError(f"{name} must be bool, got {value}")
+        if (
+            isinstance(sinkhorn_steps, bool)
+            or not isinstance(sinkhorn_steps, int)
+            or sinkhorn_steps < 0
+        ):
+            raise ValueError(f"sinkhorn_steps must be a non-negative integer, got {sinkhorn_steps}")
         if warp_mode not in ("dense", "spectral"):
             raise ValueError(
                 f"Invalid warp_mode: {warp_mode}; expected 'dense' or 'spectral'"
             )
-        if spectral_log_bound < 0.0:
+        if (
+            isinstance(spectral_log_bound, bool)
+            or not isinstance(spectral_log_bound, Real)
+            or not math.isfinite(float(spectral_log_bound))
+            or spectral_log_bound < 0.0
+        ):
             raise ValueError(
                 f"Invalid spectral_log_bound value: {spectral_log_bound}"
             )
@@ -545,10 +709,25 @@ class WarpAINO(Optimizer):
                 "warp_dtype must be torch.float16, torch.bfloat16, or torch.float32, "
                 f"got {warp_dtype}"
             )
-        if not isinstance(relative_wd, bool):
-            raise ValueError(f"relative_wd must be bool, got {relative_wd}")
-        if not isinstance(kahan_sum, bool):
-            raise ValueError(f"kahan_sum must be bool, got {kahan_sum}")
+        if (
+            isinstance(relative_wd_delta, bool)
+            or not isinstance(relative_wd_delta, Real)
+            or not math.isfinite(float(relative_wd_delta))
+            or relative_wd_delta < 0.0
+        ):
+            raise ValueError(
+                f"relative_wd_delta must be a finite non-negative float, got {relative_wd_delta}"
+            )
+        if (
+            isinstance(relative_wd_max_contraction, bool)
+            or not isinstance(relative_wd_max_contraction, Real)
+            or not math.isfinite(float(relative_wd_max_contraction))
+            or not 0.0 < relative_wd_max_contraction <= 1.0
+        ):
+            raise ValueError(
+                "relative_wd_max_contraction must be in (0, 1], "
+                f"got {relative_wd_max_contraction}"
+            )
 
         defaults = dict(
             lr=lr,
@@ -632,6 +811,29 @@ class WarpAINO(Optimizer):
             else:
                 self._compiled_spectral_step_2d = self._spectral_step_core_2d
                 self._compiled_spectral_step_1d = self._spectral_step_core_1d
+
+            if warp_mode == "spectral":
+                try:
+                    self._compiled_spectral_meta_left = torch.compile(
+                        _spectral_meta_left_core,
+                        fullgraph=True,
+                        dynamic=False,
+                    )
+                    self._compiled_spectral_meta_bilateral = torch.compile(
+                        _spectral_meta_bilateral_core,
+                        fullgraph=True,
+                        dynamic=False,
+                    )
+                except Exception as e:
+                    logging.warning(
+                        f"torch.compile failed for spectral meta cores: {e}. "
+                        "Falling back to uncompiled meta cores."
+                    )
+                    self._compiled_spectral_meta_left = _spectral_meta_left_core
+                    self._compiled_spectral_meta_bilateral = _spectral_meta_bilateral_core
+            else:
+                self._compiled_spectral_meta_left = _spectral_meta_left_core
+                self._compiled_spectral_meta_bilateral = _spectral_meta_bilateral_core
         else:
             self._compiled_step_2d = self._aino_step_core_2d
             self._compiled_step_1d = self._aino_step_core_1d
@@ -639,6 +841,47 @@ class WarpAINO(Optimizer):
             self._compiled_warp_step_1d = self._WarpAINO_step_core_1d
             self._compiled_spectral_step_2d = self._spectral_step_core_2d
             self._compiled_spectral_step_1d = self._spectral_step_core_1d
+            self._compiled_spectral_meta_left = _spectral_meta_left_core
+            self._compiled_spectral_meta_bilateral = _spectral_meta_bilateral_core
+
+    @torch.no_grad()
+    def _run_spectral_meta_update(
+        self,
+        state: dict,
+        update_cur_2d: torch.Tensor,
+        meta_lr: float,
+        meta_wd: float,
+        spectral_log_bound: float,
+    ) -> None:
+        """Run the compiled spectral meta kernel and update bookkeeping state."""
+        prev = state.get("prev_update")
+        if prev is not None:
+            log_left = state["spectral_log_left"]
+            log_right = state.get("spectral_log_right")
+            if log_right is None or log_right.numel() == 0:
+                log_left.copy_(
+                    self._compiled_spectral_meta_left(
+                        log_left,
+                        prev,
+                        update_cur_2d,
+                        meta_lr,
+                        meta_wd,
+                        spectral_log_bound,
+                    )
+                )
+            else:
+                updated_left, updated_right = self._compiled_spectral_meta_bilateral(
+                    log_left,
+                    log_right,
+                    prev,
+                    update_cur_2d,
+                    meta_lr,
+                    meta_wd,
+                    spectral_log_bound,
+                )
+                log_left.copy_(updated_left)
+                log_right.copy_(updated_right)
+        state["prev_update"] = update_cur_2d.clone()
 
     def _run_core_2d(
         self,
@@ -1522,7 +1765,7 @@ class WarpAINO(Optimizer):
                     )
 
                 if spectral_log_left is not None:
-                    _spectral_meta_update(
+                    self._run_spectral_meta_update(
                         state,
                         crafted_update,
                         meta_lr,
@@ -1551,7 +1794,7 @@ class WarpAINO(Optimizer):
                     _writeback_fp32_work_(p, p_fp32, state, stochastic_fp, kahan_sum)
 
                 if spectral_log_left is not None:
-                    _spectral_meta_update(
+                    self._run_spectral_meta_update(
                         state,
                         crafted_update.reshape(-1, 1),
                         meta_lr,
@@ -1634,7 +1877,7 @@ class WarpAINO(Optimizer):
                 _writeback_fp32_work_(p, p_fp32, state, stochastic_fp, kahan_sum)
 
             if spectral_log_left is not None:
-                _spectral_meta_update(
+                self._run_spectral_meta_update(
                     state,
                     crafted_update.reshape(-1, 1),
                     meta_lr,
@@ -1717,7 +1960,7 @@ class WarpAINO(Optimizer):
 
         for state, crafted_update in meta_list:
             if "spectral_log_left" in state:
-                _spectral_meta_update(
+                self._run_spectral_meta_update(
                     state,
                     crafted_update,
                     meta_lr,

@@ -34,6 +34,7 @@ try:
         _poly_beta,
         _sinkhorn_normalize,
         _spectral_apply,
+        _spectral_log_gain,
         gram_newton_schulz_2step,
     )
 except ImportError:
@@ -56,6 +57,7 @@ except ImportError:
     _poly_beta = _module._poly_beta
     _sinkhorn_normalize = _module._sinkhorn_normalize
     _spectral_apply = _module._spectral_apply
+    _spectral_log_gain = _module._spectral_log_gain
     gram_newton_schulz_2step = _module.gram_newton_schulz_2step
 
 DEVICE = "cuda"
@@ -806,3 +808,92 @@ def test_fp16_rounding_compensation_is_disabled_by_default(foreach):
 
     state = optimizer.state[parameter]
     assert state.get("param_compensation") is None
+
+
+@pytest.mark.parametrize("bilateral", [False, True])
+@pytest.mark.parametrize("shape", [(7, 6), (8, 5)])
+def test_spectral_rfft_matches_full_fft_reference(bilateral, shape):
+    """The half-spectrum spectral operator matches the former full FFT math."""
+    _requires_cuda()
+    torch.manual_seed(34)
+    update = torch.randn(shape, device=DEVICE)
+    log_left = torch.randn(shape[0], device=DEVICE) * 0.3
+    log_right = torch.randn(shape[1], device=DEVICE) * 0.3
+    bound = 0.8
+
+    left_gain = _spectral_log_gain(log_left, bound)
+    if bilateral:
+        right_gain = _spectral_log_gain(log_right, bound)
+        spectrum = torch.fft.fft2(update, dim=(0, 1), norm="ortho")
+        delta = torch.fft.ifft2(
+            spectrum * (left_gain[:, None] * right_gain[None, :] - 1.0),
+            dim=(0, 1),
+            norm="ortho",
+        ).real
+    else:
+        spectrum = torch.fft.fft(update, dim=0, norm="ortho")
+        delta = torch.fft.ifft(
+            spectrum * (left_gain[:, None] - 1.0), dim=0, norm="ortho"
+        ).real
+    expected = update + delta
+
+    actual = _spectral_apply(
+        update,
+        log_left,
+        log_right if bilateral else None,
+        bound,
+    )
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"lr": -1.0},
+        {"betas": (0.9, 0.9)},
+        {"betas": (0.9, float("nan"), 0.9)},
+        {"weight_decay": -1.0},
+        {"eps": float("nan")},
+        {"meta_lr": -1.0},
+        {"meta_wd": float("inf")},
+        {"kahan_sum": 1},
+        {"spectral_bilateral": 1},
+        {"sinkhorn_steps": -1},
+        {"sinkhorn_steps": 1.5},
+        {"spectral_log_bound": -1.0},
+        {"relative_wd_delta": -1.0},
+        {"relative_wd_max_contraction": 0.0},
+        {"relative_wd_max_contraction": 1.1},
+    ],
+)
+def test_constructor_rejects_invalid_options_cuda(kwargs):
+    """Invalid scalar, tensor, boolean, and range options fail early."""
+    _requires_cuda()
+    parameter = torch.nn.Parameter(torch.zeros(4, device=DEVICE))
+    with pytest.raises(ValueError):
+        WarpAINO([parameter], **kwargs)
+
+
+@pytest.mark.parametrize("foreach", [False, True])
+def test_constructor_accepts_float_and_cuda_tensor_lr(foreach):
+    """Both supported learning-rate representations work when passed to init."""
+    _requires_cuda()
+    parameter = torch.nn.Parameter(torch.ones(16, device=DEVICE))
+    lr = torch.tensor(1e-4, device=DEVICE)
+    optimizer = WarpAINO(
+        [parameter], lr=lr, meta_lr=0.0, foreach=foreach
+    )
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    assert torch.isfinite(parameter).all()
+    assert optimizer.param_groups[0]["lr"].device == lr.device
+
+
+def test_constructor_rejects_invalid_cuda_tensor_lr():
+    """Learning-rate tensors must be scalar, floating-point, finite, and non-negative."""
+    _requires_cuda()
+    parameter = torch.nn.Parameter(torch.zeros(4, device=DEVICE))
+    with pytest.raises(ValueError):
+        WarpAINO([parameter], lr=torch.tensor([1e-3], device=DEVICE))
+    with pytest.raises(ValueError):
+        WarpAINO([parameter], lr=torch.tensor(-1e-3, device=DEVICE))
