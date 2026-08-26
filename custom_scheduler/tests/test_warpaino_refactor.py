@@ -662,6 +662,72 @@ def test_nesterov_value_changes_plain_1d_update():
     assert not torch.equal(ordinary, lookahead)
 
 
+def test_aino_mix_alpha_zero_preserves_plain_1d_update():
+    """The default and explicit zero mix must be bitwise-identical."""
+    _requires_cuda()
+    base = _make_1d_state(16, seed=23)
+    kwargs = dict(
+        beta1=BETAS[0], beta2=BETAS[1], beta3=BETAS[2],
+        weight_decay=0.0, max_scale=float("inf"), eps=EPS,
+        step_t=torch.tensor(4.0, device=DEVICE),
+        cautious_update=False, cautious_wd=False,
+    )
+
+    default_state = _clone_state(base)
+    zero_state = _clone_state(base)
+    default_update = WarpAINO._aino_step_core_1d(
+        default_state["p"], default_state["g"],
+        default_state["momentum"], default_state["sign_momentum"],
+        default_state["exp_avg_sq"], default_state["row_var"],
+        **kwargs,
+    )
+    zero_update = WarpAINO._aino_step_core_1d(
+        zero_state["p"], zero_state["g"],
+        zero_state["momentum"], zero_state["sign_momentum"],
+        zero_state["exp_avg_sq"], zero_state["row_var"],
+        aino_mix_alpha=0.0,
+        **kwargs,
+    )
+
+    assert torch.equal(zero_update, default_update)
+    for key in ("momentum", "sign_momentum", "exp_avg_sq", "row_var"):
+        assert torch.equal(zero_state[key], default_state[key]), key
+
+
+def test_aino_mix_alpha_changes_plain_2d_update():
+    """A positive mix coefficient must affect the 2D crafted update."""
+    _requires_cuda()
+    base = _make_2d_state(8, 12, seed=24)
+    kwargs = dict(
+        beta1=BETAS[0], beta2=BETAS[1], beta3=BETAS[2],
+        weight_decay=0.0, max_scale=float("inf"), eps=EPS,
+        step_t=torch.tensor(4.0, device=DEVICE), sinkhorn_steps=3,
+        cautious_update=False, cautious_wd=False,
+        ortho_dtype=torch.bfloat16,
+    )
+
+    ordinary_state = _clone_state(base)
+    mixed_state = _clone_state(base)
+    ordinary = WarpAINO._aino_step_core_2d(
+        ordinary_state["p"], ordinary_state["g"],
+        ordinary_state["momentum"], ordinary_state["sign_momentum"],
+        ordinary_state["exp_avg_sq_row"], ordinary_state["exp_avg_sq_col"],
+        ordinary_state["row_var"],
+        **kwargs,
+    )
+    mixed = WarpAINO._aino_step_core_2d(
+        mixed_state["p"], mixed_state["g"],
+        mixed_state["momentum"], mixed_state["sign_momentum"],
+        mixed_state["exp_avg_sq_row"], mixed_state["exp_avg_sq_col"],
+        mixed_state["row_var"],
+        aino_mix_alpha=0.25,
+        **kwargs,
+    )
+
+    assert torch.isfinite(mixed).all()
+    assert not torch.equal(mixed, ordinary)
+
+
 # ---------------------------------------------------------------------------
 # Full-optimizer smoke tests (all dispatch paths through the shared helpers)
 # ---------------------------------------------------------------------------
@@ -688,6 +754,7 @@ def test_full_optimizer_smoke_cuda(foreach, warp_mode, meta_lr):
         meta_lr=meta_lr,
         warp_mode=warp_mode,
         foreach=foreach,
+        aino_mix_alpha=0.1,
     )
 
     before = [p.detach().clone() for p in params]
@@ -716,6 +783,7 @@ def test_full_optimizer_compile_step_cuda():
         relative_wd=True,
         compile_step=True,
         warp_mode="spectral",
+        aino_mix_alpha=0.1,
     )
 
     for _ in range(2):
@@ -935,6 +1003,7 @@ def test_all_optional_features_smoke_cuda(foreach):
         meta_ema=True,
         meta_ema_beta=0.98,
         nesterov_sign=True,
+        aino_mix_alpha=0.1,
         rms_clip=True,
         rms_clip_max=10.0,
         grokfast=True,
@@ -1024,6 +1093,7 @@ def test_all_optional_features_compile_step_cuda():
         nesterov_sign=True,
         nesterov_value=True,
         came_confidence=True,
+        aino_mix_alpha=0.1,
         rms_clip=True,
         rms_clip_max=10.0,
         grokfast=True,
@@ -1095,6 +1165,9 @@ def test_spectral_rfft_matches_full_fft_reference(bilateral, shape):
         {"relative_wd_max_contraction": 1.1},
         {"meta_ema_beta": 1.0},
         {"nesterov_sign": 1},
+        {"aino_mix_alpha": -1.0},
+        {"aino_mix_alpha": float("nan")},
+        {"aino_mix_alpha": True},
         {"rms_clip_max": 0.0},
         {"grokfast": 1},
         {"grokfast_alpha": 1.0},

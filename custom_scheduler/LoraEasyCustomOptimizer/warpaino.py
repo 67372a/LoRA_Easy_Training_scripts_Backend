@@ -81,6 +81,11 @@ Hyperparameters added over AINOOpt:
         (default: False)
     nesterov_value (bool): Use a lookahead value momentum for the update
         magnitude branch. (default: False)
+    aino_mix_alpha (float): Inject the current normalized gradient into the
+        value-momentum branch while retaining AINO sign momentum and
+        innovation conditioning. 0.0 preserves the original AINO update.
+        This is an AINO-compatible AdEMAMix-inspired mix, not the exact
+        theory-style Simplified-AdEMAMix recurrence. (default: 0.0)
     came_confidence (bool): Apply CAME-style factorized confidence modulation
         to 2D+ crafted updates. The existing beta3 controls its residual EMA.
         (default: False)
@@ -627,6 +632,7 @@ def _prepare_aino_update_2d(
     came_confidence: bool,
     exp_avg_res_row: torch.Tensor,
     exp_avg_res_col: torch.Tensor,
+    aino_mix_alpha: float = 0.0,
 ) -> torch.Tensor:
     """Run shared 2D AINO tracking and optional CAME confidence modulation."""
     g_norm = _sinkhorn_normalize(g_2d, sinkhorn_steps, eps)
@@ -652,6 +658,11 @@ def _prepare_aino_update_2d(
     value_for_update = momentum
     if nesterov_value:
         value_for_update = beta1 * momentum + (1.0 - beta1) * g_norm
+    if aino_mix_alpha != 0.0:
+        # Conservative AdEMAMix-inspired injection: keep AINO's sign branch
+        # and innovation denominator unchanged while adding a short-timescale
+        # response from the current normalized gradient.
+        value_for_update = value_for_update + aino_mix_alpha * g_norm
     sign_for_update = _select_sign_momentum(
         sign_momentum, g_sign, beta1, nesterov_sign
     )
@@ -690,6 +701,7 @@ def _prepare_aino_update_1d(
     step_t: torch.Tensor,
     nesterov_sign: bool,
     nesterov_value: bool,
+    aino_mix_alpha: float = 0.0,
 ) -> torch.Tensor:
     """Run shared 1D AINO tracking and optional value-momentum lookahead."""
     grad_rms = torch.sqrt(g_data.pow(2).mean() + eps)
@@ -708,6 +720,8 @@ def _prepare_aino_update_1d(
     value_for_update = momentum
     if nesterov_value:
         value_for_update = beta1 * momentum + (1.0 - beta1) * g_norm
+    if aino_mix_alpha != 0.0:
+        value_for_update = value_for_update + aino_mix_alpha * g_norm
     sign_for_update = _select_sign_momentum(
         sign_momentum, g_sign, beta1, nesterov_sign
     )
@@ -859,6 +873,7 @@ class WarpAINO(Optimizer):
         meta_ema_beta: float = 0.85,
         nesterov_sign: bool = False,
         nesterov_value: bool = False,
+        aino_mix_alpha: float = 0.0,
         came_confidence: bool = False,
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
@@ -940,6 +955,16 @@ class WarpAINO(Optimizer):
             or meta_wd < 0.0
         ):
             raise ValueError(f"Invalid meta_wd value: {meta_wd}")
+        if (
+            isinstance(aino_mix_alpha, bool)
+            or not isinstance(aino_mix_alpha, Real)
+            or not math.isfinite(float(aino_mix_alpha))
+            or aino_mix_alpha < 0.0
+        ):
+            raise ValueError(
+                "aino_mix_alpha must be a finite non-negative float, "
+                f"got {aino_mix_alpha}"
+            )
         for name, value in (
             ("cautious_update", cautious_update),
             ("cautious_wd", cautious_wd),
@@ -1041,6 +1066,7 @@ class WarpAINO(Optimizer):
             meta_ema_beta=meta_ema_beta,
             nesterov_sign=nesterov_sign,
             nesterov_value=nesterov_value,
+            aino_mix_alpha=aino_mix_alpha,
             came_confidence=came_confidence,
             rms_clip=rms_clip,
             rms_clip_max=rms_clip_max,
@@ -1201,6 +1227,7 @@ class WarpAINO(Optimizer):
         relative_wd = group.get("relative_wd", False)
         relative_wd_delta = group.get("relative_wd_delta", 1e-3)
         nesterov_value = group["nesterov_value"]
+        aino_mix_alpha = group.get("aino_mix_alpha", 0.0)
         came_confidence = group["came_confidence"]
         exp_avg_res_row = state.get("exp_avg_res_row", state["exp_avg_sq_row"])
         exp_avg_res_col = state.get("exp_avg_res_col", state["exp_avg_sq_col"])
@@ -1245,6 +1272,7 @@ class WarpAINO(Optimizer):
                 came_confidence,
                 exp_avg_res_row,
                 exp_avg_res_col,
+                aino_mix_alpha,
             )
             return update_final, crafted_update
 
@@ -1279,6 +1307,7 @@ class WarpAINO(Optimizer):
                 came_confidence,
                 exp_avg_res_row,
                 exp_avg_res_col,
+                aino_mix_alpha,
             )
             return update_final, crafted_update
 
@@ -1310,6 +1339,7 @@ class WarpAINO(Optimizer):
             came_confidence,
             exp_avg_res_row,
             exp_avg_res_col,
+            aino_mix_alpha,
         )
         return update_final, None
 
@@ -1347,6 +1377,7 @@ class WarpAINO(Optimizer):
             group["rms_clip"],
             group["rms_clip_max"],
             group["nesterov_value"],
+            group.get("aino_mix_alpha", 0.0),
         )
         return update_final, None
     @staticmethod
@@ -1378,6 +1409,7 @@ class WarpAINO(Optimizer):
         came_confidence: bool = False,
         exp_avg_res_row: Optional[torch.Tensor] = None,
         exp_avg_res_col: Optional[torch.Tensor] = None,
+        aino_mix_alpha: float = 0.0,
     ) -> torch.Tensor:
         """Plain AINO 2D core sharing tracking and post-processing helpers."""
         if exp_avg_res_row is None:
@@ -1401,6 +1433,7 @@ class WarpAINO(Optimizer):
             came_confidence,
             exp_avg_res_row,
             exp_avg_res_col,
+            aino_mix_alpha,
         )
         return _finalize_aino_update_2d(
             p_2d,
@@ -1444,6 +1477,7 @@ class WarpAINO(Optimizer):
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
         nesterov_value: bool = False,
+        aino_mix_alpha: float = 0.0,
     ) -> torch.Tensor:
         """Plain AINO 1D core sharing tracking and post-processing helpers."""
         update = _prepare_aino_update_1d(
@@ -1457,6 +1491,7 @@ class WarpAINO(Optimizer):
             step_t,
             nesterov_sign,
             nesterov_value,
+            aino_mix_alpha,
         )
         return _finalize_aino_update_1d(
             p_data,
@@ -1506,6 +1541,7 @@ class WarpAINO(Optimizer):
         came_confidence: bool = False,
         exp_avg_res_row: Optional[torch.Tensor] = None,
         exp_avg_res_col: Optional[torch.Tensor] = None,
+        aino_mix_alpha: float = 0.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Dense-warp 2D core using the shared AINO core stages."""
         if exp_avg_res_row is None:
@@ -1529,6 +1565,7 @@ class WarpAINO(Optimizer):
             came_confidence,
             exp_avg_res_row,
             exp_avg_res_col,
+            aino_mix_alpha,
         )
         update_warped = torch.addmm(update, warp.float(), update)
         update_final = _finalize_aino_update_2d(
@@ -1584,6 +1621,7 @@ class WarpAINO(Optimizer):
         came_confidence: bool = False,
         exp_avg_res_row: Optional[torch.Tensor] = None,
         exp_avg_res_col: Optional[torch.Tensor] = None,
+        aino_mix_alpha: float = 0.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Spectral-warp 2D core using the shared AINO core stages."""
         if exp_avg_res_row is None:
@@ -1607,6 +1645,7 @@ class WarpAINO(Optimizer):
             came_confidence,
             exp_avg_res_row,
             exp_avg_res_col,
+            aino_mix_alpha,
         )
         if spectral_bilateral and spectral_log_right.numel() > 0:
             update_warped = _spectral_apply(
