@@ -70,6 +70,7 @@ from LoraEasyCustomOptimizer.bilatmuonns import BilatMuonNS
 from LoraEasyCustomOptimizer.ainoopt import AINOOpt
 from LoraEasyCustomOptimizer.warpadam import WarpAdam
 from LoraEasyCustomOptimizer.warpaino import WarpAINO
+from LoraEasyCustomOptimizer.simplified_ademamix_aino import SimplifiedAdEMAMixAINO
 
 OPTIMIZER_LIST: List[OPTIMIZER] = [
     ABMOG,
@@ -169,6 +170,7 @@ OPTIMIZER_LIST: List[OPTIMIZER] = [
     TALON,
     WarpAdam,
     WarpAINO,
+    SimplifiedAdEMAMixAINO,
     VSGD,
     WiwiOpt,
 ]
