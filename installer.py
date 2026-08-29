@@ -97,7 +97,7 @@ def _install_flash_attn(uv: str, venv_path: str = "venv") -> None:
 
 def setup_venv(uv: str, venv_path: str = "venv"):
     """Install all backend + sd_scripts packages into the venv using uv."""
-    uv_pip_install(uv, "-U", "typing-extensions==4.15.0", venv_path=venv_path)
+    uv_pip_install(uv, "-U", "typing-extensions~=4.16.0", venv_path=venv_path)
 
     uv_pip_install(
         uv,
