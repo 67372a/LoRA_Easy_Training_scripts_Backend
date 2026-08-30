@@ -113,9 +113,15 @@ import torch
 from torch.optim import Optimizer
 from typing import Tuple, List, Union, Iterable, Optional
 
-GRAM_NEWTON_SCHULZ_2STEP_COEFFS1 = [
-    (1.4897216394163149, -0.5798724169434551, 0.0831346315615072),
-    (2.0181598271548000, -1.5523232773433393, 0.5343894201774000),
+# Unconstrained 3-step Gram Newton-Schulz coefficients (see solve_3step_unconstrained.py).
+# Optimized for the eigenvalue band actually seen after AOL-Gram folding, [0.02, 1.0]:
+#   - true L-inf |f(lambda) - 1| = 1.4e-3 over [0.02, 1.02]
+#   - gentle attenuation below the band (no overshoot for lambda < 0.02)
+#   - intermediate eigenvalues contained (max ~1.0), no explosion for lambda up to 2
+GRAM_NEWTON_SCHULZ_3STEP_COEFFS1 = [
+    (2.2678047488078112, -1.8327591396908354, 0.2292624276639723),
+    (2.0254886937464822, -3.3567745724741336, 1.9890669894630906),
+    (3.1386797309563423, -5.8214244103349868, 4.8151461696576776),
 ]
 
 
@@ -465,14 +471,31 @@ def _writeback_fp32_work_(
     # rounded), without keeping a second FP32 copy of the parameter.
     state["param_compensation"].copy_(work - rounded)
 
+# Cached identity matrices for gram_newton_schulz_3step: avoids a fresh
+# torch.eye allocation (+ memset kernel) on every call for every parameter.
+_GNS_EYE_CACHE: dict = {}
+
+
+def _gns_eye(n: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    key = (device.type, device.index, dtype, n)
+    eye = _GNS_EYE_CACHE.get(key)
+    if eye is None:
+        if len(_GNS_EYE_CACHE) > 32:
+            _GNS_EYE_CACHE.clear()
+        eye = torch.eye(n, dtype=dtype, device=device)
+        _GNS_EYE_CACHE[key] = eye
+    return eye
 
 @torch.no_grad()
-def gram_newton_schulz_2step(
+def gram_newton_schulz_3step(
     M: torch.Tensor,
     eps: float = 1e-7,
     ortho_dtype=torch.bfloat16,
 ) -> torch.Tensor:
-    """2-step Gram Newton-Schulz with pre-optimized unconstrained coefficients."""
+    """3-step Gram Newton-Schulz with pre-optimized unconstrained coefficients.
+
+    Coefficients optimized for the post-AOL-fold eigenvalue band [0.02, 1.0].
+    """
     X = M.to(ortho_dtype)
     transposed = False
     if X.size(0) > X.size(1):
@@ -487,11 +510,11 @@ def gram_newton_schulz_2step(
     R = s * A * s.mT
 
     n, m = X.shape
-    I = torch.eye(n, dtype=X.dtype, device=X.device)
+    I = _gns_eye(n, X.dtype, X.device)
     Q = I
 
     # Apply pre-optimized coefficients
-    for a, b, c in GRAM_NEWTON_SCHULZ_2STEP_COEFFS1:
+    for a, b, c in GRAM_NEWTON_SCHULZ_3STEP_COEFFS1:
         R2 = R @ R
         z = a * I + b * R + c * R2
         Q = Q @ z
@@ -752,7 +775,7 @@ def _finalize_aino_update_2d(
 ) -> torch.Tensor:
     """Orthogonalize, normalize, and apply the shared 2D post-processing."""
     poly_beta3 = _poly_beta(beta3, step_t)
-    O = gram_newton_schulz_2step(
+    O = gram_newton_schulz_3step(
         update_warped, eps=1e-7, ortho_dtype=ortho_dtype
     )
 
