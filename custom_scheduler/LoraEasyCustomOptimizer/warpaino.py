@@ -87,8 +87,11 @@ Hyperparameters added over AINOOpt:
         This is an AINO-compatible AdEMAMix-inspired mix, not the exact
         theory-style Simplified-AdEMAMix recurrence. (default: 0.0)
     came_confidence (bool): Apply CAME-style factorized confidence modulation
-        to 2D+ crafted updates. The existing beta3 controls its residual EMA.
-        (default: False)
+        to 2D+ crafted updates. (default: False)
+    came_beta (float): EMA decay for the CAME confidence residual tracking.
+        Kept separate from ``betas`` so the confidence timescale can be tuned
+        independently of the value-momentum residual EMA (beta3).
+        (default: 0.9999)
     rms_clip (bool): Clamp the post-orthogonalization RMS rescale ratio.
         (default: False)
     rms_clip_max (float): Maximum allowed ``target_rms / current_rms`` ratio.
@@ -633,12 +636,13 @@ def _prepare_aino_update_2d(
     exp_avg_res_row: torch.Tensor,
     exp_avg_res_col: torch.Tensor,
     aino_mix_alpha: float = 0.0,
+    came_beta: float = 0.9999,
 ) -> torch.Tensor:
     """Run shared 2D AINO tracking and optional CAME confidence modulation."""
     g_norm = _sinkhorn_normalize(g_2d, sinkhorn_steps, eps)
     poly_beta1 = _poly_beta(beta1, step_t)
     poly_beta2 = _poly_beta(beta2, step_t)
-    poly_beta3 = _poly_beta(beta3, step_t)
+    poly_came_beta = _poly_beta(came_beta, step_t)
 
     g_sign = g_norm.sign()
     sign_momentum.lerp_(g_sign, 1.0 - beta1)
@@ -675,10 +679,10 @@ def _prepare_aino_update_2d(
         preconditioned = g_norm / denom
         residual = (preconditioned - momentum).pow(2).add_(eps)
         exp_avg_res_row.lerp_(
-            residual.mean(dim=-1, keepdim=True), 1.0 - poly_beta3
+            residual.mean(dim=-1, keepdim=True), 1.0 - poly_came_beta
         )
         exp_avg_res_col.lerp_(
-            residual.mean(dim=-2, keepdim=True), 1.0 - poly_beta3
+            residual.mean(dim=-2, keepdim=True), 1.0 - poly_came_beta
         )
         r_confidence = (
             exp_avg_res_row
@@ -875,6 +879,7 @@ class WarpAINO(Optimizer):
         nesterov_value: bool = False,
         aino_mix_alpha: float = 0.0,
         came_confidence: bool = False,
+        came_beta: float = 0.9999,
         rms_clip: bool = False,
         rms_clip_max: float = 10.0,
         grokfast: bool = False,
@@ -1028,6 +1033,7 @@ class WarpAINO(Optimizer):
             )
         for name, value in (
             ("meta_ema_beta", meta_ema_beta),
+            ("came_beta", came_beta),
             ("rms_clip_max", rms_clip_max),
             ("grokfast_alpha", grokfast_alpha),
             ("grokfast_lamb", grokfast_lamb),
@@ -1040,6 +1046,8 @@ class WarpAINO(Optimizer):
                 raise ValueError(f"{name} must be a finite number, got {value}")
         if not 0.0 <= meta_ema_beta < 1.0:
             raise ValueError(f"meta_ema_beta must be in [0, 1), got {meta_ema_beta}")
+        if not 0.0 <= came_beta < 1.0:
+            raise ValueError(f"came_beta must be in [0, 1), got {came_beta}")
         if rms_clip_max <= 0.0:
             raise ValueError(f"rms_clip_max must be positive, got {rms_clip_max}")
         if not 0.0 <= grokfast_alpha < 1.0:
@@ -1068,6 +1076,7 @@ class WarpAINO(Optimizer):
             nesterov_value=nesterov_value,
             aino_mix_alpha=aino_mix_alpha,
             came_confidence=came_confidence,
+            came_beta=came_beta,
             rms_clip=rms_clip,
             rms_clip_max=rms_clip_max,
             grokfast=grokfast,
@@ -1229,6 +1238,7 @@ class WarpAINO(Optimizer):
         nesterov_value = group["nesterov_value"]
         aino_mix_alpha = group.get("aino_mix_alpha", 0.0)
         came_confidence = group["came_confidence"]
+        came_beta = group.get("came_beta", 0.9999)
         exp_avg_res_row = state.get("exp_avg_res_row", state["exp_avg_sq_row"])
         exp_avg_res_col = state.get("exp_avg_res_col", state["exp_avg_sq_col"])
         spectral_log_left = state.get("spectral_log_left")
@@ -1273,6 +1283,7 @@ class WarpAINO(Optimizer):
                 exp_avg_res_row,
                 exp_avg_res_col,
                 aino_mix_alpha,
+                came_beta,
             )
             return update_final, crafted_update
 
@@ -1308,6 +1319,7 @@ class WarpAINO(Optimizer):
                 exp_avg_res_row,
                 exp_avg_res_col,
                 aino_mix_alpha,
+                came_beta,
             )
             return update_final, crafted_update
 
@@ -1340,6 +1352,7 @@ class WarpAINO(Optimizer):
             exp_avg_res_row,
             exp_avg_res_col,
             aino_mix_alpha,
+            came_beta,
         )
         return update_final, None
 
@@ -1410,6 +1423,7 @@ class WarpAINO(Optimizer):
         exp_avg_res_row: Optional[torch.Tensor] = None,
         exp_avg_res_col: Optional[torch.Tensor] = None,
         aino_mix_alpha: float = 0.0,
+        came_beta: float = 0.9999,
     ) -> torch.Tensor:
         """Plain AINO 2D core sharing tracking and post-processing helpers."""
         if exp_avg_res_row is None:
@@ -1434,6 +1448,7 @@ class WarpAINO(Optimizer):
             exp_avg_res_row,
             exp_avg_res_col,
             aino_mix_alpha,
+            came_beta,
         )
         return _finalize_aino_update_2d(
             p_2d,
@@ -1542,6 +1557,7 @@ class WarpAINO(Optimizer):
         exp_avg_res_row: Optional[torch.Tensor] = None,
         exp_avg_res_col: Optional[torch.Tensor] = None,
         aino_mix_alpha: float = 0.0,
+        came_beta: float = 0.9999,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Dense-warp 2D core using the shared AINO core stages."""
         if exp_avg_res_row is None:
@@ -1566,6 +1582,7 @@ class WarpAINO(Optimizer):
             exp_avg_res_row,
             exp_avg_res_col,
             aino_mix_alpha,
+            came_beta,
         )
         update_warped = torch.addmm(update, warp.float(), update)
         update_final = _finalize_aino_update_2d(
@@ -1622,6 +1639,7 @@ class WarpAINO(Optimizer):
         exp_avg_res_row: Optional[torch.Tensor] = None,
         exp_avg_res_col: Optional[torch.Tensor] = None,
         aino_mix_alpha: float = 0.0,
+        came_beta: float = 0.9999,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Spectral-warp 2D core using the shared AINO core stages."""
         if exp_avg_res_row is None:
@@ -1646,6 +1664,7 @@ class WarpAINO(Optimizer):
             exp_avg_res_row,
             exp_avg_res_col,
             aino_mix_alpha,
+            came_beta,
         )
         if spectral_bilateral and spectral_log_right.numel() > 0:
             update_warped = _spectral_apply(
