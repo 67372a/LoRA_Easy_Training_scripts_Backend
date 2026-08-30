@@ -41,7 +41,7 @@ kept in FP32; ``warp_dtype`` controls dense residual storage.
 
 Hyperparameters added over AINOOpt:
     meta_lr (float): Learning rate for the dense residual meta-update.
-        meta_lr=0 disables the warp (plain AINOOpt). (default: 5e-2)
+        meta_lr=0 disables the warp (plain AINOOpt). (default: 0; recommended start: 5e-2)
     meta_wd (float): Damping on D toward 0 (identity anchor).
         (default: 1e-2)
     warp_mode (str): ``"dense"`` for the original dense residual or
@@ -72,13 +72,6 @@ Hyperparameters added over AINOOpt:
         guaranteeing the discrete update factor ``(1 - lr * weight_decay * scale)``
         remains strictly non-negative and preventing sign-flipping overshoots.
         (default: 0.99)
-    meta_ema (bool): Use a separate state buffer containing an EMA of crafted
-        updates as the previous input to the closure-free warp meta-objective.
-        The learned warp itself remains the instantaneous state. (default: False)
-    meta_ema_beta (float): Decay for the separate crafted-update state EMA.
-        (default: 0.85)
-    nesterov_sign (bool): Use a lookahead sign for the sign-momentum branch.
-        (default: False)
     nesterov_value (bool): Use a lookahead value momentum for the update
         magnitude branch. (default: False)
     aino_mix_alpha (float): Inject the current normalized gradient into the
@@ -92,17 +85,6 @@ Hyperparameters added over AINOOpt:
         Kept separate from ``betas`` so the confidence timescale can be tuned
         independently of the value-momentum residual EMA (beta3).
         (default: 0.9999)
-    rms_clip (bool): Clamp the post-orthogonalization RMS rescale ratio.
-        (default: False)
-    rms_clip_max (float): Maximum allowed ``target_rms / current_rms`` ratio.
-        (default: 10.0)
-    grokfast (bool): Apply GrokFast slow-gradient amplification before
-        Sinkhorn/RMS normalization. (default: False)
-    grokfast_alpha (float): EMA decay for the GrokFast gradient filter.
-        (default: 0.98)
-    grokfast_lamb (float): Slow-gradient amplification factor. (default: 2.0)
-    grokfast_after_step (int): Begin applying GrokFast after this step.
-        (default: 0)
 """
 
 import logging
@@ -251,56 +233,15 @@ def _cautious_mask(update: torch.Tensor, grad: torch.Tensor) -> torch.Tensor:
     mask_mean = mask.mean().clamp_min(1e-3)
     return update * mask / mask_mean
 
-
-def _select_sign_momentum(
-    sign_momentum: torch.Tensor,
-    g_sign: torch.Tensor,
-    beta1: float,
-    nesterov_sign: bool,
-) -> torch.Tensor:
-    """Return ordinary or Nesterov-lookahead sign momentum."""
-    if nesterov_sign:
-        return (beta1 * sign_momentum + (1.0 - beta1) * g_sign).sign()
-    return sign_momentum
-
-
-def _grokfast_filter(
-    state: dict,
-    gradient: torch.Tensor,
-    group: dict,
-) -> torch.Tensor:
-    """Apply the closure-free GrokFast slow-gradient filter when enabled."""
-    if not group.get("grokfast", False):
-        return gradient
-    if state["step"] <= group["grokfast_after_step"]:
-        return gradient
-
-    slow_gradient = state.get("grokfast_ema")
-    if slow_gradient is None or slow_gradient.shape != gradient.shape:
-        slow_gradient = torch.zeros_like(gradient)
-        state["grokfast_ema"] = slow_gradient
-    slow_gradient.lerp_(gradient, 1.0 - group["grokfast_alpha"])
-    return gradient + group["grokfast_lamb"] * slow_gradient
-
-
 def _update_meta_history(
     state: dict,
-    update_cur_2d: torch.Tensor,
-    meta_ema: bool = False,
-    meta_ema_beta: float = 0.85,
+    update_cur_2d: torch.Tensor
 ) -> None:
-    """Store the previous crafted update, optionally using a state EMA.
-
-    ``prev_update`` is deliberately kept separate from the learned warp state.
-    Reusing the existing tensor for the EMA avoids an allocation on every
-    optimizer step and makes the meta-objective use the smoothed transition
-    history without smoothing the operator that is applied to the update.
+    """Store the previous crafted update.
     """
     previous = state.get("prev_update")
     if previous is None or previous.shape != update_cur_2d.shape:
         state["prev_update"] = update_cur_2d.clone()
-    elif meta_ema:
-        previous.lerp_(update_cur_2d, 1.0 - meta_ema_beta)
     else:
         previous.copy_(update_cur_2d)
 
@@ -534,15 +475,9 @@ def _warp_meta_update(
     update_cur_2d: torch.Tensor,
     meta_lr: float,
     meta_wd: float,
-    meta_ema: bool = False,
-    meta_ema_beta: float = 0.85,
     stochastic_fp: bool = True,
 ) -> None:
     """Update the dense residual and its crafted-update history.
-
-    The learned residual remains instantaneous; when enabled, ``meta_ema``
-    smooths only the separate ``prev_update`` state used by the next
-    prediction-loss step.
     """
     warp = state["warp"]
     prev = state.get("prev_update")
@@ -562,7 +497,7 @@ def _warp_meta_update(
         else:
             warp.copy_(warp_fp32)
 
-    _update_meta_history(state, update_cur_2d, meta_ema, meta_ema_beta)
+    _update_meta_history(state, update_cur_2d)
 
 
 def _spectral_meta_left_core(
@@ -652,7 +587,6 @@ def _prepare_aino_update_2d(
     eps: float,
     step_t: torch.Tensor,
     sinkhorn_steps: int,
-    nesterov_sign: bool,
     beta3: float,
     nesterov_value: bool,
     came_confidence: bool,
@@ -690,9 +624,7 @@ def _prepare_aino_update_2d(
         # and innovation denominator unchanged while adding a short-timescale
         # response from the current normalized gradient.
         value_for_update = value_for_update + aino_mix_alpha * g_norm
-    sign_for_update = _select_sign_momentum(
-        sign_momentum, g_sign, beta1, nesterov_sign
-    )
+    sign_for_update = sign_momentum
     update = sign_for_update * (value_for_update.abs() / denom)
 
     if came_confidence:
@@ -726,7 +658,6 @@ def _prepare_aino_update_1d(
     beta2: float,
     eps: float,
     step_t: torch.Tensor,
-    nesterov_sign: bool,
     nesterov_value: bool,
     aino_mix_alpha: float = 0.0,
 ) -> torch.Tensor:
@@ -749,9 +680,7 @@ def _prepare_aino_update_1d(
         value_for_update = beta1 * momentum + (1.0 - beta1) * g_norm
     if aino_mix_alpha != 0.0:
         value_for_update = value_for_update + aino_mix_alpha * g_norm
-    sign_for_update = _select_sign_momentum(
-        sign_momentum, g_sign, beta1, nesterov_sign
-    )
+    sign_for_update = sign_momentum
     return sign_for_update * (value_for_update.abs() / denom)
 
 
@@ -770,8 +699,6 @@ def _finalize_aino_update_2d(
     ortho_dtype: torch.dtype,
     relative_wd: bool,
     relative_wd_delta: float,
-    rms_clip: bool,
-    rms_clip_max: float,
 ) -> torch.Tensor:
     """Orthogonalize, normalize, and apply the shared 2D post-processing."""
     poly_beta3 = _poly_beta(beta3, step_t)
@@ -786,8 +713,6 @@ def _finalize_aino_update_2d(
     target_rms = torch.sqrt(update_warped.pow(2).mean() + eps)
     current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
     rescale = target_rms / (current_rms + eps)
-    if rms_clip:
-        rescale = torch.clamp_max(rescale, rms_clip_max)
     update_final = O_norm * rescale
 
     if cautious_update:
@@ -821,8 +746,6 @@ def _finalize_aino_update_1d(
     cautious_wd: bool,
     relative_wd: bool,
     relative_wd_delta: float,
-    rms_clip: bool,
-    rms_clip_max: float,
 ) -> torch.Tensor:
     """Normalize and apply the shared 1D post-processing."""
     poly_beta3 = _poly_beta(beta3, step_t)
@@ -833,8 +756,6 @@ def _finalize_aino_update_1d(
     target_rms = torch.sqrt(update_warped.pow(2).mean() + eps)
     current_rms = torch.sqrt(O_norm.pow(2).mean() + eps)
     rescale = target_rms / (current_rms + eps)
-    if rms_clip:
-        rescale = torch.clamp_max(rescale, rms_clip_max)
     update_final = O_norm * rescale
 
     if cautious_update:
@@ -874,10 +795,6 @@ class WarpAINO(Optimizer):
     ||P @ u_{t-1} - u_t||^2 / ||u_{t-1}||^2; meta_wd damps D back toward
     0. meta_lr=0 disables the warp (plain AINOOpt).
 
-    With ``meta_ema=True``, a separate ``prev_update`` state buffer stores an
-    EMA of crafted updates for the prediction target. The learned warp itself
-    is never replaced by an EMA.
-
     ``nesterov_value`` optionally applies a lookahead to the value-momentum
     magnitude, while ``came_confidence`` adds CAME-style factorized residual
     confidence modulation before the warp.
@@ -896,25 +813,16 @@ class WarpAINO(Optimizer):
         cautious_wd: bool = True,
         stochastic_fp: bool = True,
         kahan_sum: bool = False,
-        meta_ema: bool = False,
-        meta_ema_beta: float = 0.85,
-        nesterov_sign: bool = False,
         nesterov_value: bool = False,
         aino_mix_alpha: float = 0.0,
         came_confidence: bool = False,
         came_beta: float = 0.9999,
-        rms_clip: bool = False,
-        rms_clip_max: float = 10.0,
-        grokfast: bool = False,
-        grokfast_alpha: float = 0.98,
-        grokfast_lamb: float = 2.0,
-        grokfast_after_step: int = 0,
         compile_step: bool = False,
         foreach: bool = False,
         sinkhorn_steps: int = 5,
         ortho_dtype: torch.dtype = torch.bfloat16,
         eps: float = 1e-16,
-        meta_lr: float = 5e-2,
+        meta_lr: float = 0.0,
         meta_wd: float = 1e-2,
         warp_dtype: torch.dtype = torch.bfloat16,
         warp_mode: str = "spectral",
@@ -1002,12 +910,8 @@ class WarpAINO(Optimizer):
             ("spectral_bilateral", spectral_bilateral),
             ("relative_wd", relative_wd),
             ("kahan_sum", kahan_sum),
-            ("meta_ema", meta_ema),
-            ("nesterov_sign", nesterov_sign),
             ("nesterov_value", nesterov_value),
             ("came_confidence", came_confidence),
-            ("rms_clip", rms_clip),
-            ("grokfast", grokfast),
         ):
             if not isinstance(value, bool):
                 raise ValueError(f"{name} must be bool, got {value}")
@@ -1055,11 +959,7 @@ class WarpAINO(Optimizer):
                 f"got {relative_wd_max_contraction}"
             )
         for name, value in (
-            ("meta_ema_beta", meta_ema_beta),
             ("came_beta", came_beta),
-            ("rms_clip_max", rms_clip_max),
-            ("grokfast_alpha", grokfast_alpha),
-            ("grokfast_lamb", grokfast_lamb),
         ):
             if (
                 isinstance(value, bool)
@@ -1067,23 +967,8 @@ class WarpAINO(Optimizer):
                 or not math.isfinite(float(value))
             ):
                 raise ValueError(f"{name} must be a finite number, got {value}")
-        if not 0.0 <= meta_ema_beta < 1.0:
-            raise ValueError(f"meta_ema_beta must be in [0, 1), got {meta_ema_beta}")
         if not 0.0 <= came_beta < 1.0:
             raise ValueError(f"came_beta must be in [0, 1), got {came_beta}")
-        if rms_clip_max <= 0.0:
-            raise ValueError(f"rms_clip_max must be positive, got {rms_clip_max}")
-        if not 0.0 <= grokfast_alpha < 1.0:
-            raise ValueError(f"grokfast_alpha must be in [0, 1), got {grokfast_alpha}")
-        if (
-            isinstance(grokfast_after_step, bool)
-            or not isinstance(grokfast_after_step, int)
-            or grokfast_after_step < 0
-        ):
-            raise ValueError(
-                "grokfast_after_step must be a non-negative integer, "
-                f"got {grokfast_after_step}"
-            )
 
         defaults = dict(
             lr=lr,
@@ -1093,19 +978,10 @@ class WarpAINO(Optimizer):
             cautious_wd=cautious_wd,
             stochastic_fp=stochastic_fp,
             kahan_sum=kahan_sum,
-            meta_ema=meta_ema,
-            meta_ema_beta=meta_ema_beta,
-            nesterov_sign=nesterov_sign,
             nesterov_value=nesterov_value,
             aino_mix_alpha=aino_mix_alpha,
             came_confidence=came_confidence,
             came_beta=came_beta,
-            rms_clip=rms_clip,
-            rms_clip_max=rms_clip_max,
-            grokfast=grokfast,
-            grokfast_alpha=grokfast_alpha,
-            grokfast_lamb=grokfast_lamb,
-            grokfast_after_step=grokfast_after_step,
             sinkhorn_steps=sinkhorn_steps,
             ortho_dtype=ortho_dtype,
             eps=eps,
@@ -1206,8 +1082,6 @@ class WarpAINO(Optimizer):
         meta_lr: float,
         meta_wd: float,
         spectral_log_bound: float,
-        meta_ema: bool,
-        meta_ema_beta: float,
     ) -> None:
         """Run the compiled spectral meta kernel and update bookkeeping state."""
         prev = state.get("prev_update")
@@ -1238,7 +1112,7 @@ class WarpAINO(Optimizer):
                 log_left.copy_(updated_left)
                 log_right.copy_(updated_right)
 
-        _update_meta_history(state, update_cur_2d, meta_ema, meta_ema_beta)
+        _update_meta_history(state, update_cur_2d)
 
     def _run_core_2d(
         self,
@@ -1265,7 +1139,6 @@ class WarpAINO(Optimizer):
         exp_avg_res_row = state.get("exp_avg_res_row", state["exp_avg_sq_row"])
         exp_avg_res_col = state.get("exp_avg_res_col", state["exp_avg_sq_col"])
         spectral_log_left = state.get("spectral_log_left")
-        g_2d = _grokfast_filter(state, g_2d, group)
 
         if spectral_log_left is not None:
             spectral_log_right = state.get("spectral_log_right")
@@ -1298,9 +1171,6 @@ class WarpAINO(Optimizer):
                 group["spectral_log_bound"],
                 relative_wd,
                 relative_wd_delta,
-                group["nesterov_sign"],
-                group["rms_clip"],
-                group["rms_clip_max"],
                 nesterov_value,
                 came_confidence,
                 exp_avg_res_row,
@@ -1334,9 +1204,6 @@ class WarpAINO(Optimizer):
                 ortho_dtype,
                 relative_wd,
                 relative_wd_delta,
-                group["nesterov_sign"],
-                group["rms_clip"],
-                group["rms_clip_max"],
                 nesterov_value,
                 came_confidence,
                 exp_avg_res_row,
@@ -1367,9 +1234,6 @@ class WarpAINO(Optimizer):
             ortho_dtype,
             relative_wd,
             relative_wd_delta,
-            group["nesterov_sign"],
-            group["rms_clip"],
-            group["rms_clip_max"],
             nesterov_value,
             came_confidence,
             exp_avg_res_row,
@@ -1390,7 +1254,6 @@ class WarpAINO(Optimizer):
         step_t: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         beta1, beta2, beta3 = group["betas"]
-        g_data = _grokfast_filter(state, g_data, group)
         update_final = self._compiled_step_1d(
             p_data,
             g_data,
@@ -1409,9 +1272,6 @@ class WarpAINO(Optimizer):
             group["cautious_wd"],
             group.get("relative_wd", False),
             group.get("relative_wd_delta", 1e-3),
-            group["nesterov_sign"],
-            group["rms_clip"],
-            group["rms_clip_max"],
             group["nesterov_value"],
             group.get("aino_mix_alpha", 0.0),
         )
@@ -1438,9 +1298,6 @@ class WarpAINO(Optimizer):
         ortho_dtype: torch.dtype,
         relative_wd: bool = False,
         relative_wd_delta: float = 1e-3,
-        nesterov_sign: bool = False,
-        rms_clip: bool = False,
-        rms_clip_max: float = 10.0,
         nesterov_value: bool = False,
         came_confidence: bool = False,
         exp_avg_res_row: Optional[torch.Tensor] = None,
@@ -1464,7 +1321,6 @@ class WarpAINO(Optimizer):
             eps,
             step_t,
             sinkhorn_steps,
-            nesterov_sign,
             beta3,
             nesterov_value,
             came_confidence,
@@ -1488,8 +1344,6 @@ class WarpAINO(Optimizer):
             ortho_dtype,
             relative_wd,
             relative_wd_delta,
-            rms_clip,
-            rms_clip_max,
         )
 
     @staticmethod
@@ -1511,9 +1365,6 @@ class WarpAINO(Optimizer):
         cautious_wd: bool,
         relative_wd: bool = False,
         relative_wd_delta: float = 1e-3,
-        nesterov_sign: bool = False,
-        rms_clip: bool = False,
-        rms_clip_max: float = 10.0,
         nesterov_value: bool = False,
         aino_mix_alpha: float = 0.0,
     ) -> torch.Tensor:
@@ -1527,7 +1378,6 @@ class WarpAINO(Optimizer):
             beta2,
             eps,
             step_t,
-            nesterov_sign,
             nesterov_value,
             aino_mix_alpha,
         )
@@ -1545,8 +1395,6 @@ class WarpAINO(Optimizer):
             cautious_wd,
             relative_wd,
             relative_wd_delta,
-            rms_clip,
-            rms_clip_max,
         )
 
     @staticmethod
@@ -1572,9 +1420,6 @@ class WarpAINO(Optimizer):
         ortho_dtype: torch.dtype,
         relative_wd: bool = False,
         relative_wd_delta: float = 1e-3,
-        nesterov_sign: bool = False,
-        rms_clip: bool = False,
-        rms_clip_max: float = 10.0,
         nesterov_value: bool = False,
         came_confidence: bool = False,
         exp_avg_res_row: Optional[torch.Tensor] = None,
@@ -1598,7 +1443,6 @@ class WarpAINO(Optimizer):
             eps,
             step_t,
             sinkhorn_steps,
-            nesterov_sign,
             beta3,
             nesterov_value,
             came_confidence,
@@ -1623,8 +1467,6 @@ class WarpAINO(Optimizer):
             ortho_dtype,
             relative_wd,
             relative_wd_delta,
-            rms_clip,
-            rms_clip_max,
         )
         return update_final, update
 
@@ -1654,9 +1496,6 @@ class WarpAINO(Optimizer):
         spectral_log_bound: float,
         relative_wd: bool = False,
         relative_wd_delta: float = 1e-3,
-        nesterov_sign: bool = False,
-        rms_clip: bool = False,
-        rms_clip_max: float = 10.0,
         nesterov_value: bool = False,
         came_confidence: bool = False,
         exp_avg_res_row: Optional[torch.Tensor] = None,
@@ -1680,7 +1519,6 @@ class WarpAINO(Optimizer):
             eps,
             step_t,
             sinkhorn_steps,
-            nesterov_sign,
             beta3,
             nesterov_value,
             came_confidence,
@@ -1716,8 +1554,6 @@ class WarpAINO(Optimizer):
             ortho_dtype,
             relative_wd,
             relative_wd_delta,
-            rms_clip,
-            rms_clip_max,
         )
         return update_final, update
 
@@ -1826,8 +1662,6 @@ class WarpAINO(Optimizer):
         eps = group["eps"]
         meta_lr = group["meta_lr"]
         meta_wd = group["meta_wd"]
-        meta_ema = group["meta_ema"]
-        meta_ema_beta = group["meta_ema_beta"]
         spectral_bilateral = group["spectral_bilateral"]
         spectral_log_bound = group["spectral_log_bound"]
         relative_wd = group.get("relative_wd", False)
@@ -1897,8 +1731,6 @@ class WarpAINO(Optimizer):
                         meta_lr,
                         meta_wd,
                         spectral_log_bound,
-                        meta_ema,
-                        meta_ema_beta,
                     )
                 elif warp is not None:
                     _warp_meta_update(
@@ -1906,8 +1738,6 @@ class WarpAINO(Optimizer):
                         crafted_update,
                         meta_lr,
                         meta_wd,
-                        meta_ema,
-                        meta_ema_beta,
                         stochastic_fp=stochastic_fp,
                     )
 
@@ -1943,8 +1773,6 @@ class WarpAINO(Optimizer):
         eps = group["eps"]
         meta_lr = group["meta_lr"]
         meta_wd = group["meta_wd"]
-        meta_ema = group["meta_ema"]
-        meta_ema_beta = group["meta_ema_beta"]
         spectral_bilateral = group["spectral_bilateral"]
         spectral_log_bound = group["spectral_log_bound"]
         relative_wd = group.get("relative_wd", False)
@@ -2078,8 +1906,6 @@ class WarpAINO(Optimizer):
                     meta_lr,
                     meta_wd,
                     spectral_log_bound,
-                    meta_ema,
-                    meta_ema_beta,
                 )
             else:
                 _warp_meta_update(
@@ -2087,7 +1913,5 @@ class WarpAINO(Optimizer):
                     crafted_update,
                     meta_lr,
                     meta_wd,
-                    meta_ema,
-                    meta_ema_beta,
                     stochastic_fp=stochastic_fp,
                 )
