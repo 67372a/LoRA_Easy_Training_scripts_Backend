@@ -258,10 +258,13 @@ class OCGOptV2(Optimizer):
             # Spectral clipping will be inlined into the compiled full-step graph;
             # no need for a separately compiled spectral_clip wrapper.
             self.clip_func = None
+            self._clip_func_compiled = False
         elif spectral_clip_compile:
             self.clip_func = torch.compile(gram_newton_schulz_2step, dynamic=True, mode="default")
+            self._clip_func_compiled = True
         else:
             self.clip_func = gram_newton_schulz_2step
+            self._clip_func_compiled = False
 
         if spectral_clip_dtype is None:
             spectral_clip_dtype = torch.bfloat16
@@ -300,6 +303,35 @@ class OCGOptV2(Optimizer):
     # ------------------------------------------------------------------
     # Compile helpers
     # ------------------------------------------------------------------
+
+    def _call_clip_func(self, *args, **kwargs):
+        r"""Call the spectral clip function with a one-time fallback to the
+        uncompiled implementation.
+
+        ``torch.compile`` failures (e.g. Triton/Inductor kernel compilation or
+        loading errors on Windows) surface at the *first* call of the compiled
+        function, not at decoration time.  When that happens the optimizer
+        would otherwise crash mid-training.  On the first failure this method
+        logs a one-time warning and permanently swaps ``self.clip_func`` for
+        the uncompiled ``gram_newton_schulz_2step``, so training keeps running
+        (just without the compile speedup).  Failures of the uncompiled
+        implementation itself are re-raised.
+        """
+        if not self._clip_func_compiled:
+            return self.clip_func(*args, **kwargs)
+
+        try:
+            return self.clip_func(*args, **kwargs)
+        except Exception as e:
+            logging.warning(
+                "OCGOptV2: compiled spectral clip (torch.compile) failed and is "
+                f"disabled for the remainder of training. Falling back to the "
+                f"uncompiled gram_newton_schulz_2step. This warning is shown "
+                f"once. Error: {e!r}"
+            )
+            self.clip_func = gram_newton_schulz_2step
+            self._clip_func_compiled = False
+            return self.clip_func(*args, **kwargs)
 
     def _compile_core_fns(self) -> None:
         r"""Lazily compile the full per-parameter step with torch.compile."""
@@ -1010,7 +1042,7 @@ class OCGOptV2(Optimizer):
                 if flip:
                     exp_avg_2d = exp_avg_2d.T
 
-                exp_avg_2d_o = self.clip_func(exp_avg_2d, ortho_dtype=ortho_dtype)
+                exp_avg_2d_o = self._call_clip_func(exp_avg_2d, ortho_dtype=ortho_dtype)
 
                 if spectral_adaptive:
                     scale_factor = (exp_avg_2d_o * exp_avg_2d).sum()
@@ -1293,7 +1325,7 @@ class OCGOptV2(Optimizer):
                     if flip:
                         exp_avg_2d = exp_avg_2d.T # Flip if first dim is larger
 
-                    exp_avg_2d_o = self.clip_func(exp_avg_2d, ortho_dtype=spectral_clip_dtype)
+                    exp_avg_2d_o = self._call_clip_func(exp_avg_2d, ortho_dtype=spectral_clip_dtype)
 
                     if spectral_adaptive:
                         scale_factor = (exp_avg_2d_o * exp_avg_2d).sum()
